@@ -1,228 +1,240 @@
 "use client";
 import React from "react";
-import dynamic from "next/dynamic";
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
-import {
-  computeTotals,
-  bucketizeSpecials,
-  spendBySpender,
-  recurringCandidates,
-  type MinimalTx,
-} from "@/lib/metrics";
+import { computeTotals } from "@/lib/metrics";
+import { currentStatementMeta, type Period } from "@/lib/period";
+import { readIndex, readCurrentId } from "@/lib/statements";
+import { readCatRules, applyCategoryRulesTo } from "@/lib/categoryRules";
+import { applyAlias } from "@/lib/aliases";
 
-const money = (n: number) =>
-  n.toLocaleString(undefined, { style: "currency", currency: "USD" });
+/**
+ * Build the rows for the requested period.
+ * - CURRENT → just use live provider transactions (already include overrides + latest rules).
+ * - YTD     → aggregate cachedTx from all statements in the same year up to the current month,
+ *             then re-apply the latest rules (so new rules affect prior months). If a statement
+ *             is missing cachedTx, it will be skipped (visit it once in Reconciler to cache).
+ */
+function usePeriodRows(period: Period, liveRows: any[]) {
+  const meta = currentStatementMeta();
 
-// Lazy chart components (no SSR)
-const { Pie, Bar } = {
-  Pie: dynamic(
-    async () => {
-      const m = await import("react-chartjs-2");
-      await import("chart.js/auto"); // registers scales/controllers
-      return m.Pie;
-    },
-    { ssr: false }
-  ),
-  Bar: dynamic(
-    async () => {
-      const m = await import("react-chartjs-2");
-      await import("chart.js/auto");
-      return m.Bar;
-    },
-    { ssr: false }
-  ),
-};
+  return React.useMemo(() => {
+    if (!meta || period === "CURRENT") return liveRows;
 
-export default function Dashboard() {
+    const idx = readIndex();
+    const rules = readCatRules();
+
+    const all: any[] = [];
+    for (const s of Object.values(idx)) {
+      if (!s) continue;
+      if (s.stmtYear !== meta.year) continue;
+      if (s.stmtMonth > meta.month) continue;
+      if (Array.isArray(s.cachedTx)) {
+        all.push(...s.cachedTx);
+      } else {
+        // If not cached, include current live rows for the current statement as a fallback
+        const curId = readCurrentId();
+        if (curId && s.id === curId) all.push(...liveRows);
+      }
+    }
+
+    // Re-apply latest alias+rules so categories reflect your newest rules across months.
+    const reapplied = applyCategoryRulesTo(rules, all, applyAlias);
+    return reapplied as typeof liveRows;
+  }, [period, liveRows, meta]);
+}
+
+export default function DashboardPage() {
   const { transactions, inputs } = useReconcilerSelectors();
+  const meta = currentStatementMeta();
+  const [period, setPeriod] = React.useState<Period>("CURRENT");
 
-  // Tell metrics about overrides (if present)
-  const rows = transactions as unknown as MinimalTx[];
-
-  const t = computeTotals(rows, inputs.beginningBalance ?? 0);
-  const specials = bucketizeSpecials(rows);
-  const bySpender = spendBySpender(rows);
-  const recur = recurringCandidates(rows);
-
-  const topCats = Object.entries(t.byCategory)
-    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
-    .slice(0, 8);
-
-  const otherCatsTotal = Object.entries(t.byCategory)
-    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
-    .slice(8)
-    .reduce((s, [, v]) => s + v, 0);
-
-  const pieLabels = [
-    ...topCats.map(([c]) => c),
-    ...(otherCatsTotal ? ["Other"] : []),
-  ];
-  const pieValues = [
-    ...topCats.map(([, v]) => Math.abs(v)),
-    ...(otherCatsTotal ? [Math.abs(otherCatsTotal)] : []),
-  ];
-
-  const barLabels = Object.keys(specials);
-  const barValues = Object.values(specials);
-
-  // Pass everything through; computeTotals relies on user/cardLast4
+  const viewRows = usePeriodRows(period, transactions);
   const totals = React.useMemo(
-    () => computeTotals(transactions, inputs.beginningBalance ?? 0),
-    [transactions, inputs]
+    () => computeTotals(viewRows, inputs.beginningBalance ?? 0),
+    [viewRows, inputs]
   );
 
   const money = (n: number) =>
     n.toLocaleString(undefined, { style: "currency", currency: "USD" });
 
+  // “True Spend” excludes Transfers, Debt, Cash Back
+  const trueSpend = React.useMemo(() => {
+    const EXCLUDE = new Set(["Transfers", "Debt", "Cash Back"]);
+    return viewRows
+      .filter((r) => r.amount < 0)
+      .filter(
+        (r) =>
+          !EXCLUDE.has(
+            (r.categoryOverride ?? r.category ?? "Uncategorized").trim()
+          )
+      )
+      .reduce((s, r) => s + Math.abs(r.amount), 0);
+  }, [viewRows]);
+
+  const cashBack = React.useMemo(
+    () =>
+      viewRows
+        .filter(
+          (r) =>
+            ((r.categoryOverride ?? r.category) || "").trim().toLowerCase() ===
+            "cash back"
+        )
+        .reduce((s, r) => s + Math.abs(r.amount < 0 ? r.amount : 0), 0),
+    [viewRows]
+  );
+
+  // Spend by spender (only expenses)
+  const bySpender = React.useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const r of viewRows) {
+      if (r.amount >= 0) continue;
+      const who =
+        r.user === "Mike" || r.user === "Beth"
+          ? r.user
+          : r.cardLast4 === "5280"
+          ? "Mike"
+          : r.cardLast4 === "0161"
+          ? "Beth"
+          : "Unknown";
+      map[who] = (map[who] ?? 0) + Math.abs(r.amount);
+    }
+    return map;
+  }, [viewRows]);
+
+  // Top categories (expenses only)
+  const topCats = React.useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const r of viewRows) {
+      if (r.amount >= 0) continue;
+      const cat = (r.categoryOverride ?? r.category ?? "Uncategorized").trim();
+      m[cat] = (m[cat] ?? 0) + Math.abs(r.amount);
+    }
+    return Object.entries(m)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8);
+  }, [viewRows]);
+
   return (
-    <div className="mx-auto max-w-6xl p-6 space-y-8">
-      <h1 className="text-2xl font-bold">Overview</h1>
+    <div className="mx-auto max-w-6xl p-6 space-y-6">
+      {/* Header with period + statement chip */}
+      <div className="flex flex-wrap items-center gap-3">
+        <h1 className="text-2xl font-semibold">Dashboard</h1>
+        {meta && (
+          <span className="text-xs px-2 py-1 rounded border bg-gray-50 dark:bg-gray-900">
+            Viewing:{" "}
+            {period === "CURRENT"
+              ? meta.label
+              : `YTD ${meta.year} (Jan–${meta.label.split(" ")[0]})`}
+          </span>
+        )}
+        <div className="ml-auto flex items-center gap-2">
+          <span className="text-sm">Period:</span>
+          <div className="inline-flex rounded border overflow-hidden">
+            <button
+              className={`px-3 py-1 text-sm ${
+                period === "CURRENT"
+                  ? "bg-emerald-600 text-white"
+                  : "hover:bg-gray-50 dark:hover:bg-gray-800"
+              }`}
+              onClick={() => setPeriod("CURRENT")}
+            >
+              Current
+            </button>
+            <button
+              className={`px-3 py-1 text-sm ${
+                period === "YTD"
+                  ? "bg-emerald-600 text-white"
+                  : "hover:bg-gray-50 dark:hover:bg-gray-800"
+              }`}
+              onClick={() => setPeriod("YTD")}
+            >
+              YTD
+            </button>
+          </div>
+        </div>
+      </div>
 
-      <section className="grid md:grid-cols-5 gap-4">
-        <Card title="Income" value={money(t.income)} tone="ok" />
-        <Card title="Expenses" value={money(t.expense)} tone="bad" />
+      {/* Summary cards (use viewRows-derived totals) */}
+      <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <Card label="Income" value={money(totals.income)} />
+        <Card label="Expenses" value={money(totals.expense)} />
+        <Card label="Net" value={money(totals.income - totals.expense)} />
         <Card
-          title="Net"
-          value={money(t.net)}
-          tone={t.net >= 0 ? "ok" : "bad"}
+          label="True Spend"
+          value={money(trueSpend)}
+          hint="Excludes Transfers, Debt, Cash Back"
         />
-        <Card
-          title="True Spend"
-          value={money(t.trueSpend)}
-          tone="warn"
-          subtitle="excludes transfers & debt"
-        />
-        <Card title="Cash Back" value={money(t.cashBack)} tone="info" />
       </section>
 
-      {/* Category pie + Specials bar */}
-      <section className="grid md:grid-cols-2 gap-6">
+      {/* Extras */}
+      <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="rounded border p-4">
-          <h3 className="font-semibold mb-3">Spend by Category</h3>
-          <div className="h-80">
-            {pieValues.length ? (
-              <Pie
-                data={{
-                  labels: pieLabels,
-                  datasets: [{ data: pieValues }],
-                }}
-              />
-            ) : (
-              <div className="text-sm text-gray-500">No data.</div>
-            )}
-          </div>
-          <p className="text-xs text-gray-500 mt-2">
-            Top 8 categories shown; the rest grouped as “Other”. Uses manual
-            overrides when present.
-          </p>
+          <h3 className="font-semibold mb-2">Cash Back</h3>
+          <div className="text-2xl font-semibold">{money(cashBack)}</div>
         </div>
 
-        <div className="rounded border p-4">
-          <h3 className="font-semibold mb-3">
-            Amazon • Subscriptions • Fast Food
-          </h3>
-          <div className="h-80">
-            <Bar
-              data={{
-                labels: barLabels,
-                datasets: [{ data: barValues }],
-              }}
-              options={{
-                plugins: { legend: { display: false } },
-                scales: { y: { beginAtZero: true } },
-              }}
-            />
-          </div>
-          <p className="text-xs text-gray-500 mt-2">
-            Only spending (negative amounts). “Fast Food” is detected by popular
-            chain names.
-          </p>
+        <div className="rounded border p-4 lg:col-span-2">
+          <h3 className="font-semibold mb-2">Spend by Spender</h3>
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 dark:bg-gray-900">
+              <tr>
+                <th className="text-left p-2">Person</th>
+                <th className="text-right p-2">Spend</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(bySpender).map(([who, amt]) => (
+                <tr key={who} className="border-t">
+                  <td className="p-2">{who}</td>
+                  <td className="p-2 text-right">{money(amt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </section>
 
-      {/* By Spender */}
       <section className="rounded border p-4">
-        <h3 className="font-semibold mb-3">Spend by Spender</h3>
+        <h3 className="font-semibold mb-2">Top Categories (Expenses)</h3>
         <table className="w-full text-sm">
           <thead className="bg-gray-50 dark:bg-gray-900">
             <tr>
-              <th className="text-left p-2">Person</th>
-              <th className="text-right p-2">Spend</th>
+              <th className="text-left p-2">Category</th>
+              <th className="text-right p-2">Amount</th>
             </tr>
           </thead>
           <tbody>
-            {Object.entries(totals.bySpender).map(([who, amt]) => (
-              <tr key={who} className="border-t">
-                <td className="p-2">{who}</td>
+            {topCats.map(([cat, amt]) => (
+              <tr key={cat} className="border-t">
+                <td className="p-2">{cat}</td>
                 <td className="p-2 text-right">{money(amt)}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </section>
-
-      {/* Recurring bills */}
-      <section className="rounded border p-4">
-        <h3 className="font-semibold mb-2">Likely Recurring Bills</h3>
-        {recur.length ? (
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 dark:bg-gray-800">
-              <tr>
-                <th className="text-left p-2">Bill</th>
-                <th className="text-right p-2">Avg Amount</th>
-                <th className="text-right p-2">Count</th>
-                <th className="text-right p-2">Draft Day</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recur.map((r) => (
-                <tr key={r.name} className="border-t">
-                  <td className="p-2">{r.name}</td>
-                  <td className="p-2 text-right">{money(r.avg)}</td>
-                  <td className="p-2 text-right">{r.count}</td>
-                  <td className="p-2 text-right">{r.draftDay ?? "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <div className="text-sm text-gray-500">
-            No recurring candidates detected yet.
-          </div>
-        )}
-        <p className="text-xs text-gray-500 mt-2">
-          Heuristic based on Subscriptions/Housing/Utilities/Insurance/Debt and
-          most common posting day.
-        </p>
-      </section>
     </div>
   );
 }
 
 function Card({
-  title,
+  label,
   value,
-  tone,
-  subtitle,
+  hint,
 }: {
-  title: string;
+  label: string;
   value: string;
-  tone: "ok" | "bad" | "warn" | "info";
-  subtitle?: string;
+  hint?: string;
 }) {
-  const styles =
-    tone === "ok"
-      ? "border-emerald-300 bg-emerald-50 dark:bg-emerald-900/20"
-      : tone === "bad"
-      ? "border-red-300 bg-red-50 dark:bg-red-900/20"
-      : tone === "warn"
-      ? "border-amber-300 bg-amber-50 dark:bg-amber-900/20"
-      : "border-sky-300 bg-sky-50 dark:bg-sky-900/20";
   return (
-    <div className={`rounded border p-4 ${styles}`}>
-      <div className="text-sm opacity-80">{title}</div>
+    <div className="rounded border p-4">
+      <div className="text-sm text-gray-500 dark:text-gray-400">{label}</div>
       <div className="text-xl font-semibold">{value}</div>
-      {subtitle && <div className="text-xs opacity-70">{subtitle}</div>}
+      {hint && (
+        <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+          {hint}
+        </div>
+      )}
     </div>
   );
 }

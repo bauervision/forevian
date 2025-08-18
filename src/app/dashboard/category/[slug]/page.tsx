@@ -1,117 +1,213 @@
 "use client";
-import { useMemo } from "react";
+import React from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
-import { type MinimalTx, effectiveCategory } from "@/lib/metrics";
-import { unslug } from "@/lib/slug";
+import { currentStatementMeta, type Period } from "@/lib/period";
+import { readIndex, readCurrentId } from "@/lib/statements";
+import { readCatRules, applyCategoryRulesTo } from "@/lib/categoryRules";
+import { applyAlias } from "@/lib/aliases";
 
+function unslug(s: string) {
+  try {
+    return decodeURIComponent(String(s)).replace(/-/g, " ");
+  } catch {
+    return String(s).replace(/-/g, " ");
+  }
+}
 const money = (n: number) =>
   n.toLocaleString(undefined, { style: "currency", currency: "USD" });
 
-// Simple merchant extractor: known brands first, else a cleaned stem from description
-const BRAND_RX: Array<[RegExp, string]> = [
-  [/chick-?fil-?a/i, "Chick-fil-A"],
-  [/starbucks/i, "Starbucks"],
-  [/mcdonald/i, "McDonald's"],
-  [/wendy/i, "Wendy's"],
-  [/taco\s*b(?:ell)?/i, "Taco Bell"],
-  [/kfc\b/i, "KFC"],
-  [/chipotle/i, "Chipotle"],
-  [/panera/i, "Panera"],
-  [/panda\s*express/i, "Panda Express"],
-  [/arby/i, "Arby's"],
-  [/domino/i, "Domino's"],
-  [/pizza\s*hut/i, "Pizza Hut"],
-  [/little\s*caesars/i, "Little Caesars"],
-  [/jersey\s*mike/i, "Jersey Mike's"],
-  [/jimmy\s*john/i, "Jimmy John's"],
-  [/sonic/i, "Sonic"],
-  [/five\s*guys/i, "Five Guys"],
-  [/zaxby/i, "Zaxby's"],
-  [/popeyes/i, "Popeyes"],
-  [/qdoba/i, "Qdoba"],
-  [/harris\s*te(?:eter)?|harris\s*te\b/i, "Harris Teeter"],
-  [/amazon|amzn\.com\/bill|amazon\s*mktpl|prime\s*video/i, "Amazon"],
-];
+/**
+ * Build period rows the same way as the Dashboard to keep things consistent.
+ */
+function usePeriodRows(period: Period, liveRows: any[]) {
+  const meta = currentStatementMeta();
 
-function merchantKey(desc: string) {
-  for (const [rx, name] of BRAND_RX) if (rx.test(desc)) return name;
-  // fallback: strip boilerplate and take first ~4 words
-  let s = desc
-    .replace(/purchase.*authorized on \d{1,2}\/\d{1,2}/i, "")
-    .replace(/\bCard\s*\d{4}\b.*/i, "")
-    .replace(/\b[P|S]\d{6,}\b.*/i, "")
-    .trim();
-  const words = s.split(/\s+/).slice(0, 4).join(" ");
-  return words || "Unknown";
+  return React.useMemo(() => {
+    if (!meta || period === "CURRENT") return liveRows;
+
+    const idx = readIndex();
+    const rules = readCatRules();
+
+    const all: any[] = [];
+    for (const s of Object.values(idx)) {
+      if (!s) continue;
+      if (s.stmtYear !== meta.year) continue;
+      if (s.stmtMonth > meta.month) continue;
+      if (Array.isArray(s.cachedTx)) {
+        all.push(...s.cachedTx);
+      } else {
+        const curId = readCurrentId();
+        if (curId && s.id === curId) all.push(...liveRows);
+      }
+    }
+
+    const reapplied = applyCategoryRulesTo(rules, all, applyAlias);
+    return reapplied as typeof liveRows;
+  }, [period, liveRows, meta]);
 }
 
 export default function CategoryDetailPage() {
   const params = useParams<{ slug: string }>();
-  const cat = unslug(params.slug);
+  const catName = unslug(params.slug || "").trim();
+  const meta = currentStatementMeta();
+  const [period, setPeriod] = React.useState<Period>("CURRENT");
+
   const { transactions } = useReconcilerSelectors();
+  const viewRows = usePeriodRows(period, transactions);
 
-  const rowsAll = transactions as unknown as MinimalTx[];
-  const rows = rowsAll.filter((r) => {
-    if (cat.toLowerCase() === "income") return r.amount > 0; // deposits only
-    return effectiveCategory(r) === cat;
-  });
+  // Filter rows by category (override first), expenses only by default
+  const rows = React.useMemo(() => {
+    return viewRows.filter((r) => {
+      const cat = (r.categoryOverride ?? r.category ?? "Uncategorized").trim();
+      return cat.toLowerCase() === catName.toLowerCase();
+    });
+  }, [viewRows, catName]);
 
-  const groups = useMemo(() => {
-    const m = new Map<string, number>();
+  // Merchant rollup (use alias label where possible)
+  const byMerchant = React.useMemo(() => {
+    const m: Record<string, number> = {};
     for (const r of rows) {
-      if (r.amount >= 0) continue; // spend only
-      const d = r.description ?? "";
-      const k = merchantKey(d);
-      m.set(k, (m.get(k) ?? 0) + Math.abs(r.amount));
+      const label =
+        applyAlias(r.description || "") ||
+        r.merchant ||
+        // last resort: first words of description
+        (r.description || "").split(/\s+/).slice(0, 3).join(" ");
+      const amt = Math.abs(r.amount < 0 ? r.amount : 0);
+      m[label] = (m[label] ?? 0) + amt;
     }
-    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
+    return Object.entries(m).sort((a, b) => b[1] - a[1]);
   }, [rows]);
 
-  const total = groups.reduce((s, [, v]) => s + v, 0);
+  const total = rows.reduce(
+    (s, r) => s + Math.abs(r.amount < 0 ? r.amount : 0),
+    0
+  );
 
   return (
     <div className="mx-auto max-w-6xl p-6 space-y-6">
-      <div className="flex items-center gap-3">
-        <Link href="/dashboard/category" className="text-sm hover:underline">
-          ← Categories
-        </Link>
-        <h1 className="text-2xl font-bold">{cat}</h1>
-      </div>
-
-      <div className="rounded border p-4">
-        <div className="text-sm text-gray-600 dark:text-gray-300 mb-2">
-          Total Spend
+      <div className="flex flex-wrap items-center gap-3">
+        <h1 className="text-2xl font-semibold">{catName}</h1>
+        {meta && (
+          <span className="text-xs px-2 py-1 rounded border bg-gray-50 dark:bg-gray-900">
+            Viewing:{" "}
+            {period === "CURRENT"
+              ? meta.label
+              : `YTD ${meta.year} (Jan–${meta.label.split(" ")[0]})`}
+          </span>
+        )}
+        <div className="ml-auto flex items-center gap-2">
+          <span className="text-sm">Period:</span>
+          <div className="inline-flex rounded border overflow-hidden">
+            <button
+              className={`px-3 py-1 text-sm ${
+                period === "CURRENT"
+                  ? "bg-emerald-600 text-white"
+                  : "hover:bg-gray-50 dark:hover:bg-gray-800"
+              }`}
+              onClick={() => setPeriod("CURRENT")}
+            >
+              Current
+            </button>
+            <button
+              className={`px-3 py-1 text-sm ${
+                period === "YTD"
+                  ? "bg-emerald-600 text-white"
+                  : "hover:bg-gray-50 dark:hover:bg-gray-800"
+              }`}
+              onClick={() => setPeriod("YTD")}
+            >
+              YTD
+            </button>
+          </div>
         </div>
-        <div className="text-xl font-semibold">{money(total)}</div>
       </div>
 
-      <div className="rounded border">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 dark:bg-gray-800">
-            <tr>
-              <th className="text-left p-2">Merchant</th>
-              <th className="text-right p-2">Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            {groups.map(([name, amt]) => (
-              <tr key={name} className="border-t">
-                <td className="p-2">{name}</td>
-                <td className="p-2 text-right">{money(amt)}</td>
-              </tr>
-            ))}
-            {groups.length === 0 && (
+      {/* Totals */}
+      <section className="rounded border p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">
+              Total spend
+            </div>
+            <div className="text-2xl font-semibold">{money(total)}</div>
+          </div>
+          <Link
+            href="/dashboard"
+            className="text-sm underline text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"
+          >
+            ← Back to Dashboard
+          </Link>
+        </div>
+      </section>
+
+      {/* Merchant rollup */}
+      <section className="rounded border p-4">
+        <h3 className="font-semibold mb-2">By Merchant</h3>
+        {byMerchant.length === 0 ? (
+          <div className="text-sm text-gray-500 dark:text-gray-400">
+            No transactions in this period.
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 dark:bg-gray-900">
               <tr>
-                <td className="p-4" colSpan={2}>
-                  No spend in this category.
-                </td>
+                <th className="text-left p-2">Merchant</th>
+                <th className="text-right p-2">Amount</th>
               </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {byMerchant.map(([m, amt]) => (
+                <tr key={m} className="border-t">
+                  <td className="p-2">{m}</td>
+                  <td className="p-2 text-right">{money(amt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      {/* Raw transactions (optional) */}
+      <section className="rounded border p-4">
+        <h3 className="font-semibold mb-2">Transactions</h3>
+        {rows.length === 0 ? (
+          <div className="text-sm text-gray-500 dark:text-gray-400">
+            No transactions.
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 dark:bg-gray-900">
+              <tr>
+                <th className="text-left p-2">Date</th>
+                <th className="text-left p-2">Description</th>
+                <th className="text-left p-2">User</th>
+                <th className="text-right p-2">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id} className="border-t">
+                  <td className="p-2">{r.date || ""}</td>
+                  <td className="p-2">{r.description}</td>
+                  <td className="p-2">
+                    {r.user ||
+                      (r.cardLast4 === "5280"
+                        ? "Mike"
+                        : r.cardLast4 === "0161"
+                        ? "Beth"
+                        : "Unknown")}
+                  </td>
+                  <td className="p-2 text-right">
+                    {money(Math.abs(r.amount))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
     </div>
   );
 }
