@@ -39,9 +39,8 @@ function catOf(r: MinimalTx) {
 }
 
 export function effectiveCategory(r: MinimalTx): string {
-  const base = catOf(r);
-  if (r.amount > 0 && !CASH_BACK_CAT.test(base)) return "Income";
-  return base;
+  const base = (r.categoryOverride ?? r.category ?? "Uncategorized").trim();
+  return r.amount > 0 && !/cash\s*back/i.test(base) ? "Income" : base;
 }
 
 export function computeTotals(rows: MinimalTx[], opening = 0): Totals {

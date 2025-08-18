@@ -65,6 +65,15 @@ export default function Dashboard() {
   const barLabels = Object.keys(specials);
   const barValues = Object.values(specials);
 
+  // Pass everything through; computeTotals relies on user/cardLast4
+  const totals = React.useMemo(
+    () => computeTotals(transactions, inputs.beginningBalance ?? 0),
+    [transactions, inputs]
+  );
+
+  const money = (n: number) =>
+    n.toLocaleString(undefined, { style: "currency", currency: "USD" });
+
   return (
     <div className="mx-auto max-w-6xl p-6 space-y-8">
       <h1 className="text-2xl font-bold">Overview</h1>
@@ -133,27 +142,23 @@ export default function Dashboard() {
 
       {/* By Spender */}
       <section className="rounded border p-4">
-        <h3 className="font-semibold mb-2">Spend by Spender</h3>
+        <h3 className="font-semibold mb-3">Spend by Spender</h3>
         <table className="w-full text-sm">
-          <thead className="bg-gray-50 dark:bg-gray-800">
+          <thead className="bg-gray-50 dark:bg-gray-900">
             <tr>
               <th className="text-left p-2">Person</th>
               <th className="text-right p-2">Spend</th>
             </tr>
           </thead>
           <tbody>
-            {Object.entries(bySpender).map(([name, amt]) => (
-              <tr key={name} className="border-t">
-                <td className="p-2">{name}</td>
+            {Object.entries(totals.bySpender).map(([who, amt]) => (
+              <tr key={who} className="border-t">
+                <td className="p-2">{who}</td>
                 <td className="p-2 text-right">{money(amt)}</td>
               </tr>
             ))}
           </tbody>
         </table>
-        <p className="text-xs text-gray-500 mt-2">
-          Inferred from “Card 5280” → Mike, “Card 0161” → Beth. Adjust
-          categories as needed in the Reconciler.
-        </p>
       </section>
 
       {/* Recurring bills */}
