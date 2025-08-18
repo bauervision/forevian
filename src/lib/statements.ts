@@ -10,6 +10,8 @@ export type StatementSnapshot = {
     totalDeposits?: number;
     totalWithdrawals?: number;
   };
+  // store parsed rows so other pages (Trends) can read without re-parsing
+  cachedTx?: import("@/app/providers/ReconcilerProvider").Transaction[];
 };
 
 const IDX_KEY = "reconciler.statements.index.v2";

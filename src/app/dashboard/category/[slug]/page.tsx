@@ -74,7 +74,7 @@ export default function CategoryDetailPage() {
   return (
     <div className="mx-auto max-w-6xl p-6 space-y-6">
       <div className="flex items-center gap-3">
-        <Link href="/dashboard/categories" className="text-sm hover:underline">
+        <Link href="/dashboard/category" className="text-sm hover:underline">
           ← Categories
         </Link>
         <h1 className="text-2xl font-bold">{cat}</h1>

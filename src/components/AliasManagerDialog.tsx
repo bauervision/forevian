@@ -1,6 +1,13 @@
 "use client";
 import React from "react";
-import { useAliases, type AliasRule } from "@/app/providers/AliasesProvider";
+import {
+  readAliases,
+  writeAliases,
+  seedCommonAliases,
+  learnAliasesFromTransactions,
+  type AliasRule,
+} from "@/lib/aliases";
+import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 
 export default function AliasManagerDialog({
   open,
@@ -9,93 +16,119 @@ export default function AliasManagerDialog({
   open: boolean;
   onClose: () => void;
 }) {
-  const { rules, setRules, addRule, removeRule } = useAliases();
-  const [list, setList] = React.useState<AliasRule[]>(rules);
+  const { transactions } = useReconcilerSelectors();
+  const [list, setList] = React.useState<AliasRule[]>([]);
 
   React.useEffect(() => {
-    if (open) setList(rules);
-  }, [open, rules]);
+    if (open) setList(readAliases());
+  }, [open]);
 
+  function addRow() {
+    setList((prev) => [
+      ...prev,
+      {
+        id: Math.random().toString(36).slice(2, 9),
+        pattern: "",
+        label: "",
+        mode: "contains",
+      },
+    ]);
+  }
   function save() {
-    setRules(list);
+    writeAliases(list);
     onClose();
+  }
+  function seed() {
+    setList(seedCommonAliases());
+  }
+  function learn() {
+    setList(learnAliasesFromTransactions(transactions));
   }
 
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div
-        className="absolute left-1/2 top-1/2 w-[min(760px,95vw)] -translate-x-1/2 -translate-y-1/2
-                      rounded-lg bg-white text-gray-800 dark:bg-gray-900 dark:text-gray-100 shadow-xl"
-      >
+      <div className="absolute left-1/2 top-1/2 w-[min(840px,95vw)] -translate-x-1/2 -translate-y-1/2 rounded-lg bg-white text-gray-800 dark:bg-gray-900 dark:text-gray-100 shadow-xl">
         <div className="p-4 border-b flex items-center justify-between">
-          <h3 className="text-lg font-semibold">Merchant Aliases</h3>
-          <button
-            className="border rounded px-3 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
-            onClick={() =>
-              setList((prev) => [
-                {
-                  id: crypto.randomUUID(),
-                  pattern: "",
-                  label: "New Merchant",
-                  mode: "contains",
-                },
-                ...prev,
-              ])
-            }
-          >
-            Add
-          </button>
-        </div>
-        <div className="max-h-[60vh] overflow-auto p-3 text-sm">
-          <div className="grid grid-cols-12 gap-2 font-medium mb-1">
-            <div className="col-span-5">Pattern</div>
-            <div className="col-span-5">Label</div>
-            <div className="col-span-2">Mode</div>
-          </div>
-          {list.map((r, i) => (
-            <div
-              key={r.id}
-              className="grid grid-cols-12 gap-2 items-center border-b py-2"
+          <h3 className="text-lg font-semibold">Manage Aliases</h3>
+          <div className="flex gap-2">
+            <button
+              className="border rounded px-3 py-1 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
+              onClick={seed}
             >
-              <input
-                className="col-span-5 border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
-                value={r.pattern}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setList((prev) =>
-                    prev.map((x, idx) => (idx === i ? { ...x, pattern: v } : x))
-                  );
-                }}
-              />
-              <input
-                className="col-span-5 border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
-                value={r.label}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setList((prev) =>
-                    prev.map((x, idx) => (idx === i ? { ...x, label: v } : x))
-                  );
-                }}
-              />
-              <select
-                className="col-span-2 border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
-                value={r.mode}
-                onChange={(e) => {
-                  const v = e.target.value as AliasRule["mode"];
-                  setList((prev) =>
-                    prev.map((x, idx) => (idx === i ? { ...x, mode: v } : x))
-                  );
-                }}
+              Seed common aliases
+            </button>
+            <button
+              className="border rounded px-3 py-1 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
+              onClick={learn}
+            >
+              Learn from this statement
+            </button>
+            <button
+              className="border rounded px-3 py-1 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
+              onClick={addRow}
+            >
+              Add
+            </button>
+          </div>
+        </div>
+
+        <div className="max-h-[60vh] overflow-auto divide-y">
+          {list.length === 0 ? (
+            <div className="p-4 text-sm text-gray-600 dark:text-gray-300">
+              No aliases yet. Use <em>Seed common aliases</em> to prefill, or{" "}
+              <em>Learn from this statement</em>.
+            </div>
+          ) : (
+            list.map((r, i) => (
+              <div
+                key={r.id}
+                className="p-3 grid grid-cols-12 gap-2 items-center"
               >
-                <option value="contains">contains</option>
-                <option value="prefix">prefix</option>
-                <option value="regex">regex</option>
-              </select>
-              <div className="col-span-12 flex justify-end">
+                <select
+                  className="col-span-2 border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
+                  value={r.mode}
+                  onChange={(e) =>
+                    setList((prev) =>
+                      prev.map((x, idx) =>
+                        idx === i ? { ...x, mode: e.target.value as any } : x
+                      )
+                    )
+                  }
+                >
+                  <option value="contains">contains</option>
+                  <option value="startsWith">starts with</option>
+                  <option value="regex">regex</option>
+                </select>
+                <input
+                  className="col-span-5 border rounded px-2 py-1 bg-white dark:bg-white text-gray-700 placeholder-gray-400"
+                  placeholder="pattern (e.g., harris te)"
+                  value={r.pattern}
+                  onChange={(e) =>
+                    setList((prev) =>
+                      prev.map((x, idx) =>
+                        idx === i
+                          ? { ...x, pattern: e.target.value.toLowerCase() }
+                          : x
+                      )
+                    )
+                  }
+                />
+                <input
+                  className="col-span-4 border rounded px-2 py-1 bg-white dark:bg-white text-gray-700 placeholder-gray-400"
+                  placeholder="label (e.g., Harris Teeter)"
+                  value={r.label}
+                  onChange={(e) =>
+                    setList((prev) =>
+                      prev.map((x, idx) =>
+                        idx === i ? { ...x, label: e.target.value } : x
+                      )
+                    )
+                  }
+                />
                 <button
-                  className="text-xs border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
+                  className="col-span-1 text-xs border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
                   onClick={() =>
                     setList((prev) => prev.filter((_, idx) => idx !== i))
                   }
@@ -103,10 +136,11 @@ export default function AliasManagerDialog({
                   Remove
                 </button>
               </div>
-            </div>
-          ))}
+            ))
+          )}
         </div>
-        <div className="p-3 flex justify-end gap-2 border-t">
+
+        <div className="p-3 border-t flex items-center justify-end gap-2">
           <button
             className="border rounded px-3 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
             onClick={onClose}

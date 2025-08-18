@@ -33,8 +33,51 @@ import {
   userFromLast4,
 } from "@/lib/txEnrich";
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
+import {
+  readCatRules,
+  applyCategoryRulesTo,
+  upsertCategoryRules,
+  deriveKeyFromDescription,
+  candidateKeys,
+} from "@/lib/categoryRules";
+import CategoryRulesManager from "@/components/CategoryRulesManager";
+import { normalizePageText } from "@/lib/textNormalizer";
 
 /* ----------------------------- small utilities ---------------------------- */
+
+function persistCurrentStatementSnapshot({
+  statements,
+  currentId,
+  stmtYear,
+  stmtMonth,
+  inputs,
+  pages,
+  txs,
+}: {
+  statements: Record<string, any>;
+  currentId: string;
+  stmtYear: number;
+  stmtMonth: number;
+  inputs: {
+    beginningBalance?: number;
+    totalDeposits?: number;
+    totalWithdrawals?: number;
+  };
+  pages: { raw: string }[];
+  txs: import("@/app/providers/ReconcilerProvider").Transaction[];
+}) {
+  const s = statements[currentId];
+  if (!s) return;
+  const updated = {
+    ...s,
+    stmtYear,
+    stmtMonth,
+    pagesRaw: pages.map((p) => p.raw),
+    inputs,
+    cachedTx: txs, // ← store final tx here
+  };
+  upsertStatement(updated);
+}
 
 function loadLegacyLocal(): { pagesRaw?: string[]; inputs?: any } {
   // Primary: reconciler.cache.v1
@@ -94,6 +137,7 @@ const CANON: Array<[RegExp, string]> = [
   [/buzzsprout/i, "Buzzsprout"],
   [/ibm.*payroll/i, "IBM Payroll"],
   [/leidos.*payroll/i, "Leidos Payroll"],
+  [/home\s*depot/i, "Home Depot"],
 ];
 
 function canonMerchant(desc: string, fallback: string | null) {
@@ -125,6 +169,7 @@ function canonCategory(desc: string, merch?: string | null) {
   )
     return "Subscriptions";
   if (/(Harris Teeter|Food Lion)/.test(m)) return "Groceries";
+  if (/Home Depot/.test(m ?? "")) return "Shopping/Household";
   if (/Chick-fil-A/.test(m)) return "Dining";
   if (/Cinema Cafe/.test(m)) return "Entertainment";
   if (/Target/.test(m)) return "Shopping/Household";
@@ -474,7 +519,7 @@ export default function ReconcilerPage() {
 
   // Dialogs
   const [openAliases, setOpenAliases] = React.useState(false);
-
+  const [openRules, setOpenRules] = React.useState(false);
   // Accordion state
   const [openDate, setOpenDate] = React.useState<Record<string, boolean>>({});
 
@@ -555,7 +600,9 @@ export default function ReconcilerPage() {
     });
 
     if (cur.pagesRaw && cur.pagesRaw.length) {
-      const res = rebuildFromPages(cur.pagesRaw, cur.stmtYear, applyAlias);
+      const pagesSanitized = (cur.pagesRaw || []).map(normalizePageText);
+      const res = rebuildFromPages(pagesSanitized, cur.stmtYear, applyAlias);
+
       setPages(
         cur.pagesRaw.map((raw, i) => ({
           idx: i,
@@ -563,7 +610,19 @@ export default function ReconcilerPage() {
           lines: raw.split(/\r?\n/).filter(Boolean).length,
         }))
       );
-      setTransactions(res.txs);
+
+      const rules = readCatRules();
+      const txWithRules = applyCategoryRulesTo(rules, res.txs, applyAlias);
+      setTransactions(txWithRules);
+      persistCurrentStatementSnapshot({
+        statements,
+        currentId,
+        stmtYear,
+        stmtMonth,
+        inputs,
+        pages,
+        txs: txWithRules,
+      });
     } else {
       // no pages (but we may have inputs)
       setPages([]);
@@ -586,12 +645,14 @@ export default function ReconcilerPage() {
   function addPage() {
     const raw = paste.trim();
     if (!raw) return;
+
+    const cleaned = normalizePageText(raw);
     const next = [
       ...pages,
       {
         idx: pages.length,
-        raw,
-        lines: raw.split(/\r?\n/).filter(Boolean).length,
+        raw: cleaned,
+        lines: cleaned.split(/\r?\n/).filter(Boolean).length,
       },
     ];
     setPages(next);
@@ -620,12 +681,18 @@ export default function ReconcilerPage() {
     upsertStatement(updated);
     setStatements(readIndex());
 
-    const res = rebuildFromPages(
-      updated.pagesRaw,
-      updated.stmtYear,
-      applyAlias
-    );
+    const pagesSanitized = (cur.pagesRaw || []).map(normalizePageText);
+    const res = rebuildFromPages(pagesSanitized, updated.stmtYear, applyAlias);
     setTransactions(res.txs);
+    persistCurrentStatementSnapshot({
+      statements,
+      currentId,
+      stmtYear,
+      stmtMonth,
+      inputs,
+      pages,
+      txs: res.txs,
+    });
   }
 
   function removePage(idx: number) {
@@ -640,12 +707,18 @@ export default function ReconcilerPage() {
     upsertStatement(updated);
     setStatements(readIndex());
 
-    const res = rebuildFromPages(
-      updated.pagesRaw,
-      updated.stmtYear,
-      applyAlias
-    );
+    const pagesSanitized = (cur.pagesRaw || []).map(normalizePageText);
+    const res = rebuildFromPages(pagesSanitized, updated.stmtYear, applyAlias);
     setTransactions(res.txs);
+    persistCurrentStatementSnapshot({
+      statements,
+      currentId,
+      stmtYear,
+      stmtMonth,
+      inputs,
+      pages,
+      txs: res.txs,
+    });
   }
 
   function rerunParsing() {
@@ -653,6 +726,15 @@ export default function ReconcilerPage() {
     const rawPages = cur?.pagesRaw ?? pages.map((p) => p.raw);
     const res = rebuildFromPages(rawPages, stmtYear, applyAlias);
     setTransactions(res.txs);
+    persistCurrentStatementSnapshot({
+      statements,
+      currentId,
+      stmtYear,
+      stmtMonth,
+      inputs,
+      pages,
+      txs: res.txs,
+    });
   }
 
   function createStatement() {
@@ -695,8 +777,18 @@ export default function ReconcilerPage() {
         lines: raw.split(/\r?\n/).filter(Boolean).length,
       }))
     );
-    const res = rebuildFromPages(s.pagesRaw || [], s.stmtYear, applyAlias);
+    const pagesSanitized = (s.pagesRaw || []).map(normalizePageText);
+    const res = rebuildFromPages(pagesSanitized || [], s.stmtYear, applyAlias);
     setTransactions(res.txs);
+    persistCurrentStatementSnapshot({
+      statements,
+      currentId,
+      stmtYear,
+      stmtMonth,
+      inputs,
+      pages,
+      txs: res.txs,
+    });
   }
 
   // Totals/derived views
@@ -800,9 +892,22 @@ export default function ReconcilerPage() {
         >
           Manage Aliases
         </button>
+
+        <button
+          className="rounded border px-2 py-1 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
+          onClick={() => setOpenRules(true)}
+        >
+          Manage Rules
+        </button>
+
         <AliasManagerDialog
           open={openAliases}
           onClose={() => setOpenAliases(false)}
+        />
+
+        <CategoryRulesManager
+          open={openRules}
+          onClose={() => setOpenRules(false)}
         />
       </div>
 
@@ -961,6 +1066,30 @@ export default function ReconcilerPage() {
           >
             Re-run parsing
           </button>
+
+          <button
+            className="text-sm border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
+            onClick={() => {
+              const rules = readCatRules();
+              const reapplied = applyCategoryRulesTo(
+                rules,
+                transactions,
+                applyAlias
+              );
+              setTransactions(reapplied);
+              persistCurrentStatementSnapshot({
+                statements,
+                currentId,
+                stmtYear,
+                stmtMonth,
+                inputs,
+                pages,
+                txs: reapplied,
+              });
+            }}
+          >
+            Reapply rules
+          </button>
         </div>
         {pages.length > 0 && (
           <div className="text-sm">
@@ -1052,18 +1181,45 @@ export default function ReconcilerPage() {
                             t.categoryOverride ?? t.category ?? "Uncategorized"
                           }
                           onChange={(val) => {
+                            // 2) Learn a general rule from this row (alias preferred)
+                            const aliasLabel = applyAlias(
+                              stripAuthAndCard(t.description || "")
+                            );
+                            const keys = candidateKeys(
+                              t.description || "",
+                              aliasLabel
+                            );
+                            // save explicit override for this row (unchanged)
                             const k = keyForTx(
                               t.date || "",
                               t.description || "",
                               t.amount ?? 0
                             );
                             writeOverride(k, val);
-                            const updated = transactions.map((row) =>
-                              row.id === t.id
-                                ? { ...row, categoryOverride: val }
-                                : row
+                            // save general rules for all candidates (alias + token)
+                            upsertCategoryRules(keys, val);
+
+                            // re-apply rules to all rows and update cache
+                            const rules = readCatRules();
+                            const withRules = applyCategoryRulesTo(
+                              rules,
+                              transactions,
+                              applyAlias
+                            ).map((r) =>
+                              r.id === t.id
+                                ? { ...r, categoryOverride: val }
+                                : r
                             );
-                            setTransactions(updated);
+                            setTransactions(withRules);
+                            persistCurrentStatementSnapshot({
+                              statements,
+                              currentId,
+                              stmtYear,
+                              stmtMonth,
+                              inputs,
+                              pages,
+                              txs: withRules,
+                            });
                           }}
                         />
                       </td>
