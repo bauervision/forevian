@@ -31,6 +31,7 @@ import {
   extractCardLast4,
   stripAuthAndCard,
   userFromLast4,
+  prettyDesc,
 } from "@/lib/txEnrich";
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 import {
@@ -1174,7 +1175,7 @@ export default function ReconcilerPage() {
                 <tbody>
                   {g.rows.map((t) => (
                     <tr key={t.id} className="border-t">
-                      <td className="p-2">{t.description}</td>
+                      <td className="p-2">{prettyDesc(t.description)}</td>
                       <td className="p-2">
                         <CategorySelect
                           value={

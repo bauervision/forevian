@@ -3,17 +3,26 @@ import React from "react";
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 import { computeTotals } from "@/lib/metrics";
 import { currentStatementMeta, type Period } from "@/lib/period";
-import { readIndex, readCurrentId } from "@/lib/statements";
+import { readIndex, readCurrentId, writeCurrentId } from "@/lib/statements";
 import { readCatRules, applyCategoryRulesTo } from "@/lib/categoryRules";
 import { applyAlias } from "@/lib/aliases";
 
-/**
- * Build the rows for the requested period.
- * - CURRENT → just use live provider transactions (already include overrides + latest rules).
- * - YTD     → aggregate cachedTx from all statements in the same year up to the current month,
- *             then re-apply the latest rules (so new rules affect prior months). If a statement
- *             is missing cachedTx, it will be skipped (visit it once in Reconciler to cache).
- */
+function useStatementOptions() {
+  return React.useMemo(() => {
+    const idx = readIndex();
+    const entries = Object.values(idx)
+      .map((s: any) => ({
+        id: s.id,
+        label: s.label,
+        year: s.stmtYear,
+        month: s.stmtMonth,
+      }))
+      .sort((a, b) => a.year - b.year || a.month - b.month);
+    return entries;
+  }, []);
+}
+
+/** Build rows for the requested period. */
 function usePeriodRows(period: Period, liveRows: any[]) {
   const meta = currentStatementMeta();
 
@@ -31,13 +40,10 @@ function usePeriodRows(period: Period, liveRows: any[]) {
       if (Array.isArray(s.cachedTx)) {
         all.push(...s.cachedTx);
       } else {
-        // If not cached, include current live rows for the current statement as a fallback
         const curId = readCurrentId();
         if (curId && s.id === curId) all.push(...liveRows);
       }
     }
-
-    // Re-apply latest alias+rules so categories reflect your newest rules across months.
     const reapplied = applyCategoryRulesTo(rules, all, applyAlias);
     return reapplied as typeof liveRows;
   }, [period, liveRows, meta]);
@@ -46,7 +52,17 @@ function usePeriodRows(period: Period, liveRows: any[]) {
 export default function DashboardPage() {
   const { transactions, inputs } = useReconcilerSelectors();
   const meta = currentStatementMeta();
+  const options = useStatementOptions();
+  const [selectedId, setSelectedId] = React.useState<string>(
+    () => readCurrentId() || options[0]?.id || ""
+  );
   const [period, setPeriod] = React.useState<Period>("CURRENT");
+
+  // change current statement
+  const onSelectStatement = (id: string) => {
+    writeCurrentId(id);
+    setSelectedId(id); // force re-render; meta reads from localStorage
+  };
 
   const viewRows = usePeriodRows(period, transactions);
   const totals = React.useMemo(
@@ -57,7 +73,7 @@ export default function DashboardPage() {
   const money = (n: number) =>
     n.toLocaleString(undefined, { style: "currency", currency: "USD" });
 
-  // “True Spend” excludes Transfers, Debt, Cash Back
+  // True Spend excludes Transfers, Debt, Cash Back
   const trueSpend = React.useMemo(() => {
     const EXCLUDE = new Set(["Transfers", "Debt", "Cash Back"]);
     return viewRows
@@ -83,7 +99,6 @@ export default function DashboardPage() {
     [viewRows]
   );
 
-  // Spend by spender (only expenses)
   const bySpender = React.useMemo(() => {
     const map: Record<string, number> = {};
     for (const r of viewRows) {
@@ -101,7 +116,6 @@ export default function DashboardPage() {
     return map;
   }, [viewRows]);
 
-  // Top categories (expenses only)
   const topCats = React.useMemo(() => {
     const m: Record<string, number> = {};
     for (const r of viewRows) {
@@ -116,7 +130,7 @@ export default function DashboardPage() {
 
   return (
     <div className="mx-auto max-w-6xl p-6 space-y-6">
-      {/* Header with period + statement chip */}
+      {/* Header */}
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-2xl font-semibold">Dashboard</h1>
         {meta && (
@@ -127,7 +141,22 @@ export default function DashboardPage() {
               : `YTD ${meta.year} (Jan–${meta.label.split(" ")[0]})`}
           </span>
         )}
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {/* Statement selector */}
+          <select
+            className="border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
+            value={selectedId}
+            onChange={(e) => onSelectStatement(e.target.value)}
+            title="Statement"
+          >
+            {options.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+
+          {/* Period toggle */}
           <span className="text-sm">Period:</span>
           <div className="inline-flex rounded border overflow-hidden">
             <button
@@ -154,7 +183,7 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Summary cards (use viewRows-derived totals) */}
+      {/* Summary cards */}
       <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <Card label="Income" value={money(totals.income)} />
         <Card label="Expenses" value={money(totals.expense)} />
@@ -204,8 +233,8 @@ export default function DashboardPage() {
             </tr>
           </thead>
           <tbody>
-            {topCats.map(([cat, amt]) => (
-              <tr key={cat} className="border-t">
+            {topCats.map(([cat, amt], i) => (
+              <tr key={`${cat}-${i}`} className="border-t">
                 <td className="p-2">{cat}</td>
                 <td className="p-2 text-right">{money(amt)}</td>
               </tr>
