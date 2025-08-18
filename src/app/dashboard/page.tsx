@@ -1,86 +1,223 @@
 "use client";
-
-import { useEffect, useMemo, useState } from "react";
-import { onAuthStateChanged } from "firebase/auth";
-import { auth } from "@/lib/firebase";
-import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
-import { db } from "@/lib/firebase";
-import type { Tx } from "@/lib/types";
-import { SpenderFilter } from "@/components/SpenderFilter";
-import { CategoryChart } from "@/components/CategoryChart";
-import { AmazonBreakdown } from "@/components/AmazonBreakdown";
-import { BillCalendar } from "@/components/BillCalendar";
+import React from "react";
+import dynamic from "next/dynamic";
+import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 import {
-  spendingByCategory,
-  amazonBreakdown,
-  buildRecurringCalendar,
-  forecastTypicalMonth,
-  filterBySpender,
-} from "@/lib/compute";
-import { SafeToInvestChart } from "@/components/SafeToInvestChart";
+  computeTotals,
+  bucketizeSpecials,
+  spendBySpender,
+  recurringCandidates,
+  type MinimalTx,
+} from "@/lib/metrics";
 
-export default function DashboardPage() {
-  const [user, setUser] = useState<any>(null);
-  const [txs, setTxs] = useState<Tx[]>([]);
-  const [spender, setSpender] = useState<"All" | "Mike" | "Beth">("All");
+const money = (n: number) =>
+  n.toLocaleString(undefined, { style: "currency", currency: "USD" });
 
-  // auth
-  useEffect(() => onAuthStateChanged(auth, setUser), []);
+// Lazy chart components (no SSR)
+const { Pie, Bar } = {
+  Pie: dynamic(
+    async () => {
+      const m = await import("react-chartjs-2");
+      await import("chart.js/auto"); // registers scales/controllers
+      return m.Pie;
+    },
+    { ssr: false }
+  ),
+  Bar: dynamic(
+    async () => {
+      const m = await import("react-chartjs-2");
+      await import("chart.js/auto");
+      return m.Bar;
+    },
+    { ssr: false }
+  ),
+};
 
-  // live transactions for current user
-  useEffect(() => {
-    if (!user) return;
-    const col = collection(db, "users", user.uid, "transactions");
-    const qy = query(col, orderBy("date", "desc"));
-    const unsub = onSnapshot(qy, (snap) => {
-      const rows = snap.docs.map((d) => ({
-        id: d.id,
-        ...(d.data() as any),
-      })) as Tx[];
-      setTxs(rows);
-    });
-    return () => unsub();
-  }, [user]);
+export default function Dashboard() {
+  const { transactions, inputs } = useReconcilerSelectors();
 
-  const filtered = useMemo(() => filterBySpender(txs, spender), [txs, spender]);
+  // Tell metrics about overrides (if present)
+  const rows = transactions as unknown as MinimalTx[];
 
-  // Charts & views
-  const catData = useMemo(() => spendingByCategory(filtered), [filtered]);
-  const amazon = useMemo(() => amazonBreakdown(filtered), [filtered]);
-  const recurring = useMemo(() => buildRecurringCalendar(filtered), [filtered]);
-  const forecast = useMemo(() => forecastTypicalMonth(recurring), [recurring]);
+  const t = computeTotals(rows, inputs.beginningBalance ?? 0);
+  const specials = bucketizeSpecials(rows);
+  const bySpender = spendBySpender(rows);
+  const recur = recurringCandidates(rows);
 
-  if (!user)
-    return <main className="max-w-5xl mx-auto p-6">Please sign in first.</main>;
+  const topCats = Object.entries(t.byCategory)
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+    .slice(0, 8);
+
+  const otherCatsTotal = Object.entries(t.byCategory)
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+    .slice(8)
+    .reduce((s, [, v]) => s + v, 0);
+
+  const pieLabels = [
+    ...topCats.map(([c]) => c),
+    ...(otherCatsTotal ? ["Other"] : []),
+  ];
+  const pieValues = [
+    ...topCats.map(([, v]) => Math.abs(v)),
+    ...(otherCatsTotal ? [Math.abs(otherCatsTotal)] : []),
+  ];
+
+  const barLabels = Object.keys(specials);
+  const barValues = Object.values(specials);
 
   return (
-    <main className="max-w-6xl mx-auto p-6 space-y-8">
-      <div className="flex items-center justify-between gap-4">
-        <h1 className="text-2xl font-semibold">Forevian — Dashboard</h1>
-        <SpenderFilter value={spender} onChange={setSpender} />
-      </div>
+    <div className="mx-auto max-w-6xl p-6 space-y-8">
+      <h1 className="text-2xl font-bold">Overview</h1>
 
+      <section className="grid md:grid-cols-5 gap-4">
+        <Card title="Income" value={money(t.income)} tone="ok" />
+        <Card title="Expenses" value={money(t.expense)} tone="bad" />
+        <Card
+          title="Net"
+          value={money(t.net)}
+          tone={t.net >= 0 ? "ok" : "bad"}
+        />
+        <Card
+          title="True Spend"
+          value={money(t.trueSpend)}
+          tone="warn"
+          subtitle="excludes transfers & debt"
+        />
+        <Card title="Cash Back" value={money(t.cashBack)} tone="info" />
+      </section>
+
+      {/* Category pie + Specials bar */}
       <section className="grid md:grid-cols-2 gap-6">
-        <div className="rounded-2xl bg-zinc-900 p-4 shadow">
-          <h3 className="font-medium mb-2">Spending by Category</h3>
-          <CategoryChart data={catData} />
+        <div className="rounded border p-4">
+          <h3 className="font-semibold mb-3">Spend by Category</h3>
+          <div className="h-80">
+            {pieValues.length ? (
+              <Pie
+                data={{
+                  labels: pieLabels,
+                  datasets: [{ data: pieValues }],
+                }}
+              />
+            ) : (
+              <div className="text-sm text-gray-500">No data.</div>
+            )}
+          </div>
+          <p className="text-xs text-gray-500 mt-2">
+            Top 8 categories shown; the rest grouped as “Other”. Uses manual
+            overrides when present.
+          </p>
         </div>
-        <div className="rounded-2xl bg-zinc-900 p-4 shadow">
-          <h3 className="font-medium mb-2">Amazon Breakdown</h3>
-          <AmazonBreakdown total={amazon.total} parts={amazon.parts} />
+
+        <div className="rounded border p-4">
+          <h3 className="font-semibold mb-3">
+            Amazon • Subscriptions • Fast Food
+          </h3>
+          <div className="h-80">
+            <Bar
+              data={{
+                labels: barLabels,
+                datasets: [{ data: barValues }],
+              }}
+              options={{
+                plugins: { legend: { display: false } },
+                scales: { y: { beginAtZero: true } },
+              }}
+            />
+          </div>
+          <p className="text-xs text-gray-500 mt-2">
+            Only spending (negative amounts). “Fast Food” is detected by popular
+            chain names.
+          </p>
         </div>
       </section>
 
-      <section className="grid md:grid-cols-2 gap-6">
-        <div className="rounded-2xl bg-zinc-900 p-4 shadow">
-          <h3 className="font-medium mb-2">Recurring Bill Calendar</h3>
-          <BillCalendar rows={recurring} />
-        </div>
-        <div className="rounded-2xl bg-zinc-900 p-4 shadow">
-          <h3 className="font-medium mb-2">Safe-to-Invest (Typical Month)</h3>
-          <SafeToInvestChart data={forecast} />
-        </div>
+      {/* By Spender */}
+      <section className="rounded border p-4">
+        <h3 className="font-semibold mb-2">Spend by Spender</h3>
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 dark:bg-gray-800">
+            <tr>
+              <th className="text-left p-2">Person</th>
+              <th className="text-right p-2">Spend</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Object.entries(bySpender).map(([name, amt]) => (
+              <tr key={name} className="border-t">
+                <td className="p-2">{name}</td>
+                <td className="p-2 text-right">{money(amt)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="text-xs text-gray-500 mt-2">
+          Inferred from “Card 5280” → Mike, “Card 0161” → Beth. Adjust
+          categories as needed in the Reconciler.
+        </p>
       </section>
-    </main>
+
+      {/* Recurring bills */}
+      <section className="rounded border p-4">
+        <h3 className="font-semibold mb-2">Likely Recurring Bills</h3>
+        {recur.length ? (
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 dark:bg-gray-800">
+              <tr>
+                <th className="text-left p-2">Bill</th>
+                <th className="text-right p-2">Avg Amount</th>
+                <th className="text-right p-2">Count</th>
+                <th className="text-right p-2">Draft Day</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recur.map((r) => (
+                <tr key={r.name} className="border-t">
+                  <td className="p-2">{r.name}</td>
+                  <td className="p-2 text-right">{money(r.avg)}</td>
+                  <td className="p-2 text-right">{r.count}</td>
+                  <td className="p-2 text-right">{r.draftDay ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="text-sm text-gray-500">
+            No recurring candidates detected yet.
+          </div>
+        )}
+        <p className="text-xs text-gray-500 mt-2">
+          Heuristic based on Subscriptions/Housing/Utilities/Insurance/Debt and
+          most common posting day.
+        </p>
+      </section>
+    </div>
+  );
+}
+
+function Card({
+  title,
+  value,
+  tone,
+  subtitle,
+}: {
+  title: string;
+  value: string;
+  tone: "ok" | "bad" | "warn" | "info";
+  subtitle?: string;
+}) {
+  const styles =
+    tone === "ok"
+      ? "border-emerald-300 bg-emerald-50 dark:bg-emerald-900/20"
+      : tone === "bad"
+      ? "border-red-300 bg-red-50 dark:bg-red-900/20"
+      : tone === "warn"
+      ? "border-amber-300 bg-amber-50 dark:bg-amber-900/20"
+      : "border-sky-300 bg-sky-50 dark:bg-sky-900/20";
+  return (
+    <div className={`rounded border p-4 ${styles}`}>
+      <div className="text-sm opacity-80">{title}</div>
+      <div className="text-xl font-semibold">{value}</div>
+      {subtitle && <div className="text-xs opacity-70">{subtitle}</div>}
+    </div>
   );
 }
