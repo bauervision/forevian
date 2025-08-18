@@ -5,6 +5,7 @@ export type Totals = {
   expense: number; // absolute (positive)
   net: number;
   byCategory: Record<string, number>;
+  bySpender: Record<string, number>;
   byMonth: Record<string, number>; // 'MM' -> net for now
   cashBack: number;
   trueSpend: number; // expense minus transfers/debt-servicing
@@ -17,6 +18,8 @@ export type MinimalTx = {
   category?: string | undefined; // original category
   categoryOverride?: string | undefined; // NEW: manual override
   description?: string | undefined;
+  cardLast4?: string;
+  user?: string;
 };
 
 const TRANSFER_LIKE = /transfer|xfer|tfr|zelle|from savings|to savings/i;
@@ -43,6 +46,7 @@ export function effectiveCategory(r: MinimalTx): string {
 
 export function computeTotals(rows: MinimalTx[], opening = 0): Totals {
   const byCategory: Record<string, number> = {};
+  const bySpender: Record<string, number> = {};
   const byMonth: Record<string, number> = {};
   let income = 0;
   let expense = 0; // negative while summing, flip at end
@@ -59,10 +63,14 @@ export function computeTotals(rows: MinimalTx[], opening = 0): Totals {
     const mm = (mmRaw ?? "").padStart(2, "0") || "??";
     byMonth[mm] = (byMonth[mm] ?? 0) + r.amount;
 
+    // totals
     if (r.amount > 0) income += r.amount;
-    if (r.amount < 0) expense += r.amount;
+    else expense += Math.abs(r.amount);
 
     if (CASH_BACK_CAT.test(cat)) cashBack += Math.abs(r.amount);
+
+    // category rollup
+    byCategory[cat] = (byCategory[cat] ?? 0) + r.amount;
 
     const nonBudget =
       TRANSFER_LIKE.test(cat) ||
@@ -71,6 +79,12 @@ export function computeTotals(rows: MinimalTx[], opening = 0): Totals {
       DEBT_PAYMENT.test(desc);
 
     if (r.amount < 0 && !nonBudget) trueSpend += Math.abs(r.amount);
+
+    // spender rollup (expenses only)
+    if (r.amount < 0) {
+      const who = spenderOf(r);
+      bySpender[who] = (bySpender[who] ?? 0) + Math.abs(r.amount);
+    }
   }
 
   return {
@@ -79,6 +93,7 @@ export function computeTotals(rows: MinimalTx[], opening = 0): Totals {
     net: +(income + expense).toFixed(2),
     byCategory,
     byMonth,
+    bySpender,
     cashBack: +cashBack.toFixed(2),
     trueSpend: +trueSpend.toFixed(2),
   };
@@ -190,4 +205,11 @@ export function recurringCandidates(rows: MinimalTx[]) {
     .slice(0, 12);
 
   return rowsOut;
+}
+
+export function spenderOf(r: MinimalTx): "Mike" | "Beth" | "Unknown" {
+  if (r.user === "Mike" || r.user === "Beth") return r.user;
+  if (r.cardLast4 === "5280") return "Mike";
+  if (r.cardLast4 === "0161") return "Beth";
+  return "Unknown";
 }

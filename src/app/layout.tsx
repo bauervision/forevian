@@ -4,6 +4,7 @@ import "./globals.css";
 import { ReconcilerProvider } from "./providers/ReconcilerProvider";
 import { CategoriesProvider } from "./providers/CategoriesProvider";
 import Navbar from "@/components/Navbar";
+import { AliasesProvider } from "./providers/AliasesProvider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -31,10 +32,12 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         <CategoriesProvider>
-          <ReconcilerProvider>
-            <Navbar />
-            <main className="pt-4">{children}</main>
-          </ReconcilerProvider>
+          <AliasesProvider>
+            <ReconcilerProvider>
+              <Navbar />
+              <main className="pt-4">{children}</main>
+            </ReconcilerProvider>
+          </AliasesProvider>
         </CategoriesProvider>
       </body>
     </html>

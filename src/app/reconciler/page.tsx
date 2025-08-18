@@ -1,136 +1,66 @@
+// /app/reconciler/page.tsx
 "use client";
 
-import React, { useMemo, useState } from "react";
-import {
-  useReconciler,
-  useReconcilerSelectors,
-  type Transaction as CtxTransaction,
-} from "@/app/providers/ReconcilerProvider";
-
+import React from "react";
 import { useCategories } from "@/app/providers/CategoriesProvider";
 import CategoryManagerDialog from "@/components/CategoryManagerDialog";
-import { readOverrides, keyForTx, writeOverride } from "@/lib/overrides";
+import { useAliases } from "@/app/providers/AliasesProvider";
+import AliasManagerDialog from "@/components/AliasManagerDialog";
+import {
+  readIndex,
+  readCurrentId,
+  writeCurrentId,
+  upsertStatement,
+  emptyStatement,
+  removeStatement,
+  monthLabel,
+  makeId,
+  nextMonth,
+  migrateLegacyIfNeeded,
+  type StatementSnapshot,
+  normalizePagesRaw,
+  inferMonthFromPages,
+} from "@/lib/statements";
+import {
+  readOverrides,
+  writeOverride,
+  keyForTx,
+  type CatOverrideMap,
+} from "@/lib/overrides";
+import {
+  extractCardLast4,
+  stripAuthAndCard,
+  userFromLast4,
+} from "@/lib/txEnrich";
+import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   Utilities
-   ────────────────────────────────────────────────────────────────────────────── */
+/* ----------------------------- small utilities ---------------------------- */
 
-// add near other utils
-const LS_KEY = "reconciler.cache.v1";
-const LS_PREF_KEY = "reconciler.remember.v1";
-
-type SnapshotFile = {
-  stmtYear: number;
-  pagesRaw: string[];
-  inputs?: {
-    beginningBalance?: number;
-    totalDeposits?: number;
-    totalWithdrawals?: number;
-  };
-};
-
-// rebuild all transactions from a list of raw pages
-function rebuildFromPages(
-  pagesRaw: string[],
-  stmtYear: number
-): { txs: CtxTransaction[]; pageMeta: ImportedPage[] } {
-  let all: CtxTransaction[] = [];
-  const meta: ImportedPage[] = [];
-  for (let i = pagesRaw.length - 1; i >= 0; i--) {
-    const raw = pagesRaw[i];
-    const { txs, unparsed } = parseAll(raw, stmtYear);
-    const overrides = readOverrides();
-    const mapped = txs
-      .filter((t) => t.amount != null)
-      .map((t, idx) => {
-        const desc = t.description ?? "";
-        const merch = canonMerchant(desc, null);
-        const baseCat =
-          t.tag === "cb_cashback" ? "Cash Back" : canonCategory(desc, merch);
-        const displayDate = t.dateDisplay ?? isoToMMDD(t.date);
-
-        const k = keyForTx(displayDate || "", desc, t.amount ?? 0);
-        const categoryOverride = overrides[k];
-
-        return {
-          id: "temp",
-          date: displayDate || "",
-          description: desc,
-          amount: t.amount ?? 0,
-          category: baseCat,
-          categoryOverride, // ← apply override if present
-          raw: t.raw,
-          notes: t.parseNotes.join("; "),
-        };
-      });
-    all = [...all, ...mapped];
-    meta.push({
-      id: `${i}`,
-      raw,
-      txCount: mapped.length,
-      unparsedCount: unparsed.length,
-    });
-  }
-  // normalize ids and dedupe
-  all = all.map((t, i) => ({ ...t, id: String(i) }));
-  return { txs: dedupeTransactions(all), pageMeta: meta.reverse() };
+function loadLegacyLocal(): { pagesRaw?: string[]; inputs?: any } {
+  // Primary: reconciler.cache.v1
+  try {
+    const raw = localStorage.getItem("reconciler.cache.v1");
+    if (raw) {
+      const obj = JSON.parse(raw);
+      const pagesRaw = normalizePagesRaw(obj?.pagesRaw || obj?.pages);
+      const inputs =
+        obj?.inputs && typeof obj.inputs === "object" ? obj.inputs : undefined;
+      return { pagesRaw, inputs };
+    }
+  } catch {}
+  // Fallback: split keys (no pages though)
+  try {
+    const inRaw = localStorage.getItem("reconciler.inputs.v1");
+    const inputs = inRaw ? JSON.parse(inRaw) : undefined;
+    return { inputs };
+  } catch {}
+  return {};
 }
 
-const currency = (n: number) =>
+const money = (n: number) =>
   n.toLocaleString(undefined, { style: "currency", currency: "USD" });
 
-function downloadCSV(
-  rows: Array<Record<string, unknown>>,
-  filename = "data.csv"
-) {
-  if (!rows.length) return;
-  const headers = Object.keys(rows[0]);
-  const csv = [
-    headers.join(","),
-    ...rows.map((r) =>
-      headers
-        .map((h) => {
-          const v = r[h] ?? "";
-          const s = String(v);
-          return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-        })
-        .join(",")
-    ),
-  ].join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-function normalizeDesc(s: string) {
-  return s.toLowerCase().replace(/\s+/g, " ").trim();
-}
-
-function dedupeTransactions(ts: CtxTransaction[]) {
-  const seen = new Set<string>();
-  const out: CtxTransaction[] = [];
-  for (const t of ts) {
-    const key = `${t.date}|${t.amount.toFixed(2)}|${normalizeDesc(
-      t.description ?? ""
-    )}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(t);
-    }
-  }
-  return out;
-}
-
-/* ──────────────────────────────────────────────────────────────────────────────
-   Canonical merchant + categories (ported from your script; trimmed for client)
-   ────────────────────────────────────────────────────────────────────────────── */
-
+/** Very small canonical merchant mapping (extend as you like) */
 const CANON: Array<[RegExp, string]> = [
   [/newrez|shellpoin/i, "Newrez (Mortgage)"],
   [/truist\s*ln|auto\s*loan/i, "Truist Loan"],
@@ -160,38 +90,25 @@ const CANON: Array<[RegExp, string]> = [
   [/cinema\s*cafe/i, "Cinema Cafe"],
   [/amazon|amzn\.com\/bill|amazon\s*mktpl|prime\s*video/i, "Amazon"],
   [/bp#|shell\b|exxon|circle\s*k|7-?eleven|chevron/i, "Fuel Station"],
-  [/paypal.*adobe/i, "Adobe"],
   [/adobe/i, "Adobe"],
   [/buzzsprout/i, "Buzzsprout"],
   [/ibm.*payroll/i, "IBM Payroll"],
   [/leidos.*payroll/i, "Leidos Payroll"],
 ];
 
-function canonMerchant(desc: string, guess?: string | null) {
-  const hit = CANON.find(([rx]) => rx.test(desc))?.[1];
-  return hit ?? (guess || null);
+function canonMerchant(desc: string, fallback: string | null) {
+  return CANON.find(([rx]) => rx.test(desc))?.[1] ?? fallback ?? "Unknown";
 }
 
 function canonCategory(desc: string, merch?: string | null) {
   const m = merch ?? "";
   const dl = desc.toLowerCase();
-
-  // Income / transfers in
   if (
     /\b(payroll|e\s*deposit|deposit|vacp\s*treas|ssa|irs\s*treas|ach\s*credit|zelle\s*(from|credit)|online\s*transfer\s*from|xfer\s*from|branch\s*deposit|mobile\s*deposit|credit\s*interest|interest\s*(payment|credit)|refund|reversal|return)\b/i.test(
       dl
     )
   )
     return "Income";
-
-  // NEW: credit card payments are debt servicing (clearly a spend)
-  if (
-    m === "Chase Credit Card Payment" ||
-    m === "Capital One Credit Card Payment"
-  )
-    return "Debt";
-
-  // existing canon buckets…
   if (m === "Amazon") return "Amazon";
   if (m === "Newrez (Mortgage)") return "Housing";
   if (m === "Truist Loan") return "Debt";
@@ -212,859 +129,588 @@ function canonCategory(desc: string, merch?: string | null) {
   if (/Cinema Cafe/.test(m)) return "Entertainment";
   if (/Target/.test(m)) return "Shopping/Household";
   if (/Fuel Station/.test(m)) return "Gas";
-
-  // fallbacks…
-  if (/utility|electric|water|verizon|xfinity|comcast|duke energy/i.test(dl))
-    return "Utilities";
-  if (/amazon|walmart|target|costco|best buy|retail/i.test(dl))
-    return "Shopping/Household";
-  if (
-    /restaurant|grill|cafe|bar|pizza|burger|brew|chipotle|starbucks/i.test(dl)
-  )
-    return "Dining";
-  if (/grocery|kroger|aldi|publix|heb|whole foods/i.test(dl))
-    return "Groceries";
-  if (
-    /airlines|uber|lyft|hotel|marriott|hilton|airbnb|southwest|delta/i.test(dl)
-  )
-    return "Travel";
-  if (/atm/i.test(dl)) return "ATM";
-  if (/fee|service charge|overdraft/i.test(dl)) return "Fees";
+  if (/online\s*transfer|inst\s*xfer|xfer/i.test(dl)) return "Transfers";
   if (/cash\s*back/i.test(dl)) return "Cash Back";
   return "Impulse/Misc";
 }
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   Parser (block aggregation + cash-back split + sign logic + MM/DD display)
-   ────────────────────────────────────────────────────────────────────────────── */
+/* ------------------------------- types/local ------------------------------ */
 
-type Tx = {
-  id: string;
-  raw: string;
-  date?: string; // INTERNAL ISO (YYYY-MM-DD)
-  dateDisplay?: string; // MM/DD for UI/export
-  description?: string;
-  amount?: number; // signed; >0 deposits, <0 withdrawals
+type ParsedLine = {
+  dateIso?: string; // for internal calc if needed later
+  dateDisplay: string; // MM/DD
+  description: string; // already cleaned
+  amount: number; // + deposit, - withdrawal
+  tag?: "cb_cashback" | "card_purchase" | "deposit" | "billpay";
   parseNotes: string[];
-  tag?: "cb_spend" | "cb_cashback"; // to categorize precisely
 };
 
-const MONTHS: Record<string, number> = {
-  jan: 1,
-  feb: 2,
-  mar: 3,
-  apr: 4,
-  may: 5,
-  jun: 6,
-  jul: 7,
-  aug: 8,
-  sep: 9,
-  oct: 10,
-  nov: 11,
-  dec: 12,
-};
-
-const IGNORE_PATTERNS = [
-  /^total\s+deposits/i,
-  /^total\s+withdrawals?/i,
-  /^total\s+fees/i,
-  /^ending\s+balance/i,
-  /^beginning\s+balance/i,
-  /^daily\s+(?:ending|ledger)\s+balance/i,
-  /^page\s+\d+/i,
-  /^statement\s+period/i,
-];
-
-const AMOUNT_LOOSE =
-  /(?:\()?\$?\s*-?\d{1,3}(?:,\d{3})*(?:\.\d{2})|\$?\s*-?\d+\.\d{2}(?:\))?(?:\s*(CR|DR))?/i;
-
-const CASHBACK_RX = /Purchase\s+with\s+Cash\s*Back\b/i;
-const CB_VALUE_RX =
-  /cash\s*back\s*\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})?)/i;
-const AUTH_ON_MMDD_RX = /authorized\s+on\s+(\d{1,2}\/\d{1,2})/i;
-
-// Start a new block on date-only lines
-const DATE_ONLY_PATTERNS: RegExp[] = [
-  /^\s*(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\s*$/, // 4/24, 04/24, 04/24/2025
-  /^\s*(\d{4})-(\d{2})-(\d{2})\s*$/, // 2025-04-24
-  /^\s*(\d{1,2})[-\s](Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-\s](\d{4})\s*$/i,
-];
-
-const CURRENCY_ONLY =
-  /^\s*\(?\$?\s*-?\d{1,3}(?:,\d{3})*(?:\.\d{2})?\)?\s*(?:CR|DR)?\s*$|^\s*\$?\s*-?\d+\.\d{2}\s*(?:CR|DR)?\s*$/i;
-
-function isDateOnlyLine(line: string) {
-  return DATE_ONLY_PATTERNS.some((rx) => rx.test(line));
-}
-function isCurrencyOnlyLine(line: string) {
-  return CURRENCY_ONLY.test(line) && !/[A-Za-z]/.test(line);
-}
-
-function toISO(y: number, m: number, d: number) {
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  return dt.toISOString().slice(0, 10);
-}
-function isoToMMDD(iso?: string) {
-  if (!iso) return "";
-  const [, mm, dd] = iso.split("-");
-  return `${mm}/${dd}`;
-}
-
-function toISODateFromMatch(
-  line: string,
-  fallbackYear: number
-): { iso?: string; used?: string; display?: string } {
-  const m1 = line.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/);
-  if (m1) {
-    let yyyy = Number(m1[3]);
-    if (yyyy < 100) yyyy += yyyy >= 70 ? 1900 : 2000;
-    return {
-      iso: toISO(yyyy, Number(m1[1]), Number(m1[2])),
-      used: m1[0],
-      display: `${String(m1[1]).padStart(2, "0")}/${String(m1[2]).padStart(
-        2,
-        "0"
-      )}`,
-    };
-  }
-  const m2 = line.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
-  if (m2)
-    return {
-      iso: m2[0],
-      used: m2[0],
-      display: `${m2[1] ? m2[2] : ""}/${m2[3]}`,
-    }; // fallback, we will recalc later
-  const m3 = line.match(
-    /\b(\d{1,2})[-\s](Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-\s](\d{4})\b/i
-  );
-  if (m3) {
-    const mon = MONTHS[m3[2].slice(0, 3).toLowerCase()];
-    const iso = toISO(Number(m3[3]), mon, Number(m3[1]));
-    return {
-      iso,
-      used: m3[0],
-      display: `${String(mon).padStart(2, "0")}/${String(m3[1]).padStart(
-        2,
-        "0"
-      )}`,
-    };
-  }
-  const m4 = line.match(/\b(\d{1,2})\/(\d{1,2})\b/);
-  if (m4) {
-    const mm = Number(m4[1]),
-      dd = Number(m4[2]);
-    return {
-      iso: toISO(fallbackYear, mm, dd),
-      used: m4[0],
-      display: `${String(mm).padStart(2, "0")}/${String(dd).padStart(2, "0")}`,
-    };
-  }
-  return {};
-}
-
-function isCurrencyLike(token: string) {
-  const t = token.replace(/[()\s]/g, "");
-  if (/\d+\.\d{2}$/.test(t)) return true;
-  if (/^\$?\d{1,3}(,\d{3})+(\.\d{2})?$/.test(t)) return true;
-  if (/^\$/.test(t)) return true;
-  if (/^\d{7,}$/.test(t)) return false;
-  return false;
-}
-
-function extractRightmostAmount(line: string): {
-  matched?: string;
-  crdr?: string | null;
-} {
-  const re = new RegExp(AMOUNT_LOOSE.source, "ig");
-  const rawMatches = [...line.matchAll(re)];
-  if (!rawMatches.length) return {};
-  type Candidate = {
-    full: string;
-    crdr: string | null;
-    index: number;
-    currencyLike: boolean;
-  };
-  const candidates: Candidate[] = rawMatches.map((m) => {
-    const full = m[0];
-    const crdr = full.match(/\b(CR|DR)\b/i)?.[1] ?? null;
-    const index = m.index ?? 0;
-    const currencyLike = isCurrencyLike(full);
-    return { full, crdr, index, currencyLike };
-  });
-  const pool = candidates.filter((c) => c.currencyLike);
-  const picked = (pool.length ? pool : candidates).reduce((a, b) =>
-    a.index >= b.index ? a : b
-  );
-  return { matched: picked.full, crdr: picked.crdr };
-}
-
-function normalizeAmountToken(
-  token: string,
-  crdr?: string | null
-): { value: number; notes: string[] } {
-  const notes: string[] = [];
-  let t = token.replace(/\$/g, "").trim();
-  let sign = 1;
-  if (/^\(.*\)$/.test(t)) {
-    sign = -1;
-    t = t.slice(1, -1);
-    notes.push("parentheses → negative");
-  }
-  if (t.startsWith("-")) {
-    sign = -1;
-    t = t.slice(1);
-    notes.push("leading '-' → negative");
-  }
-  const num = Number(t.replace(/,/g, ""));
-  let value = sign * (isFinite(num) ? num : NaN);
-  if (crdr) {
-    const flag = crdr.toUpperCase();
-    if (flag === "CR" && value < 0) {
-      value *= -1;
-      notes.push("CR → force positive");
-    }
-    if (flag === "DR" && value > 0) {
-      value *= -1;
-      notes.push("DR → force negative");
-    }
-  }
-  return { value, notes };
-}
-
-/** Strong credit/debit cues */
-const XFER_FROM_RX =
-  /\b(online\s*)?(transfer|xfer|tfr|trf|trns?f(?:er)?)\s*(from|frm)\b/i;
-const XFER_TO_RX =
-  /\b(online\s*)?(transfer|xfer|tfr|trf|trns?f(?:er)?)\s*(to)\b/i;
-const ZELLE_FROM_RX = /\bzelle\b.*\b(from|credit)\b/i;
-const ZELLE_TO_RX = /\bzelle\b.*\b(to|payment)\b/i;
-const ACH_CREDIT_RX = /\bach\s*credit\b/i;
-const ACH_DEBIT_RX = /\bach\s*debit\b/i;
-const PMT_RECEIVED_RX = /\b(payment\s*received|pmt\s*rcvd|thank\s*you)\b/i;
-const REFUND_RX = /\b(refund|reversal|return)\b/i;
-const INTEREST_CREDIT_RX =
-  /\b(credit\s*interest|interest\s*(payment|credit))\b/i;
-
-// NEW: government/benefit credits
-const GOV_BENEFIT_RX =
-  /\b(vacp\s*treas|us\s*treas|irs\s*treas|ssa|social\s*security|treasury)\b/i;
-
-// NEW: clear debit cues for card/loan payments
-const CARD_PAYMENT_RX =
-  /\b(epay|e-?pay|card\s*payment|crd\s*epay|credit\s*card\s*pmt)\b/i;
-
-function decideSignFromDesc(
-  desc: string,
-  amount: number,
-  merchantGuess: string | null
-) {
-  if (amount < 0) return amount; // already negative (from token), keep it
-
-  const d = desc.toLowerCase();
-
-  // POSITIVE (credits)
-  if (
-    XFER_FROM_RX.test(d) ||
-    ZELLE_FROM_RX.test(d) ||
-    ACH_CREDIT_RX.test(d) ||
-    PMT_RECEIVED_RX.test(d) ||
-    REFUND_RX.test(d) ||
-    INTEREST_CREDIT_RX.test(d) ||
-    GOV_BENEFIT_RX.test(d) ||
-    /\b(payroll|e\s*deposit|deposit|mobile\s*deposit|branch\s*deposit)\b/i.test(
-      d
-    )
-  ) {
-    return Math.abs(amount);
-  }
-
-  // NEGATIVE (debits)
-  if (
-    XFER_TO_RX.test(d) ||
-    ZELLE_TO_RX.test(d) ||
-    ACH_DEBIT_RX.test(d) ||
-    CARD_PAYMENT_RX.test(d) ||
-    /\b(withdrawal|purchase|pos|atm|debit|fee|payment\s*to|authorized|bill\s*pay|mortgage|loan\s*payment)\b/i.test(
-      d
-    ) ||
-    !!merchantGuess // any recognized biller/merchant → spend
-  ) {
-    return -Math.abs(amount);
-  }
-
-  // Default: debit
-  return -Math.abs(amount);
-}
-
-function buildDescriptionFallback(
-  raw: string,
-  usedDate?: string,
-  amountToken?: string
-) {
-  let s = raw;
-  if (usedDate) s = s.replace(usedDate, " ");
-  if (amountToken) s = s.replace(amountToken, " ");
-  s = s.replace(/\$?\s*-?\d{1,3}(?:,\d{3})*\.\d{2}/g, " ");
-  s = s.replace(/\b\d{7,}\b/g, " ");
-  s = s.replace(/\s+/g, " ").trim();
-  return s || raw;
-}
-
-/** Group raw lines → logical blocks (drop trailing daily balance) */
-function aggregateBlocks(lines: string[]): string[][] {
-  const blocks: string[][] = [];
-  let buf: string[] = [];
-
-  const flush = () => {
-    if (!buf.length) return;
-    const n = buf.length;
-    if (
-      n >= 2 &&
-      isCurrencyOnlyLine(buf[n - 1]) &&
-      isCurrencyOnlyLine(buf[n - 2])
-    ) {
-      buf = buf.slice(0, -1); // drop EOD balance
-    }
-    blocks.push(buf.slice());
-    buf = [];
-  };
-
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (!line) continue;
-    if (isDateOnlyLine(line)) {
-      flush();
-      buf.push(line);
-    } else {
-      buf.push(line);
-    }
-  }
-  flush();
-  return blocks;
-}
-
-/** Parse one aggregated block; may emit 1 or 2 rows (cash-back split) */
-function parseBlock(
-  blockLines: string[],
-  idx: number,
-  statementYear: number
-): Tx[] {
-  const text = blockLines.join(" ");
-  let usedDate: string | undefined;
-  let dateIso: string | undefined;
-  let dateDisplay: string | undefined;
-
-  if (isDateOnlyLine(blockLines[0])) {
-    const m = blockLines[0].match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
-    if (m) {
-      const mm = Number(m[1]),
-        dd = Number(m[2]);
-      let yyyy = m[3] ? Number(m[3]) : statementYear;
-      if (yyyy < 100) yyyy += yyyy >= 70 ? 1900 : 2000;
-      dateIso = toISO(yyyy, mm, dd);
-      dateDisplay = `${String(mm).padStart(2, "0")}/${String(dd).padStart(
-        2,
-        "0"
-      )}`;
-      usedDate = m[0];
-    }
-  }
-  if (!dateIso) {
-    const d = toISODateFromMatch(text, statementYear);
-    if (d.iso) {
-      dateIso = d.iso;
-      usedDate = d.used;
-      dateDisplay = d.display ?? isoToMMDD(d.iso);
-    }
-  }
-  if (!dateIso) {
-    const ma = text.match(AUTH_ON_MMDD_RX);
-    if (ma) {
-      const [mm, dd] = ma[1].split("/");
-      dateIso = toISO(statementYear, Number(mm), Number(dd));
-      dateDisplay = `${String(mm).padStart(2, "0")}/${String(dd).padStart(
-        2,
-        "0"
-      )}`;
-      usedDate = ma[0];
-    }
-  }
-
-  // amount (gross)
-  let usedAmt: string | undefined;
-  let amountRaw: number | undefined;
-  const pick = extractRightmostAmount(text);
-  if (pick.matched) {
-    usedAmt = pick.matched;
-    const n = normalizeAmountToken(pick.matched, pick.crdr);
-    amountRaw = n.value;
-  }
-
-  // description
-  let description = buildDescriptionFallback(text, usedDate, usedAmt);
-  if (!description) description = text;
-
-  // Canon merchant (for sign/category inference)
-  const merch = canonMerchant(description, null);
-
-  // CASH-BACK split
-  if (
-    CASHBACK_RX.test(text) &&
-    typeof amountRaw === "number" &&
-    isFinite(amountRaw)
-  ) {
-    const gross = Math.abs(amountRaw);
-    const cbMatch = text.match(CB_VALUE_RX);
-    const cb = cbMatch ? Number(cbMatch[1].replace(/,/g, "")) : 0;
-    const cbCapped = Math.min(cb, gross);
-    const spend = +(gross - cbCapped).toFixed(2);
-
-    const base: Omit<Tx, "id"> = {
-      raw: text,
-      date: dateIso,
-      dateDisplay,
-      description,
-      parseNotes: ["cash-back split"],
-    };
-
-    const out: Tx[] = [];
-    if (spend > 0) {
-      out.push({ ...base, id: `${idx}-a`, amount: -spend, tag: "cb_spend" });
-    }
-    if (cbCapped > 0) {
-      out.push({
-        ...base,
-        id: `${idx}-b`,
-        description: `${description} (Cash back $${cbCapped.toFixed(2)})`,
-        amount: -cbCapped,
-        tag: "cb_cashback",
-        parseNotes: ["cash-back portion"],
-      });
-    }
-    return out;
-  }
-
-  // Non-cashback
-  if (!(typeof amountRaw === "number" && isFinite(amountRaw))) {
-    return [
-      {
-        id: `${idx}`,
-        raw: text,
-        date: dateIso,
-        dateDisplay,
-        description,
-        parseNotes: ["no parseable amount"],
-      },
-    ];
-  }
-
-  // If amount has no clear sign, decide from description/merchant (default to debit)
-  const signed = decideSignFromDesc(description, amountRaw, merch ?? null);
-  return [
-    {
-      id: `${idx}`,
-      raw: text,
-      date: dateIso,
-      dateDisplay,
-      description,
-      amount: signed,
-      parseNotes: [],
-    },
-  ];
-}
-
-function parseAll(
-  raw: string,
-  statementYear: number
-): { txs: Tx[]; unparsed: Tx[] } {
-  const lines = raw
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .filter((s) => !IGNORE_PATTERNS.some((rx) => rx.test(s)));
-
-  const blocks = aggregateBlocks(lines);
-  const txs = blocks.flatMap((b, bi) => parseBlock(b, bi, statementYear));
-  const unparsed = txs.filter((t) => t.amount === undefined);
-  return { txs, unparsed };
-}
-
-/* ──────────────────────────────────────────────────────────────────────────────
-   Page
-   ────────────────────────────────────────────────────────────────────────────── */
-
-type ImportedPage = {
+/** The Transaction type in your provider should include these fields. */
+type TxRow = {
+  running: number;
   id: string;
-  raw: string;
-  txCount: number;
-  unparsedCount: number;
+  date: string; // MM/DD
+  description: string;
+  amount: number;
+  raw?: string;
+  notes?: string;
+  category?: string;
+  categoryOverride?: string;
+  cardLast4?: string;
+  user?: string;
+  parseWarnings?: string[];
 };
 
-export default function Page() {
-  const { setTransactions, setUserInputs, setSettings, resetAll } =
-    useReconciler();
-  const { totals, discrepancies, flags, inputs, settings, transactions } =
-    useReconcilerSelectors();
+/* --------------------------- lightweight parser --------------------------- */
+/** Focused on your Wells-style pasted pages. Handles:
+ *  - date headers (solo '4/24' lines)
+ *  - 'Purchase with Cash Back $60.00 ...' split into purchase + cash-back rows
+ *  - descriptor lines with amount-only lines after them
+ *  - deposits/credits vs withdrawals/debits sign inference
+ */
+function rebuildFromPages(
+  pagesRaw: string[],
+  stmtYear: number,
+  applyAlias: (d: string) => string | null
+): { txs: TxRow[]; pageMeta: { idx: number; lines: number }[] } {
+  const IS_DATE_SOLO = /^\d{1,2}\/\d{1,2}\s*$/;
+  const DATE_AT_START = /^\d{1,2}\/\d{1,2}\b/;
+  const AMT_ONLY = /^\$?\s*\d[\d,]*\.\d{2}\s*$/;
+  const AMT_INLINE_RX = /\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2}))/g;
 
-  // Statement year (for MM/DD lines)
-  const [stmtYear, setStmtYear] = useState<number>(new Date().getFullYear());
+  const PURCHASE_RX = /Purchase\s+authorized\s+on/i;
+  const CASHBACK_RX = /Purchase\s+with\s+Cash\s*Back\b/i;
 
-  // Multi-page paste
-  const [pageRaw, setPageRaw] = useState("");
-  const [pages, setPages] = useState<ImportedPage[]>([]);
+  const DEP_RX =
+    /\b(pay\s*roll|direct\s*deposit|e\s*deposit|edeposit|ach\s*credit|vacp\s*treas|inst\s*xfer\s*from|irs\s*treas|ssa|mobile\s*deposit|branch\s*deposit|zelle\s*(from|credit))\b/i;
 
-  // User numbers
-  const [begBal, setBegBal] = useState(inputs.beginningBalance ?? 0);
-  const [userDeps, setUserDeps] = useState(inputs.totalDeposits ?? 0);
-  const [userWds, setUserWds] = useState(inputs.totalWithdrawals ?? 0);
+  const XFER_FROM_RX = /\b(online\s*)?(transfer|xfer)\s*(from)\b/i;
+  const XFER_TO_RX = /\b(online\s*)?(transfer|xfer)\s*(to)\b/i;
+  const ZELLE_FROM_RX = /\bzelle\b.*\b(from|credit)\b/i;
+  const ZELLE_TO_RX = /\bzelle\b.*\b(to|payment)\b/i;
+  const ACH_CREDIT_RX = /\bach\s*credit\b/i;
+  const ACH_DEBIT_RX = /\bach\s*debit\b/i;
+  const CARD_PAYMENT_RX =
+    /\b(epay|e-?pay|card\s*payment|crd\s*epay|credit\s*card\s*pmt)\b/i;
+  const GOV_BENEFIT_RX =
+    /\b(vacp\s*treas|us\s*treas|irs\s*treas|ssa|social\s*security|treasury)\b/i;
 
-  // after existing useState hooks:
-  const [remember, setRemember] = useState<boolean>(() => {
-    if (typeof window === "undefined") return true;
-    return localStorage.getItem(LS_PREF_KEY) !== "0";
-  });
+  const parseIsoFromMmdd = (mmdd: string) => {
+    const m = mmdd.match(/(\d{1,2})\/(\d{1,2})/);
+    if (!m) return null;
+    const mm = m[1].padStart(2, "0");
+    const dd = m[2].padStart(2, "0");
+    return `${stmtYear}-${mm}-${dd}`;
+  };
 
-  // auto-restore on first mount
-  React.useEffect(() => {
-    try {
-      const raw = localStorage.getItem(LS_KEY);
-      if (!raw) return;
-      const snap = JSON.parse(raw) as SnapshotFile;
-      if (!snap || !Array.isArray(snap.pagesRaw) || !snap.pagesRaw.length)
-        return;
+  const rows: ParsedLine[] = [];
+  const pageMeta: { idx: number; lines: number }[] = [];
 
-      setStmtYear(snap.stmtYear || new Date().getFullYear());
+  pagesRaw.forEach((raw, pIdx) => {
+    const L = raw
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    pageMeta.push({ idx: pIdx, lines: L.length });
 
-      // optional: restore user inputs if present
-      if (snap.inputs) {
-        setBegBal(snap.inputs.beginningBalance ?? 0);
-        setUserDeps(snap.inputs.totalDeposits ?? 0);
-        setUserWds(snap.inputs.totalWithdrawals ?? 0);
-        setUserInputs({
-          beginningBalance: snap.inputs.beginningBalance ?? 0,
-          totalDeposits: snap.inputs.totalDeposits ?? 0,
-          totalWithdrawals: snap.inputs.totalWithdrawals ?? 0,
-        });
+    let curDateIso: string | null = null;
+    for (let i = 0; i < L.length; i++) {
+      const lineOrig = L[i];
+      const line = lineOrig;
+
+      // Solo date headers like "4/24"
+      if (IS_DATE_SOLO.test(line)) {
+        curDateIso = parseIsoFromMmdd(line);
+        continue;
       }
 
-      const { txs, pageMeta } = rebuildFromPages(
-        snap.pagesRaw,
-        snap.stmtYear || new Date().getFullYear()
+      // Skip obvious table headers/footers (keep short to avoid nuking valid lines)
+      if (
+        /^(Beginning balance on|Ending balance on|Deposits\/Additions|Withdrawals\/Subtractions|Account\s+summary|Daily\s+(ending|ledger)\s+balance|Page\s+\d+\s+of\s+\d+|Fee\s+period)/i.test(
+          line
+        )
+      )
+        continue;
+
+      // Build descriptor + date (if "4/24 Purchase authorized..." style)
+      let descriptor = line;
+      let dispDate: string | null = curDateIso ? curDateIso.slice(5) : null; // keep MM-DD for display assembly
+
+      if (DATE_AT_START.test(line) && PURCHASE_RX.test(line)) {
+        const md = line.match(/^\d{1,2}\/\d{1,2}/)![0];
+        curDateIso = parseIsoFromMmdd(md);
+        dispDate = md;
+        descriptor = line.replace(/^\d{1,2}\/\d{1,2}\s+/, "");
+      }
+
+      // find amount-only after this descriptor (stop at next date/header)
+      let amount: number | null = null;
+      let amtIdx: number | null = null;
+      let hasBalanceNext = false;
+
+      for (let j = i + 1; j < L.length; j++) {
+        const s = L[j];
+        if (
+          IS_DATE_SOLO.test(s) ||
+          DATE_AT_START.test(s) ||
+          /^(Beginning balance on|Ending balance on|Deposits\/Additions|Withdrawals\/Subtractions|Account\s+summary|Daily\s+(ending|ledger)\s+balance|Page\s+\d+\s+of\s+\d+|Fee\s+period)/i.test(
+            s
+          )
+        )
+          break;
+        if (AMT_ONLY.test(s)) {
+          amount = Number(s.replace(/[^0-9.]/g, ""));
+          amtIdx = j;
+          if (j + 1 < L.length && AMT_ONLY.test(L[j + 1]))
+            hasBalanceNext = true;
+          break;
+        }
+      }
+
+      // inline fallback (prev+curr+next)
+      if (amount == null) {
+        const blob = [L[i - 1] || "", line, L[i + 1] || ""].join(" ");
+        const nums = [...blob.matchAll(AMT_INLINE_RX)].map((m) =>
+          Number(m[1].replace(/,/g, ""))
+        );
+        if (nums.length >= 1) amount = nums[0];
+      }
+
+      // Special case: Purchase with Cash Back ...
+      if (CASHBACK_RX.test(descriptor) && amount != null) {
+        const ctx3 = [L[i - 1] || "", descriptor, L[i + 1] || ""].join(" ");
+        const cbM = ctx3.match(
+          /cash\s*back\s*\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})?)/i
+        );
+        const cashback = cbM ? Number(cbM[1].replace(/,/g, "")) : 0;
+        const dateDisplay = dispDate
+          ? dispDate
+          : curDateIso
+          ? curDateIso.slice(5).replace("-", "/")
+          : ""; // MM/DD
+
+        // Split into purchase (gross - cashback) + cash-back row
+        const gross = amount;
+        const spendPortion = Math.max(0, +(gross - cashback).toFixed(2));
+        if (spendPortion > 0) {
+          rows.push({
+            dateDisplay,
+            description: descriptor,
+            amount: -spendPortion,
+            tag: "card_purchase",
+            parseNotes: ["cashback-split"],
+          });
+        }
+        if (cashback > 0) {
+          rows.push({
+            dateDisplay,
+            description: `${descriptor} (Cash back $${cashback.toFixed(2)})`,
+            amount: -cashback,
+            tag: "cb_cashback",
+            parseNotes: ["cashback-split"],
+          });
+        }
+
+        if (amtIdx != null) i = amtIdx + (hasBalanceNext ? 1 : 0);
+        continue;
+      }
+
+      if (amount == null) continue; // nothing to post
+
+      // Sign inference
+      const dlow = descriptor.toLowerCase();
+      let signed = -Math.abs(amount); // default debit
+      if (
+        XFER_FROM_RX.test(dlow) ||
+        ZELLE_FROM_RX.test(dlow) ||
+        ACH_CREDIT_RX.test(dlow) ||
+        /\b(payment\s*received|pmt\s*rcvd|thank\s*you)\b/i.test(dlow) ||
+        /\b(refund|reversal|return)\b/i.test(dlow) ||
+        /\b(credit\s*interest|interest\s*(payment|credit))\b/i.test(dlow) ||
+        GOV_BENEFIT_RX.test(dlow) ||
+        DEP_RX.test(dlow)
+      ) {
+        signed = Math.abs(amount); // credit
+      }
+      if (
+        XFER_TO_RX.test(dlow) ||
+        ZELLE_TO_RX.test(dlow) ||
+        ACH_DEBIT_RX.test(dlow) ||
+        CARD_PAYMENT_RX.test(dlow)
+      ) {
+        signed = -Math.abs(amount);
+      }
+
+      const dateDisplay = dispDate
+        ? dispDate
+        : curDateIso
+        ? curDateIso.slice(5).replace("-", "/")
+        : "";
+
+      rows.push({
+        dateDisplay,
+        description: descriptor,
+        amount: signed,
+        tag: signed > 0 ? "deposit" : "card_purchase",
+        parseNotes: [],
+      });
+
+      if (amtIdx != null) i = amtIdx + (hasBalanceNext ? 1 : 0);
+    }
+  });
+
+  // Map to TxRow with aliasing, merchant/category, user, overrides, and cleaned descriptions
+  const overrides: CatOverrideMap =
+    typeof window !== "undefined" ? readOverrides() : {};
+  const txs: TxRow[] = rows.map((r, idx) => {
+    const rawDesc = r.description;
+    const last4 = extractCardLast4(rawDesc);
+    const cleaned = stripAuthAndCard(rawDesc);
+    const aliasLabel = applyAlias(cleaned);
+    const merch = aliasLabel ?? canonMerchant(cleaned, null);
+    const baseCat =
+      r.tag === "cb_cashback" ? "Cash Back" : canonCategory(cleaned, merch);
+    const dateMMDD = r.dateDisplay || "";
+
+    const k = keyForTx(dateMMDD, cleaned, r.amount);
+    const categoryOverride = overrides[k];
+
+    return {
+      running: 0,
+      id: `tx-${idx}-${dateMMDD}-${Math.abs(r.amount).toFixed(2)}`,
+      date: dateMMDD,
+      description: cleaned,
+      amount: r.amount,
+      category: baseCat,
+      categoryOverride,
+      cardLast4: last4,
+      user: userFromLast4(last4),
+      notes: r.parseNotes.join("; "),
+    };
+  });
+
+  return { txs, pageMeta };
+}
+
+/* --------------------------- category select UI --------------------------- */
+
+const CATEGORY_ADD_SENTINEL = "__ADD__";
+
+function CategorySelect({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const { categories } = useCategories();
+  const [openMgr, setOpenMgr] = React.useState(false);
+
+  const sorted = React.useMemo(() => {
+    const list = [...categories].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: "base" })
+    );
+    const i = list.findIndex((x) => x.toLowerCase() === "uncategorized");
+    if (i >= 0) {
+      list.splice(i, 1);
+      list.push("Uncategorized");
+    }
+    return list;
+  }, [categories]);
+
+  return (
+    <>
+      <select
+        value={value}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === CATEGORY_ADD_SENTINEL) {
+            setOpenMgr(true);
+            return;
+          }
+          onChange(v);
+        }}
+        className="bg-white text-gray-700 border border-gray-300 rounded px-2 py-1
+                   placeholder-gray-400 dark:bg-white dark:text-gray-700"
+      >
+        {sorted.map((opt) => (
+          <option key={opt} value={opt}>
+            {opt}
+          </option>
+        ))}
+        <option value={CATEGORY_ADD_SENTINEL}>＋ Add Category…</option>
+      </select>
+      <CategoryManagerDialog open={openMgr} onClose={() => setOpenMgr(false)} />
+    </>
+  );
+}
+
+/* --------------------------------- page ---------------------------------- */
+
+export default function ReconcilerPage() {
+  const { applyAlias } = useAliases();
+
+  // Provider state for sharing with dashboard
+  const { transactions, setTransactions, inputs, setInputs } =
+    useReconcilerSelectors();
+
+  // Statement management
+  const [statements, setStatements] = React.useState<
+    Record<string, StatementSnapshot>
+  >({});
+  const [currentId, setCurrentId] = React.useState<string>("");
+  const [stmtYear, setStmtYear] = React.useState<number>(
+    new Date().getFullYear()
+  );
+  const [stmtMonth, setStmtMonth] = React.useState<number>(
+    new Date().getMonth() + 1
+  );
+
+  // Page accumulator
+  const [paste, setPaste] = React.useState("");
+  const [pages, setPages] = React.useState<
+    { idx: number; raw: string; lines: number }[]
+  >([]);
+
+  // Dialogs
+  const [openAliases, setOpenAliases] = React.useState(false);
+
+  // Accordion state
+  const [openDate, setOpenDate] = React.useState<Record<string, boolean>>({});
+
+  React.useEffect(() => {
+    // 1) build index if empty (and try migrating cache → statement)
+    const mig = migrateLegacyIfNeeded();
+
+    // 2) ensure at least one statement exists
+    let idx = readIndex();
+    if (!Object.keys(idx).length) {
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = now.getMonth() + 1;
+      const id = makeId(y, m);
+      const label = `${monthLabel(m)} ${y}`;
+      upsertStatement(emptyStatement(id, label, y, m));
+      idx = readIndex();
+    }
+
+    setStatements(idx);
+    const cid = readCurrentId() || Object.keys(idx)[0];
+    setCurrentId(cid);
+
+    let cur = idx[cid];
+    if (!cur) return;
+
+    // If the current statement has no pages, try to promote legacy cache into it (so user doesn't re-paste)
+    if ((!cur.pagesRaw || !cur.pagesRaw.length) && !mig.createdId) {
+      const legacy = loadLegacyLocal();
+      const pagesRaw = legacy.pagesRaw || [];
+      if (pagesRaw.length) {
+        const y = cur.stmtYear || new Date().getFullYear();
+        const m =
+          cur.stmtMonth ||
+          inferMonthFromPages(pagesRaw, y) ||
+          new Date().getMonth() + 1;
+        const recovered: StatementSnapshot = {
+          id: makeId(y, m),
+          label: `Recovered ${monthLabel(m)} ${y}`,
+          stmtYear: y,
+          stmtMonth: m,
+          pagesRaw,
+          inputs: {
+            beginningBalance: Number(legacy.inputs?.beginningBalance) || 0,
+            totalDeposits: Number(legacy.inputs?.totalDeposits) || 0,
+            totalWithdrawals: Number(legacy.inputs?.totalWithdrawals) || 0,
+          },
+        };
+        upsertStatement(recovered);
+        const fresh = readIndex();
+        setStatements(fresh);
+        setCurrentId(recovered.id);
+        cur = recovered;
+        writeCurrentId(recovered.id);
+      } else if (legacy.inputs) {
+        // at least carry inputs forward if available
+        cur = {
+          ...cur,
+          inputs: {
+            beginningBalance: Number(legacy.inputs.beginningBalance) || 0,
+            totalDeposits: Number(legacy.inputs.totalDeposits) || 0,
+            totalWithdrawals: Number(legacy.inputs.totalWithdrawals) || 0,
+          },
+        };
+        upsertStatement(cur);
+        const fresh = readIndex();
+        setStatements(fresh);
+      }
+    }
+
+    // Load current statement into UI
+    setStmtYear(cur.stmtYear);
+    setStmtMonth(cur.stmtMonth);
+    setInputs({
+      beginningBalance: cur.inputs?.beginningBalance ?? 0,
+      totalDeposits: cur.inputs?.totalDeposits ?? 0,
+      totalWithdrawals: cur.inputs?.totalWithdrawals ?? 0,
+    });
+
+    if (cur.pagesRaw && cur.pagesRaw.length) {
+      const res = rebuildFromPages(cur.pagesRaw, cur.stmtYear, applyAlias);
+      setPages(
+        cur.pagesRaw.map((raw, i) => ({
+          idx: i,
+          raw,
+          lines: raw.split(/\r?\n/).filter(Boolean).length,
+        }))
       );
-      setTransactions(txs);
-      setPages(pageMeta);
-    } catch {}
+      setTransactions(res.txs);
+    } else {
+      // no pages (but we may have inputs)
+      setPages([]);
+      // leave transactions as whatever legacy had (if any); else empty
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // auto-save whenever pages/year/inputs change
+  // Keep accordion defaults in sync with transactions
   React.useEffect(() => {
-    if (!remember) return;
-    const payload: SnapshotFile = {
-      stmtYear,
-      pagesRaw: pages.map((p) => p.raw),
-      inputs: {
-        beginningBalance: inputs.beginningBalance ?? begBal ?? 0,
-        totalDeposits: inputs.totalDeposits ?? userDeps ?? 0,
-        totalWithdrawals: inputs.totalWithdrawals ?? userWds ?? 0,
-      },
-    };
-    try {
-      localStorage.setItem(LS_KEY, JSON.stringify(payload));
-      localStorage.setItem(LS_PREF_KEY, remember ? "1" : "0");
-    } catch {}
-  }, [pages, stmtYear, inputs, begBal, userDeps, userWds, remember]);
-
-  function addPage() {
-    if (!pageRaw.trim()) return;
-    const { txs, unparsed } = parseAll(pageRaw, stmtYear);
-
-    const offset = transactions.length;
-    const mapped: CtxTransaction[] = txs
-      .filter((t) => t.amount != null)
-      .map((t, i) => {
-        const rawDesc = t.description ?? "";
-        // Canon merchant + category
-        const merch = canonMerchant(rawDesc, null);
-        let category =
-          t.tag === "cb_cashback" ? "Cash Back" : canonCategory(rawDesc, merch);
-
-        // MM/DD display only
-        const displayDate = t.dateDisplay ?? isoToMMDD(t.date);
-
-        return {
-          id: String(offset + i),
-          date: displayDate || "", // UI wants MM/DD
-          description: rawDesc,
-          amount: t.amount ?? 0,
-          category,
-          raw: t.raw,
-          notes: t.parseNotes.join("; "),
-        };
-      });
-
-    setTransactions(dedupeTransactions([...transactions, ...mapped]));
-
-    setPages((prev) => [
-      {
-        id: (
-          globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
-        ).toString(),
-        raw: pageRaw,
-        txCount: mapped.length,
-        unparsedCount: unparsed.length,
-      },
-      ...prev,
-    ]);
-    setPageRaw("");
-  }
-
-  function removePage(id: string) {
-    const remaining = pages.filter((p) => p.id !== id);
-    let all: CtxTransaction[] = [];
-    for (let i = remaining.length - 1; i >= 0; i--) {
-      const { txs } = parseAll(remaining[i].raw, stmtYear);
-      const mapped = txs
-        .filter((t) => t.amount != null)
-        .map((t) => {
-          const rawDesc = t.description ?? "";
-          const merch = canonMerchant(rawDesc, null);
-          const category =
-            t.tag === "cb_cashback"
-              ? "Cash Back"
-              : canonCategory(rawDesc, merch);
-
-          const displayDate = t.dateDisplay ?? isoToMMDD(t.date);
-
-          return {
-            id: "temp",
-            date: displayDate || "",
-            description: rawDesc,
-            amount: t.amount ?? 0,
-            category,
-            raw: t.raw,
-            notes: t.parseNotes.join("; "),
-          };
-        });
-      all = [...all, ...mapped];
-    }
-    all = all.map((t, i) => ({ ...t, id: String(i) }));
-    setTransactions(dedupeTransactions(all));
-    setPages(remaining);
-  }
-
-  function applyUserNumbers() {
-    setUserInputs({
-      beginningBalance: Number.isFinite(+begBal) ? +begBal : 0,
-      totalDeposits: Number.isFinite(+userDeps) ? +userDeps : 0,
-      totalWithdrawals: Number.isFinite(+userWds) ? +userWds : 0,
+    const dates = new Set<string>();
+    for (const t of transactions) if (t.amount < 0) dates.add(t.date || "");
+    setOpenDate((prev) => {
+      const next = { ...prev };
+      for (const d of dates) if (!(d in next)) next[d] = true;
+      return next;
     });
-  }
-
-  const endingDelta =
-    discrepancies.endingBalance == null
-      ? null
-      : Math.abs(discrepancies.endingBalance);
-
-  const allGood =
-    (flags.depositOk ?? true) &&
-    (flags.withdrawalOk ?? true) &&
-    (flags.endingOk ?? true) &&
-    transactions.length > 0;
-
-  // Category summary
-  const byCategory = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const t of transactions) {
-      const k = t.category ?? "Uncategorized";
-      m.set(k, (m.get(k) ?? 0) + t.amount);
-    }
-    return Array.from(m.entries()).sort(
-      (a, b) => Math.abs(b[1]) - Math.abs(a[1])
-    );
   }, [transactions]);
 
-  // Running balance
-  const rowsWithRunning = useMemo(() => {
-    const start = inputs.beginningBalance ?? 0;
-    let run = start;
-    return transactions.map((t) => {
-      run += t.amount;
-      return { ...t, running: run };
-    });
-  }, [transactions, inputs.beginningBalance]);
-
-  function finalizeReconciliation() {
-    const summary = [
+  function addPage() {
+    const raw = paste.trim();
+    if (!raw) return;
+    const next = [
+      ...pages,
       {
-        beginningBalance: inputs.beginningBalance ?? "",
-        parsedDeposits: totals.depositTotal.toFixed(2),
-        parsedWithdrawals: totals.withdrawalTotalAbs.toFixed(2),
-        computedEnding:
-          totals.endingBalance == null ? "" : totals.endingBalance.toFixed(2),
+        idx: pages.length,
+        raw,
+        lines: raw.split(/\r?\n/).filter(Boolean).length,
       },
     ];
-    downloadCSV(summary, "reconciliation-summary.csv");
+    setPages(next);
+    setPaste("");
 
-    downloadCSV(
-      transactions.map((t) => ({
-        date: t.date, // MM/DD
-        description: t.description,
-        category: t.category ?? "",
-        amount: t.amount.toFixed(2),
-        raw: t.raw ?? "",
-        notes: t.notes ?? "",
-      })),
-      "reconciled-transactions.csv"
-    );
-
-    const snapshot = {
-      statementYear: stmtYear,
-      inputs,
-      totals,
-      discrepancies,
-      transactions,
-    };
-    const blob = new Blob([JSON.stringify(snapshot, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "reconciliation-snapshot.json";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  }
-
-  // after you read inputs/totals/transactions from context
-  const depDelta = useMemo(() => {
-    if (inputs.totalDeposits == null) return 0;
-    return +(totals.depositTotal - inputs.totalDeposits).toFixed(2); // parsed - user (your UI format)
-  }, [totals.depositTotal, inputs.totalDeposits]);
-
-  const wdrDelta = useMemo(() => {
-    if (inputs.totalWithdrawals == null) return 0;
-    return +(totals.withdrawalTotalAbs - inputs.totalWithdrawals).toFixed(2); // parsed - user
-  }, [totals.withdrawalTotalAbs, inputs.totalWithdrawals]);
-
-  // when these are equal & opposite, we likely mis-signed items totaling this magnitude
-  const suspectDelta = useMemo(() => {
-    const tol = 0.01;
-    if (Math.abs(depDelta + wdrDelta) <= tol && Math.abs(depDelta) > tol) {
-      return Math.abs(depDelta);
-    }
-    return 0;
-  }, [depDelta, wdrDelta]);
-
-  const mismatchCandidates = useMemo(() => {
-    if (!suspectDelta) return [];
-    const tol = 0.01;
-    const amb =
-      /(transfer|xfer|tfr|zelle|ach|refund|reversal|return|interest|payment\s*received|thank\s*you)/i;
-    // Look for a single row whose abs(amount) ≈ suspectDelta and looks ambiguous
-    return transactions
-      .filter(
-        (t) =>
-          Math.abs(Math.abs(t.amount) - suspectDelta) <= tol &&
-          amb.test(t.description ?? "")
-      )
-      .slice(0, 10);
-  }, [transactions, suspectDelta]);
-
-  function flipSign(id: string) {
-    const updated = transactions.map((t) =>
-      t.id === id ? { ...t, amount: -t.amount } : t
-    );
-    setTransactions(updated);
-  }
-
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
-
-  function rerunParsing() {
-    const pagesRaw = pages.map((p) => p.raw);
-    const { txs, pageMeta } = rebuildFromPages(pagesRaw, stmtYear);
-    setTransactions(txs);
-    setPages(pageMeta);
-  }
-
-  function exportSnapshot() {
-    const snap: SnapshotFile = {
+    // persist into current statement + parse
+    const cur = statements[currentId];
+    const updated: StatementSnapshot = {
+      ...(cur ??
+        emptyStatement(
+          currentId,
+          `${monthLabel(stmtMonth)} ${stmtYear}`,
+          stmtYear,
+          stmtMonth
+        )),
       stmtYear,
-      pagesRaw: pages.map((p) => p.raw),
+      stmtMonth,
+      pagesRaw: next.map((p) => p.raw),
       inputs: {
-        beginningBalance: inputs.beginningBalance ?? begBal ?? 0,
-        totalDeposits: inputs.totalDeposits ?? userDeps ?? 0,
-        totalWithdrawals: inputs.totalWithdrawals ?? userWds ?? 0,
+        beginningBalance: inputs.beginningBalance ?? 0,
+        totalDeposits: inputs.totalDeposits ?? 0,
+        totalWithdrawals: inputs.totalWithdrawals ?? 0,
       },
     };
-    const blob = new Blob([JSON.stringify(snap, null, 2)], {
-      type: "application/json",
+
+    upsertStatement(updated);
+    setStatements(readIndex());
+
+    const res = rebuildFromPages(
+      updated.pagesRaw,
+      updated.stmtYear,
+      applyAlias
+    );
+    setTransactions(res.txs);
+  }
+
+  function removePage(idx: number) {
+    const next = pages
+      .filter((p) => p.idx !== idx)
+      .map((p, i) => ({ ...p, idx: i }));
+    setPages(next);
+
+    const cur = statements[currentId];
+    if (!cur) return;
+    const updated = { ...cur, pagesRaw: next.map((p) => p.raw) };
+    upsertStatement(updated);
+    setStatements(readIndex());
+
+    const res = rebuildFromPages(
+      updated.pagesRaw,
+      updated.stmtYear,
+      applyAlias
+    );
+    setTransactions(res.txs);
+  }
+
+  function rerunParsing() {
+    const cur = statements[currentId];
+    const rawPages = cur?.pagesRaw ?? pages.map((p) => p.raw);
+    const res = rebuildFromPages(rawPages, stmtYear, applyAlias);
+    setTransactions(res.txs);
+  }
+
+  function createStatement() {
+    // start from currently selected Y/M; new statement is next month
+    const { year: ny, month: nm } = nextMonth(stmtYear, stmtMonth);
+    const id = makeId(ny, nm);
+    const label = `${monthLabel(nm)} ${ny}`;
+    const s = emptyStatement(id, label, ny, nm);
+    upsertStatement(s);
+
+    const idx = readIndex();
+    setStatements(idx);
+    setCurrentId(id);
+    writeCurrentId(id);
+    setStmtYear(ny);
+    setStmtMonth(nm);
+
+    // reset UI
+    setInputs({ beginningBalance: 0, totalDeposits: 0, totalWithdrawals: 0 });
+    setPages([]);
+    setTransactions([]);
+  }
+
+  function onSwitchStatement(id: string) {
+    setCurrentId(id);
+    writeCurrentId(id);
+    const s = readIndex()[id];
+    if (!s) return;
+    setStmtYear(s.stmtYear);
+    setStmtMonth(s.stmtMonth);
+    setInputs({
+      beginningBalance: s.inputs?.beginningBalance ?? 0,
+      totalDeposits: s.inputs?.totalDeposits ?? 0,
+      totalWithdrawals: s.inputs?.totalWithdrawals ?? 0,
     });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "reconciler-pages-snapshot.json";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    setPages(
+      (s.pagesRaw || []).map((raw, i) => ({
+        idx: i,
+        raw,
+        lines: raw.split(/\r?\n/).filter(Boolean).length,
+      }))
+    );
+    const res = rebuildFromPages(s.pagesRaw || [], s.stmtYear, applyAlias);
+    setTransactions(res.txs);
   }
 
-  function importSnapshot(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const snap = JSON.parse(String(reader.result)) as SnapshotFile;
-        if (snap && Array.isArray(snap.pagesRaw)) {
-          setStmtYear(snap.stmtYear || new Date().getFullYear());
-          if (snap.inputs) {
-            setBegBal(snap.inputs.beginningBalance ?? 0);
-            setUserDeps(snap.inputs.totalDeposits ?? 0);
-            setUserWds(snap.inputs.totalWithdrawals ?? 0);
-            setUserInputs({
-              beginningBalance: snap.inputs.beginningBalance ?? 0,
-              totalDeposits: snap.inputs.totalDeposits ?? 0,
-              totalWithdrawals: snap.inputs.totalWithdrawals ?? 0,
-            });
-          }
-          const { txs, pageMeta } = rebuildFromPages(
-            snap.pagesRaw,
-            snap.stmtYear || new Date().getFullYear()
-          );
-          setTransactions(txs);
-          setPages(pageMeta);
-        }
-      } catch {}
-      e.target.value = ""; // reset for next import
-    };
-    reader.readAsText(f);
-  }
-
-  function clearLocalCopy() {
-    try {
-      localStorage.removeItem(LS_KEY);
-    } catch {}
-  }
-
-  const currency = (n: number) =>
-    n.toLocaleString(undefined, { style: "currency", currency: "USD" });
-
-  const withdrawals = React.useMemo(
-    () => transactions.filter((t) => (t.amount ?? 0) < 0),
-    [transactions]
-  );
+  // Totals/derived views
   const deposits = React.useMemo(
     () => transactions.filter((t) => (t.amount ?? 0) > 0),
     [transactions]
   );
+  const withdrawals = React.useMemo(
+    () => transactions.filter((t) => (t.amount ?? 0) < 0),
+    [transactions]
+  );
 
-  // group withdrawals by date
   const groups = React.useMemo(() => {
-    const m = new Map<string, { rows: typeof transactions; total: number }>();
+    const m = new Map<string, { rows: TxRow[]; total: number }>();
     for (const t of withdrawals) {
       const k = t.date || "";
       const g = m.get(k) ?? { rows: [], total: 0 };
@@ -1075,513 +721,296 @@ export default function Page() {
     return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
   }, [withdrawals]);
 
-  const [openDate, setOpenDate] = React.useState<Record<string, boolean>>({});
-  React.useEffect(() => {
-    // default newly-seen dates to open
-    setOpenDate((prev) => {
-      const next = { ...prev };
-      for (const [d] of groups) if (!(d in next)) next[d] = true;
-      return next;
-    });
-  }, [groups]);
+  const parsedDeposits = +deposits
+    .reduce((s, r) => s + (r.amount ?? 0), 0)
+    .toFixed(2);
+  const parsedWithdrawals = +withdrawals
+    .reduce((s, r) => s + Math.abs(r.amount ?? 0), 0)
+    .toFixed(2);
+  const endingBalance = +(
+    (inputs.beginningBalance ?? 0) +
+    parsedDeposits -
+    parsedWithdrawals
+  ).toFixed(2);
 
-  const expandAll = () => {
-    const all: Record<string, boolean> = {};
-    for (const [d] of groups) all[d] = true;
-    setOpenDate(all);
-  };
-  const collapseAll = () => {
-    const all: Record<string, boolean> = {};
-    for (const [d] of groups) all[d] = false;
-    setOpenDate(all);
-  };
+  const depDelta = +(parsedDeposits - (inputs.totalDeposits ?? 0)).toFixed(2);
+  const wdrDelta = +(
+    parsedWithdrawals - (inputs.totalWithdrawals ?? 0)
+  ).toFixed(2);
+  const endDelta = +(
+    endingBalance -
+    ((inputs.beginningBalance ?? 0) +
+      (inputs.totalDeposits ?? 0) -
+      (inputs.totalWithdrawals ?? 0))
+  ).toFixed(2);
 
-  /* ───────────────────────────────────────── UI ───────────────────────────────────────── */
-
-  const CATEGORY_ADD_SENTINEL = "__ADD__";
-
-  function CategorySelect({
-    value,
-    onChange,
-  }: {
-    value: string;
-    onChange: (v: string) => void;
-  }) {
-    const { categories } = useCategories();
-    const [openMgr, setOpenMgr] = React.useState(false);
-
-    const sorted = React.useMemo(() => {
-      const list = [...categories].sort((a, b) =>
-        a.localeCompare(b, undefined, { sensitivity: "base" })
-      );
-      // push "Uncategorized" to end if present
-      const i = list.findIndex((x) => x.toLowerCase() === "uncategorized");
-      if (i >= 0) {
-        list.splice(i, 1);
-        list.push("Uncategorized");
-      }
-      return list;
-    }, [categories]);
-
-    return (
-      <>
-        <select
-          value={value}
-          onChange={(e) => {
-            const v = e.target.value;
-            if (v === CATEGORY_ADD_SENTINEL) {
-              setOpenMgr(true);
-              return;
-            }
-            onChange(v);
-          }}
-          className="bg-white text-gray-700 border border-gray-300 rounded px-2 py-1
-                   placeholder-gray-400 dark:bg-white dark:text-gray-700"
-        >
-          {sorted.map((opt) => (
-            <option key={opt} value={opt}>
-              {opt}
-            </option>
-          ))}
-          <option value={CATEGORY_ADD_SENTINEL}>＋ Add Category…</option>
-        </select>
-        <CategoryManagerDialog
-          open={openMgr}
-          onClose={() => setOpenMgr(false)}
-        />
-      </>
-    );
-  }
+  /* ---------------------------------- UI ---------------------------------- */
 
   return (
-    <div className="mx-auto max-w-6xl p-6 space-y-8">
-      <header className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Pasted Statement Reconciler</h1>
-        <div className="flex items-center gap-3">
+    <div className="mx-auto max-w-6xl p-6 space-y-6">
+      <h1 className="text-2xl font-bold">Reconciler</h1>
+
+      {/* Statement switcher */}
+      <div className="flex items-center gap-2">
+        <label className="text-sm opacity-80">Statement:</label>
+        <select
+          className="border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
+          value={currentId}
+          onChange={(e) => onSwitchStatement(e.target.value)}
+        >
+          {Object.values(statements).map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+        <button
+          className="text-sm border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
+          onClick={createStatement}
+        >
+          + New Statement
+        </button>
+
+        {currentId && (
           <button
-            onClick={resetAll}
-            className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-            title="Clear context and local storage"
+            className="text-sm border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
+            onClick={() => {
+              if (confirm("Delete this statement?")) {
+                removeStatement(currentId);
+                const idx = readIndex();
+                setStatements(idx);
+                const nextId = readCurrentId();
+                if (nextId) onSwitchStatement(nextId);
+                else {
+                  setCurrentId("");
+                  setPages([]);
+                  setTransactions([]);
+                }
+              }
+            }}
           >
-            Reset
+            Delete
+          </button>
+        )}
+
+        {/* dialogs toggles */}
+        <button
+          className="ml-auto rounded border px-2 py-1 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
+          onClick={() => setOpenAliases(true)}
+        >
+          Manage Aliases
+        </button>
+        <AliasManagerDialog
+          open={openAliases}
+          onClose={() => setOpenAliases(false)}
+        />
+      </div>
+
+      {/* User inputs */}
+      <section className="rounded border p-4">
+        <h3 className="font-semibold mb-3">Statement numbers</h3>
+        <div className="grid md:grid-cols-4 gap-3 items-end">
+          <div>
+            <label className="text-xs block mb-1">Statement Year</label>
+            <input
+              type="number"
+              className="w-full border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
+              value={stmtYear}
+              onChange={(e) => setStmtYear(Number(e.target.value) || stmtYear)}
+            />
+          </div>
+
+          <div>
+            <label className="text-xs block mb-1">Statement Month</label>
+            <select
+              className="w-full border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
+              value={stmtMonth}
+              onChange={(e) => setStmtMonth(Number(e.target.value))}
+            >
+              {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                <option key={m} value={m}>
+                  {monthLabel(m)}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="text-xs block mb-1">Beginning Balance</label>
+            <input
+              type="number"
+              step="0.01"
+              className="w-full border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
+              value={inputs.beginningBalance ?? 0}
+              onChange={(e) =>
+                setInputs({
+                  ...inputs,
+                  beginningBalance: Number(e.target.value) || 0,
+                })
+              }
+            />
+          </div>
+          <div>
+            <label className="text-xs block mb-1">Total Deposits</label>
+            <input
+              type="number"
+              step="0.01"
+              className="w-full border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
+              value={inputs.totalDeposits ?? 0}
+              onChange={(e) =>
+                setInputs({
+                  ...inputs,
+                  totalDeposits: Number(e.target.value) || 0,
+                })
+              }
+            />
+          </div>
+          <div>
+            <label className="text-xs block mb-1">Total Withdrawals</label>
+            <input
+              type="number"
+              step="0.01"
+              className="w-full border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
+              value={inputs.totalWithdrawals ?? 0}
+              onChange={(e) =>
+                setInputs({
+                  ...inputs,
+                  totalWithdrawals: Number(e.target.value) || 0,
+                })
+              }
+            />
+          </div>
+        </div>
+
+        {/* reconciliation status */}
+        <div className="grid md:grid-cols-3 gap-3 mt-4 text-sm">
+          <div className="rounded border p-3">
+            <div className="opacity-70">Parsed Deposits</div>
+            <div
+              className={
+                (depDelta === 0
+                  ? "text-emerald-700 dark:text-emerald-400"
+                  : "text-amber-700 dark:text-amber-400") + " font-semibold"
+              }
+            >
+              {depDelta === 0 ? "✅ " : "⚠️ "} {money(parsedDeposits)}
+            </div>
+            <div className="opacity-70">
+              User: {money(inputs.totalDeposits ?? 0)} (Δ {money(depDelta)})
+            </div>
+          </div>
+          <div className="rounded border p-3">
+            <div className="opacity-70">Parsed Withdrawals</div>
+            <div
+              className={
+                (wdrDelta === 0
+                  ? "text-emerald-700 dark:text-emerald-400"
+                  : "text-amber-700 dark:text-amber-400") + " font-semibold"
+              }
+            >
+              {wdrDelta === 0 ? "✅ " : "⚠️ "} {money(parsedWithdrawals)}
+            </div>
+            <div className="opacity-70">
+              User: {money(inputs.totalWithdrawals ?? 0)} (Δ {money(wdrDelta)})
+            </div>
+          </div>
+          <div className="rounded border p-3">
+            <div className="opacity-70">Ending Balance</div>
+            <div
+              className={
+                (endDelta === 0
+                  ? "text-emerald-700 dark:text-emerald-400"
+                  : "text-rose-700 dark:text-rose-400") + " font-semibold"
+              }
+            >
+              {endDelta === 0 ? "✅ " : "❌ "} {money(endingBalance)}
+            </div>
+            <div className="opacity-70">
+              User:{" "}
+              {money(
+                (inputs.beginningBalance ?? 0) +
+                  (inputs.totalDeposits ?? 0) -
+                  (inputs.totalWithdrawals ?? 0)
+              )}{" "}
+              (Δ {money(endDelta)})
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* paste area + pages */}
+      <section className="rounded border p-4 space-y-3">
+        <h3 className="font-semibold">Add page</h3>
+        <textarea
+          rows={6}
+          className="w-full border rounded px-2 py-2 bg-white dark:bg-white text-gray-700"
+          placeholder="Paste one statement page here…"
+          value={paste}
+          onChange={(e) => setPaste(e.target.value)}
+        />
+        <div className="flex gap-2">
+          <button
+            className="rounded border px-3 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
+            onClick={addPage}
+          >
+            + Add Page
+          </button>
+          <button
+            className="rounded border px-3 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
+            onClick={rerunParsing}
+          >
+            Re-run parsing
           </button>
         </div>
-      </header>
-
-      {/* Statement year + multi-page paste */}
-      <section className="grid md:grid-cols-2 gap-6">
-        <div className="space-y-3">
-          <div className="flex items-end gap-4">
-            <label className="block">
-              <span className="text-sm">
-                Statement year (for dates like MM/DD)
-              </span>
-              <input
-                type="number"
-                className="mt-1 w-28 rounded border px-2 py-2 dark:bg-gray-900 dark:text-gray-100"
-                value={stmtYear}
-                onChange={(e) =>
-                  setStmtYear(
-                    Number(e.target.value || new Date().getFullYear())
-                  )
-                }
-              />
-            </label>
-          </div>
-
-          <label className="block text-sm font-medium mt-2">
-            Paste a page of transactions
-          </label>
-          <textarea
-            className="w-full h-48 rounded-lg border p-3 font-mono text-sm dark:bg-gray-900 dark:text-gray-100"
-            placeholder={`Paste one statement page here, then click Add Page.\nWe’ll clear this box so you can paste the next page.`}
-            value={pageRaw}
-            onChange={(e) => setPageRaw(e.target.value)}
-          />
-          <div className="flex items-center gap-3">
-            <button
-              onClick={addPage}
-              className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-            >
-              Add Page
-            </button>
-            <button
-              onClick={() => setPageRaw("")}
-              className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-            >
-              Clear
-            </button>
-          </div>
-          <p className="text-xs text-gray-500">
-            We group multi-line entries, drop daily-balance lines, and split
-            “Purchase with Cash Back” correctly.
-          </p>
-        </div>
-
-        <div className="space-y-2">
-          <div className="text-sm font-medium">Imported pages</div>
-
-          <div className="flex flex-wrap gap-2 items-center mb-2">
-            <button
-              onClick={rerunParsing}
-              className="rounded border px-2 py-1 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-              title="Re-parse all saved pages with the current parser"
-            >
-              Re-run parsing
-            </button>
-            <button
-              onClick={exportSnapshot}
-              className="rounded border px-2 py-1 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-              title="Download a JSON snapshot (includes raw pages)"
-            >
-              Export snapshot
-            </button>
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="rounded border px-2 py-1 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-              title="Load a previously exported JSON snapshot"
-            >
-              Import snapshot
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="application/json"
-              className="hidden"
-              onChange={importSnapshot}
-            />
-            <label className="ml-auto inline-flex items-center gap-2 text-xs">
-              <input
-                type="checkbox"
-                checked={remember}
-                onChange={(e) => setRemember(e.target.checked)}
-              />
-              Remember on this device
-            </label>
-            <button
-              onClick={clearLocalCopy}
-              className="rounded border px-2 py-1 text-xs hover:bg-gray-50 dark:hover:bg-gray-800"
-              title="Delete the cached pages from this browser"
-            >
-              Clear local copy
-            </button>
-          </div>
-
-          {/* existing list of pages below stays the same */}
-          {pages.length === 0 ? (
-            <div className="text-sm text-gray-600 dark:text-gray-300">
-              No pages yet.
-            </div>
-          ) : (
-            <ul className="space-y-2">
-              {pages.map((p, idx) => (
+        {pages.length > 0 && (
+          <div className="text-sm">
+            <div className="opacity-70 mb-2">Imported pages</div>
+            <ul className="flex flex-wrap gap-2">
+              {pages.map((p) => (
                 <li
-                  key={p.id}
-                  className="rounded border p-3 flex items-center justify-between"
+                  key={p.idx}
+                  className="flex items-center gap-2 border rounded px-2 py-1"
                 >
-                  <div className="text-sm">
-                    <div className="font-medium">Page {pages.length - idx}</div>
-                    <div className="text-gray-600 dark:text-gray-300">
-                      Parsed: <strong>{p.txCount}</strong>, Needs attention:{" "}
-                      <strong>{p.unparsedCount}</strong>
-                    </div>
-                  </div>
+                  <span>Page {p.idx + 1}</span>
+                  <span className="opacity-60">({p.lines} lines)</span>
                   <button
-                    className="text-sm px-2 py-1 rounded border hover:bg-gray-50 dark:hover:bg-gray-800"
-                    onClick={() => removePage(p.id)}
-                    title="Remove this page and rebuild"
+                    className="text-xs border rounded px-2 py-0.5 hover:bg-gray-50 dark:hover:bg-gray-800"
+                    onClick={() => removePage(p.idx)}
                   >
                     Remove
                   </button>
                 </li>
               ))}
             </ul>
-          )}
-        </div>
-      </section>
-
-      {/* User-provided numbers */}
-      <section className="grid sm:grid-cols-3 gap-4">
-        <label className="block">
-          <span className="text-sm">Beginning balance</span>
-          <input
-            className="mt-1 w-full rounded border p-2 dark:bg-gray-900 dark:text-gray-100"
-            type="number"
-            step="0.01"
-            value={begBal}
-            onChange={(e) => setBegBal(+e.target.value)}
-          />
-        </label>
-        <label className="block">
-          <span className="text-sm">Total deposits (user)</span>
-          <input
-            className="mt-1 w-full rounded border p-2 dark:bg-gray-900 dark:text-gray-100"
-            type="number"
-            step="0.01"
-            value={userDeps}
-            onChange={(e) => setUserDeps(+e.target.value)}
-          />
-        </label>
-        <label className="block">
-          <span className="text-sm">Total withdrawals (user)</span>
-          <input
-            className="mt-1 w-full rounded border p-2 dark:bg-gray-900 dark:text-gray-100"
-            type="number"
-            step="0.01"
-            value={userWds}
-            onChange={(e) => setUserWds(+e.target.value)}
-          />
-        </label>
-
-        <div className="sm:col-span-3 flex items-center gap-3">
-          <label className="block">
-            <span className="text-sm">Tolerance (cents)</span>
-            <input
-              type="number"
-              className="mt-1 w-28 rounded border px-2 py-2 dark:bg-gray-900 dark:text-gray-100"
-              value={settings.toleranceCents}
-              onChange={(e) =>
-                setSettings({ toleranceCents: Number(e.target.value) })
-              }
-              min={0}
-            />
-          </label>
-          <button
-            onClick={applyUserNumbers}
-            className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-            title="Apply user numbers to reconciliation"
-          >
-            Apply numbers
-          </button>
-        </div>
-      </section>
-
-      {/* Summary cards */}
-      <section className="grid md:grid-cols-3 gap-4">
-        <SummaryCard
-          title="Parsed Deposits"
-          value={currency(totals.depositTotal)}
-          status={
-            flags.depositOk == null ? "na" : flags.depositOk ? "ok" : "warn"
-          }
-          subtitle={
-            inputs.totalDeposits != null
-              ? `User: ${currency(inputs.totalDeposits)}`
-              : "User: —"
-          }
-          delta={
-            discrepancies.deposits == null
-              ? undefined
-              : `Δ ${currency(discrepancies.deposits)}`
-          }
-        />
-        <SummaryCard
-          title="Parsed Withdrawals"
-          value={currency(totals.withdrawalTotalAbs)}
-          status={
-            flags.withdrawalOk == null
-              ? "na"
-              : flags.withdrawalOk
-              ? "ok"
-              : "warn"
-          }
-          subtitle={
-            inputs.totalWithdrawals != null
-              ? `User: ${currency(inputs.totalWithdrawals)}`
-              : "User: —"
-          }
-          delta={
-            discrepancies.withdrawals == null
-              ? undefined
-              : `Δ ${currency(discrepancies.withdrawals)}`
-          }
-        />
-        <SummaryCard
-          title="Ending Balance"
-          value={
-            totals.endingBalance == null ? "—" : currency(totals.endingBalance)
-          }
-          status={
-            flags.endingOk == null ? "na" : flags.endingOk ? "ok" : "error"
-          }
-          subtitle={(() => {
-            if (
-              inputs.beginningBalance == null ||
-              inputs.totalDeposits == null ||
-              inputs.totalWithdrawals == null
-            )
-              return "User: —";
-            const userEnding =
-              inputs.beginningBalance +
-              inputs.totalDeposits -
-              inputs.totalWithdrawals;
-            return `User: ${currency(userEnding)}`;
-          })()}
-          delta={endingDelta == null ? undefined : `Δ ${currency(endingDelta)}`}
-        />
-      </section>
-
-      {/* Category summary */}
-      <section className="rounded border p-4">
-        <h3 className="font-semibold mb-2">By Category</h3>
-        {byCategory.length === 0 ? (
-          <div className="text-sm text-gray-500">No data.</div>
-        ) : (
-          <ul className="text-sm grid sm:grid-cols-2 gap-x-6">
-            {byCategory.map(([cat, sum]) => (
-              <li
-                key={cat}
-                className="flex items-center justify-between py-1 border-b border-dashed border-gray-200 dark:border-gray-800"
-              >
-                <span className="text-gray-800 dark:text-gray-200">{cat}</span>
-                <span
-                  className={
-                    sum < 0
-                      ? "text-red-700 dark:text-red-400"
-                      : "text-emerald-700 dark:text-emerald-400"
-                  }
-                >
-                  {currency(sum)}
-                </span>
-              </li>
-            ))}
-          </ul>
+          </div>
         )}
       </section>
 
-      {/* Diagnostics */}
-      <section className="space-y-3">
-        <h2 className="text-lg font-semibold">Diagnostics</h2>
-        <ul className="text-sm space-y-2">
-          <li>
-            Transactions parsed: <strong>{transactions.length}</strong>
-          </li>
-          {flags.depositOk === false && (
-            <li className="text-amber-600">
-              ⚠️ Deposits mismatch. Check for missed/duplicated entries or page
-              summaries being pasted.
-            </li>
-          )}
-          {flags.withdrawalOk === false && (
-            <li className="text-amber-600">
-              ⚠️ Withdrawals mismatch. Double-check pasted pages.
-            </li>
-          )}
-          {flags.endingOk === false && endingDelta != null && (
-            <li className="text-red-600">
-              ❌ Ending balance discrepancy of {currency(endingDelta)}{" "}
-              (tolerance ${(settings.toleranceCents / 100).toFixed(2)}). Check
-              for missing/extra transactions or sign errors.
-            </li>
-          )}
-          {flags.endingOk &&
-            flags.depositOk &&
-            flags.withdrawalOk &&
-            transactions.length > 0 && (
-              <li className="text-emerald-700">
-                ✅ Everything lines up. Click{" "}
-                <strong>Finalize Reconciliation</strong> to export your report.
-              </li>
-            )}
-        </ul>
-
-        {suspectDelta > 0 && (
-          <li className="text-blue-700 dark:text-blue-300">
-            🔎 Deposits and withdrawals deltas are equal and opposite. This
-            usually means a credit was signed as a debit. Look for amount ≈{" "}
-            <strong>{currency(suspectDelta)}</strong>.
-          </li>
-        )}
-        {mismatchCandidates.length > 0 && (
-          <li className="text-sm">
-            Likely sign-error candidates:
-            <ul className="mt-1 space-y-1">
-              {mismatchCandidates.map((t) => (
-                <li
-                  key={`cand-${t.id}`}
-                  className="flex items-center justify-between gap-3 border rounded px-2 py-1"
-                >
-                  <div className="truncate">
-                    <span className="mr-2 font-mono">{t.date}</span>
-                    <span className="mr-2">{t.description}</span>
-                    <span
-                      className={
-                        t.amount < 0
-                          ? "text-red-700 dark:text-red-400"
-                          : "text-emerald-700 dark:text-emerald-400"
-                      }
-                    >
-                      {currency(t.amount)}
-                    </span>
-                  </div>
-                  <button
-                    className="text-xs rounded border px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
-                    onClick={() => flipSign(t.id)}
-                    title="Flip this transaction's sign"
-                  >
-                    Flip sign
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </li>
-        )}
-      </section>
-
-      {/* Table */}
-      <section className="rounded border p-4 mt-6">
-        <h3 className="font-semibold mb-3">Deposits</h3>
-        {deposits.length === 0 ? (
-          <div className="text-sm text-gray-500">No deposits.</div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 dark:bg-gray-900">
-              <tr>
-                <th className="text-left p-2 w-20">Date</th>
-                <th className="text-left p-2">Description</th>
-                <th className="text-right p-2">Amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              {deposits.map((t) => (
-                <tr key={`dep-${t.id}`} className="border-t">
-                  <td className="p-2">{t.date}</td>
-                  <td className="p-2">{t.description}</td>
-                  <td className="p-2 text-right text-emerald-700 dark:text-emerald-400">
-                    {currency(t.amount)}
-                  </td>
-                </tr>
-              ))}
-              <tr className="border-t font-medium">
-                <td className="p-2" colSpan={2}>
-                  Total
-                </td>
-                <td className="p-2 text-right">
-                  {currency(deposits.reduce((s, r) => s + (r.amount ?? 0), 0))}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        )}
-      </section>
-
-      {/* Controls */}
-      <div className="flex gap-2 mb-2">
+      {/* accordion controls */}
+      <div className="flex gap-2">
         <button
           className="text-xs border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
-          onClick={expandAll}
+          onClick={() => {
+            const all: Record<string, boolean> = {};
+            for (const [d] of groups) all[d] = true;
+            setOpenDate(all);
+          }}
         >
           Expand all
         </button>
         <button
           className="text-xs border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
-          onClick={collapseAll}
+          onClick={() => {
+            const all: Record<string, boolean> = {};
+            for (const [d] of groups) all[d] = false;
+            setOpenDate(all);
+          }}
         >
           Collapse all
         </button>
       </div>
 
-      {/* Groups */}
+      {/* withdrawals grouped by date */}
       <div className="rounded border divide-y">
         {groups.map(([date, g]) => (
           <div key={date}>
@@ -1598,7 +1027,7 @@ export default function Page() {
               <div className="text-sm">
                 Day total:{" "}
                 <span className="font-medium text-red-700 dark:text-red-400">
-                  {currency(g.total)}
+                  {money(g.total)}
                 </span>
               </div>
             </button>
@@ -1609,6 +1038,7 @@ export default function Page() {
                   <tr>
                     <th className="text-left p-2 w-1/2">Description</th>
                     <th className="text-left p-2">Category</th>
+                    <th className="text-left p-2">User</th>
                     <th className="text-right p-2">Amount</th>
                   </tr>
                 </thead>
@@ -1628,18 +1058,23 @@ export default function Page() {
                               t.amount ?? 0
                             );
                             writeOverride(k, val);
-                            setTransactions(
-                              transactions.map((row) =>
-                                row.id === t.id
-                                  ? { ...row, categoryOverride: val }
-                                  : row
-                              )
+                            const updated = transactions.map((row) =>
+                              row.id === t.id
+                                ? { ...row, categoryOverride: val }
+                                : row
                             );
+                            setTransactions(updated);
                           }}
                         />
                       </td>
+                      <td className="p-2">
+                        {t.user ??
+                          (t.cardLast4
+                            ? userFromLast4(t.cardLast4)
+                            : "Unknown")}
+                      </td>
                       <td className="p-2 text-right text-red-700 dark:text-red-400">
-                        {currency(Math.abs(t.amount))}
+                        {money(Math.abs(t.amount))}
                       </td>
                     </tr>
                   ))}
@@ -1648,99 +1083,47 @@ export default function Page() {
             )}
           </div>
         ))}
+        {groups.length === 0 && (
+          <div className="p-3 text-sm text-gray-500">
+            No withdrawals parsed yet.
+          </div>
+        )}
       </div>
 
-      {/* Finalize */}
-      <section className="rounded border p-4 flex items-center justify-between">
-        <div className="text-sm text-gray-700 dark:text-gray-200">
-          {allGood ? (
-            <span>
-              Everything checks out. Export your reconciliation artifacts.
-            </span>
-          ) : (
-            <span>Fix mismatches above before finalizing.</span>
-          )}
-        </div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() =>
-              downloadCSV(
-                transactions.map((t) => ({
-                  date: t.date, // MM/DD
-                  description: t.description,
-                  category: t.category ?? "",
-                  amount: t.amount.toFixed(2),
-                  raw: t.raw ?? "",
-                  notes: t.notes ?? "",
-                })),
-                "reconciled-transactions.csv"
-              )
-            }
-            className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-          >
-            Export CSV
-          </button>
-          <button
-            onClick={finalizeReconciliation}
-            disabled={!allGood}
-            className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
-            title="Save summary, CSV, and JSON snapshot"
-          >
-            Finalize Reconciliation
-          </button>
-        </div>
+      {/* deposits table */}
+      <section className="rounded border p-4">
+        <h3 className="font-semibold mb-3">Deposits</h3>
+        {deposits.length === 0 ? (
+          <div className="text-sm text-gray-500">No deposits.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 dark:bg-gray-900">
+              <tr>
+                <th className="text-left p-2 w-20">Date</th>
+                <th className="text-left p-2">Description</th>
+                <th className="text-right p-2">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {deposits.map((t) => (
+                <tr key={`dep-${t.id}`} className="border-t">
+                  <td className="p-2">{t.date}</td>
+                  <td className="p-2">{t.description}</td>
+                  <td className="p-2 text-right text-emerald-700 dark:text-emerald-400">
+                    {money(t.amount)}
+                  </td>
+                </tr>
+              ))}
+              <tr className="border-t font-medium">
+                <td className="p-2" colSpan={2}>
+                  Total
+                </td>
+                <td className="p-2 text-right">{money(parsedDeposits)}</td>
+              </tr>
+            </tbody>
+          </table>
+        )}
       </section>
-
-      <footer className="text-xs text-gray-500">
-        Dates show as <strong>MM/DD</strong>. We infer signs from
-        description/merchants (default debit), split “Purchase with Cash Back”
-        (spend + cash), and drop daily-balance lines.
-      </footer>
-    </div>
-  );
-}
-
-/* ───────────────────────────────────────── UI Bits ───────────────────────────────────────── */
-
-function SummaryCard({
-  title,
-  value,
-  subtitle,
-  status,
-  delta,
-}: {
-  title: string;
-  value: string;
-  subtitle?: string;
-  status: "ok" | "warn" | "error" | "na";
-  delta?: string;
-}) {
-  const tone =
-    status === "ok"
-      ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:bg-emerald-900/20 dark:border-emerald-700 dark:text-emerald-300"
-      : status === "warn"
-      ? "border-amber-300 bg-amber-50 text-amber-800 dark:bg-amber-900/20 dark:border-amber-700 dark:text-amber-300"
-      : status === "error"
-      ? "border-red-300 bg-red-50 text-red-800 dark:bg-red-900/20 dark:border-red-700 dark:text-red-300"
-      : "border-gray-300 bg-gray-50 text-gray-800 dark:bg-gray-900 dark:border-gray-700 dark:text-gray-200";
-
-  const icon =
-    status === "ok"
-      ? "✅"
-      : status === "warn"
-      ? "⚠️"
-      : status === "error"
-      ? "❌"
-      : "—";
-
-  return (
-    <div className={`rounded-lg border p-4 ${tone}`}>
-      <div className="text-sm opacity-80">{title}</div>
-      <div className="text-xl font-semibold flex items-center gap-2">
-        {icon} {value}
-      </div>
-      {subtitle && <div className="text-xs opacity-80 mt-1">{subtitle}</div>}
-      {delta && <div className="text-xs opacity-80 mt-1">{delta}</div>}
     </div>
   );
 }
