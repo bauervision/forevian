@@ -35,6 +35,12 @@ function catOf(r: MinimalTx) {
   return (r.categoryOverride ?? r.category ?? "Uncategorized").trim();
 }
 
+export function effectiveCategory(r: MinimalTx): string {
+  const base = catOf(r);
+  if (r.amount > 0 && !CASH_BACK_CAT.test(base)) return "Income";
+  return base;
+}
+
 export function computeTotals(rows: MinimalTx[], opening = 0): Totals {
   const byCategory: Record<string, number> = {};
   const byMonth: Record<string, number> = {};
@@ -44,7 +50,7 @@ export function computeTotals(rows: MinimalTx[], opening = 0): Totals {
   let trueSpend = 0;
 
   for (const r of rows) {
-    const cat = catOf(r);
+    const cat = effectiveCategory(r); // ← use normalized
     const desc = r.description ?? "";
 
     byCategory[cat] = (byCategory[cat] ?? 0) + r.amount;

@@ -18,6 +18,7 @@ export type Transaction = {
   raw?: string; // original pasted line (optional)
   notes?: string;
   category?: string;
+  categoryOverride?: string;
   parseWarnings?: string[];
 };
 

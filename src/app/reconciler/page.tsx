@@ -7,6 +7,10 @@ import {
   type Transaction as CtxTransaction,
 } from "@/app/providers/ReconcilerProvider";
 
+import { useCategories } from "@/app/providers/CategoriesProvider";
+import CategoryManagerDialog from "@/components/CategoryManagerDialog";
+import { readOverrides, keyForTx, writeOverride } from "@/lib/overrides";
+
 /* ──────────────────────────────────────────────────────────────────────────────
    Utilities
    ────────────────────────────────────────────────────────────────────────────── */
@@ -35,20 +39,26 @@ function rebuildFromPages(
   for (let i = pagesRaw.length - 1; i >= 0; i--) {
     const raw = pagesRaw[i];
     const { txs, unparsed } = parseAll(raw, stmtYear);
+    const overrides = readOverrides();
     const mapped = txs
       .filter((t) => t.amount != null)
       .map((t, idx) => {
         const desc = t.description ?? "";
         const merch = canonMerchant(desc, null);
-        const category =
+        const baseCat =
           t.tag === "cb_cashback" ? "Cash Back" : canonCategory(desc, merch);
         const displayDate = t.dateDisplay ?? isoToMMDD(t.date);
+
+        const k = keyForTx(displayDate || "", desc, t.amount ?? 0);
+        const categoryOverride = overrides[k];
+
         return {
           id: "temp",
           date: displayDate || "",
           description: desc,
           amount: t.amount ?? 0,
-          category,
+          category: baseCat,
+          categoryOverride, // ← apply override if present
           raw: t.raw,
           notes: t.parseNotes.join("; "),
         };
@@ -1040,29 +1050,55 @@ export default function Page() {
     } catch {}
   }
 
+  const currency = (n: number) =>
+    n.toLocaleString(undefined, { style: "currency", currency: "USD" });
+
+  const withdrawals = React.useMemo(
+    () => transactions.filter((t) => (t.amount ?? 0) < 0),
+    [transactions]
+  );
+  const deposits = React.useMemo(
+    () => transactions.filter((t) => (t.amount ?? 0) > 0),
+    [transactions]
+  );
+
+  // group withdrawals by date
+  const groups = React.useMemo(() => {
+    const m = new Map<string, { rows: typeof transactions; total: number }>();
+    for (const t of withdrawals) {
+      const k = t.date || "";
+      const g = m.get(k) ?? { rows: [], total: 0 };
+      g.rows.push(t);
+      g.total += Math.abs(t.amount);
+      m.set(k, g);
+    }
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [withdrawals]);
+
+  const [openDate, setOpenDate] = React.useState<Record<string, boolean>>({});
+  React.useEffect(() => {
+    // default newly-seen dates to open
+    setOpenDate((prev) => {
+      const next = { ...prev };
+      for (const [d] of groups) if (!(d in next)) next[d] = true;
+      return next;
+    });
+  }, [groups]);
+
+  const expandAll = () => {
+    const all: Record<string, boolean> = {};
+    for (const [d] of groups) all[d] = true;
+    setOpenDate(all);
+  };
+  const collapseAll = () => {
+    const all: Record<string, boolean> = {};
+    for (const [d] of groups) all[d] = false;
+    setOpenDate(all);
+  };
+
   /* ───────────────────────────────────────── UI ───────────────────────────────────────── */
 
-  const CATEGORY_OPTIONS = [
-    "Amazon",
-    "Groceries",
-    "Dining",
-    "Fast Food",
-    "Shopping/Household",
-    "Utilities",
-    "Housing",
-    "Debt",
-    "Insurance",
-    "Subscriptions",
-    "Gas",
-    "Entertainment",
-    "Transfers",
-    "Fees",
-    "Cash Back",
-    "Travel",
-    "Kids/School",
-    "Impulse/Misc",
-    "Uncategorized",
-  ];
+  const CATEGORY_ADD_SENTINEL = "__ADD__";
 
   function CategorySelect({
     value,
@@ -1071,18 +1107,49 @@ export default function Page() {
     value: string;
     onChange: (v: string) => void;
   }) {
+    const { categories } = useCategories();
+    const [openMgr, setOpenMgr] = React.useState(false);
+
+    const sorted = React.useMemo(() => {
+      const list = [...categories].sort((a, b) =>
+        a.localeCompare(b, undefined, { sensitivity: "base" })
+      );
+      // push "Uncategorized" to end if present
+      const i = list.findIndex((x) => x.toLowerCase() === "uncategorized");
+      if (i >= 0) {
+        list.splice(i, 1);
+        list.push("Uncategorized");
+      }
+      return list;
+    }, [categories]);
+
     return (
-      <select
-        className="bg-transparent border rounded px-2 py-1"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        {CATEGORY_OPTIONS.map((opt) => (
-          <option key={opt} value={opt}>
-            {opt}
-          </option>
-        ))}
-      </select>
+      <>
+        <select
+          value={value}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === CATEGORY_ADD_SENTINEL) {
+              setOpenMgr(true);
+              return;
+            }
+            onChange(v);
+          }}
+          className="bg-white text-gray-700 border border-gray-300 rounded px-2 py-1
+                   placeholder-gray-400 dark:bg-white dark:text-gray-700"
+        >
+          {sorted.map((opt) => (
+            <option key={opt} value={opt}>
+              {opt}
+            </option>
+          ))}
+          <option value={CATEGORY_ADD_SENTINEL}>＋ Add Category…</option>
+        </select>
+        <CategoryManagerDialog
+          open={openMgr}
+          onClose={() => setOpenMgr(false)}
+        />
+      </>
     );
   }
 
@@ -1462,67 +1529,126 @@ export default function Page() {
       </section>
 
       {/* Table */}
-      <section className="overflow-auto rounded border">
-        <table className="min-w-full text-sm">
-          <thead className="bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-200">
-            <tr>
-              <th className="px-3 py-2 text-left font-medium">Date</th>
-              <th className="px-3 py-2 text-left font-medium">Description</th>
-              <th className="px-3 py-2 text-left font-medium">Category</th>
-              <th className="px-3 py-2 text-right font-medium">Amount</th>
-              {/* <th className="px-3 py-2 text-right font-medium">Running</th> */}
-              {/* <th className="px-3 py-2 text-left font-medium">Notes</th> */}
-            </tr>
-          </thead>
-          <tbody>
-            {rowsWithRunning.map((t) => (
-              <tr key={t.id} className="border-t">
-                <td className="px-3 py-2 whitespace-nowrap text-gray-700 dark:text-gray-300">
-                  {t.date || "—"}
-                </td>
-                <td className="px-3 py-2 text-gray-900 dark:text-gray-100">
-                  {t.description || (
-                    <span className="text-gray-400 dark:text-gray-300">
-                      (none)
-                    </span>
-                  )}
-                </td>
-                <td className="px-3 py-2 text-gray-700 dark:text-gray-300">
-                  <CategorySelect
-                    value={t.category ?? "Uncategorized"}
-                    onChange={(val) => {
-                      // write override into the row
-                      const updated = transactions.map((row) =>
-                        row.id === t.id
-                          ? { ...row, categoryOverride: val }
-                          : row
-                      );
-                      setTransactions(updated);
-                    }}
-                  />
-                </td>
-
-                <td
-                  className={
-                    "px-3 py-2 text-right font-medium " +
-                    (t.amount < 0
-                      ? "text-red-700 dark:text-red-400"
-                      : "text-emerald-700 dark:text-emerald-400")
-                  }
-                >
-                  {currency(t.amount)}
-                </td>
-                {/* <td className="px-3 py-2 text-right text-gray-700 dark:text-gray-300">
-                  {Number.isFinite(t.running) ? currency(t.running) : "—"}
-                </td> */}
-                {/* <td className="px-3 py-2 text-gray-500 dark:text-gray-300">
-                  {t.notes ?? ""}
-                </td> */}
+      <section className="rounded border p-4 mt-6">
+        <h3 className="font-semibold mb-3">Deposits</h3>
+        {deposits.length === 0 ? (
+          <div className="text-sm text-gray-500">No deposits.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 dark:bg-gray-900">
+              <tr>
+                <th className="text-left p-2 w-20">Date</th>
+                <th className="text-left p-2">Description</th>
+                <th className="text-right p-2">Amount</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {deposits.map((t) => (
+                <tr key={`dep-${t.id}`} className="border-t">
+                  <td className="p-2">{t.date}</td>
+                  <td className="p-2">{t.description}</td>
+                  <td className="p-2 text-right text-emerald-700 dark:text-emerald-400">
+                    {currency(t.amount)}
+                  </td>
+                </tr>
+              ))}
+              <tr className="border-t font-medium">
+                <td className="p-2" colSpan={2}>
+                  Total
+                </td>
+                <td className="p-2 text-right">
+                  {currency(deposits.reduce((s, r) => s + (r.amount ?? 0), 0))}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        )}
       </section>
+
+      {/* Controls */}
+      <div className="flex gap-2 mb-2">
+        <button
+          className="text-xs border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
+          onClick={expandAll}
+        >
+          Expand all
+        </button>
+        <button
+          className="text-xs border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
+          onClick={collapseAll}
+        >
+          Collapse all
+        </button>
+      </div>
+
+      {/* Groups */}
+      <div className="rounded border divide-y">
+        {groups.map(([date, g]) => (
+          <div key={date}>
+            <button
+              className="w-full flex items-center justify-between px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-900"
+              onClick={() => setOpenDate((s) => ({ ...s, [date]: !s[date] }))}
+            >
+              <div className="flex items-center gap-2">
+                <span className="font-semibold">{date}</span>
+                <span className="text-xs text-gray-500">
+                  ({g.rows.length} tx)
+                </span>
+              </div>
+              <div className="text-sm">
+                Day total:{" "}
+                <span className="font-medium text-red-700 dark:text-red-400">
+                  {currency(g.total)}
+                </span>
+              </div>
+            </button>
+
+            {openDate[date] && (
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 dark:bg-gray-900">
+                  <tr>
+                    <th className="text-left p-2 w-1/2">Description</th>
+                    <th className="text-left p-2">Category</th>
+                    <th className="text-right p-2">Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {g.rows.map((t) => (
+                    <tr key={t.id} className="border-t">
+                      <td className="p-2">{t.description}</td>
+                      <td className="p-2">
+                        <CategorySelect
+                          value={
+                            t.categoryOverride ?? t.category ?? "Uncategorized"
+                          }
+                          onChange={(val) => {
+                            const k = keyForTx(
+                              t.date || "",
+                              t.description || "",
+                              t.amount ?? 0
+                            );
+                            writeOverride(k, val);
+                            setTransactions(
+                              transactions.map((row) =>
+                                row.id === t.id
+                                  ? { ...row, categoryOverride: val }
+                                  : row
+                              )
+                            );
+                          }}
+                        />
+                      </td>
+                      <td className="p-2 text-right text-red-700 dark:text-red-400">
+                        {currency(Math.abs(t.amount))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        ))}
+      </div>
 
       {/* Finalize */}
       <section className="rounded border p-4 flex items-center justify-between">
