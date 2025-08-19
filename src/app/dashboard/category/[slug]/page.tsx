@@ -24,8 +24,12 @@ import {
   Store,
   Sparkles,
   ArrowUpRight,
+  Pencil,
+  Grid2x2,
 } from "lucide-react";
 import { groupMembersForSlug, labelForSlug } from "@/lib/categoryGroups";
+import { useBrandMap } from "@/app/providers/BrandMapProvider";
+import BrandLogoDialog from "@/components/BrandLogoDialog";
 
 /* ----------------------------- small helpers ----------------------------- */
 
@@ -309,8 +313,9 @@ function MerchantLogo({
 
 export default function CategoryDetailPage() {
   const params = useParams<{ slug: string }>();
-  const catName = unslug(params.slug || "").trim();
-
+  const { mounted: brandMounted, detect, logoFor } = useBrandMap();
+  const [editOpen, setEditOpen] = React.useState(false);
+  const [editSeed, setEditSeed] = React.useState<string>("");
   const { transactions } = useReconcilerSelectors();
 
   // URL-driven selection
@@ -367,18 +372,6 @@ export default function CategoryDetailPage() {
       return cat === parentLabelLc;
     });
   }, [viewRows, groupMembers, parentLabelLc]);
-
-  // --- "By subcategory" rollup (only if we're on a group)
-  const bySubcategory = React.useMemo(() => {
-    if (!groupMembers) return [];
-    const m: Record<string, number> = {};
-    for (const r of rows) {
-      const cat = (r.categoryOverride ?? r.category ?? "Uncategorized").trim();
-      const amt = r.amount < 0 ? Math.abs(r.amount) : 0;
-      if (amt) m[cat] = (m[cat] ?? 0) + amt;
-    }
-    return Object.entries(m).sort((a, b) => b[1] - a[1]);
-  }, [rows, groupMembers]);
 
   // Merchant rollup
   const byMerchant = React.useMemo(() => {
@@ -463,7 +456,21 @@ export default function CategoryDetailPage() {
         className={`rounded-2xl border border-l-4 p-4 sm:p-5 bg-slate-900 bg-gradient-to-br ${catAccent}`}
       >
         <div className="flex flex-wrap items-end gap-3 justify-between">
-          <div>
+          <Link
+            href={`/dashboard/category${
+              selectedId ? `?statement=${selectedId}` : ""
+            }`}
+            aria-label="Back to Categories"
+            title="Back to Categories"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-xl
+             border border-slate-700 bg-slate-900 hover:bg-slate-800
+             focus:outline-none focus:ring-2 focus:ring-emerald-500/60"
+          >
+            <Grid2x2 className="h-5 w-5 text-slate-300" />
+            <span className="sr-only">Back to Categories</span>
+          </Link>
+
+          <div className="text-right">
             <div className="text-xs uppercase tracking-wide text-slate-400">
               Total spend
             </div>
@@ -471,14 +478,6 @@ export default function CategoryDetailPage() {
               {money(total)}
             </div>
           </div>
-          <Link
-            href={`/dashboard/category${
-              selectedId ? `?statement=${selectedId}` : ""
-            }`}
-            className="inline-flex items-center gap-1 text-sm underline text-slate-300 hover:text-white"
-          >
-            ← Back to Categories
-          </Link>
         </div>
       </section>
 
@@ -509,7 +508,10 @@ export default function CategoryDetailPage() {
           <ul className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
             {byMerchant.map(([label, amt]) => {
               const share = total ? Math.round((amt / total) * 100) : 0;
-              const logo = logoUrlFor(label);
+              const brand = detect(label); // BrandRule | null
+              const logo = brand
+                ? `https://logo.clearbit.com/${brand.domain}`
+                : logoFor(label);
               return (
                 <li key={label} className="group">
                   <div
@@ -525,6 +527,19 @@ export default function CategoryDetailPage() {
                           alt={label}
                           category={catDisplay} // ← picks the right fallback icon
                         />
+                        <button
+                          type="button"
+                          className="absolute -right-1 -bottom-1 h-6 w-6 rounded-lg border border-slate-700 bg-slate-900/90
+               opacity-0 group-hover:opacity-100 transition"
+                          title="Edit logo"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            setEditSeed(label);
+                            setEditOpen(true);
+                          }}
+                        >
+                          <Pencil className="h-3.5 w-3.5 mx-auto opacity-80" />
+                        </button>
                       </div>
                       <div className="min-w-0">
                         <div className="font-medium truncate">{label}</div>
@@ -623,6 +638,12 @@ export default function CategoryDetailPage() {
           </div>
         )}
       </section>
+
+      <BrandLogoDialog
+        open={editOpen}
+        onClose={() => setEditOpen(false)}
+        seedLabel={editSeed}
+      />
     </div>
   );
 }

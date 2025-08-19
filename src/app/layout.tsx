@@ -6,6 +6,7 @@ import { CategoriesProvider } from "./providers/CategoriesProvider";
 import Navbar from "@/components/Navbar";
 import { AliasesProvider } from "./providers/AliasesProvider";
 import AuthProvider from "./providers/AuthProvider";
+import { BrandMapProvider } from "./providers/BrandMapProvider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -37,7 +38,9 @@ export default function RootLayout({
             <AliasesProvider>
               <ReconcilerProvider>
                 <Navbar />
-                <main className="pt-4">{children}</main>
+                <BrandMapProvider>
+                  <main className="pt-4">{children}</main>
+                </BrandMapProvider>
               </ReconcilerProvider>
             </AliasesProvider>
           </CategoriesProvider>
