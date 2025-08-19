@@ -6,6 +6,11 @@ import { currentStatementMeta, type Period } from "@/lib/period";
 import { readIndex, readCurrentId, writeCurrentId } from "@/lib/statements";
 import { readCatRules, applyCategoryRulesTo } from "@/lib/categoryRules";
 import { applyAlias } from "@/lib/aliases";
+import StatementSwitcher from "@/components/StatementSwitcher";
+import ResponsiveShell from "@/components/ResponsiveShell";
+import { useSearchParams } from "next/navigation";
+
+/* ---------------------------- helpers & hooks ---------------------------- */
 
 function useStatementOptions() {
   return React.useMemo(() => {
@@ -25,13 +30,11 @@ function useStatementOptions() {
 /** Build rows for the requested period. */
 function usePeriodRows(period: Period, liveRows: any[]) {
   const meta = currentStatementMeta();
-
   return React.useMemo(() => {
     if (!meta || period === "CURRENT") return liveRows;
 
     const idx = readIndex();
     const rules = readCatRules();
-
     const all: any[] = [];
     for (const s of Object.values(idx)) {
       if (!s) continue;
@@ -49,29 +52,32 @@ function usePeriodRows(period: Period, liveRows: any[]) {
   }, [period, liveRows, meta]);
 }
 
+const money = (n: number) =>
+  n.toLocaleString(undefined, { style: "currency", currency: "USD" });
+
+/* --------------------------------- page ---------------------------------- */
+
 export default function DashboardPage() {
   const { transactions, inputs } = useReconcilerSelectors();
-  const meta = currentStatementMeta();
   const options = useStatementOptions();
-  const [selectedId, setSelectedId] = React.useState<string>(
-    () => readCurrentId() || options[0]?.id || ""
-  );
-  const [period, setPeriod] = React.useState<Period>("CURRENT");
 
-  // change current statement
-  const onSelectStatement = (id: string) => {
-    writeCurrentId(id);
-    setSelectedId(id); // force re-render; meta reads from localStorage
-  };
+  // URL ↔ localStorage sync for statement
+  const searchParams = useSearchParams();
+  const urlStatement = searchParams.get("statement") ?? "";
+  React.useEffect(() => {
+    if (!urlStatement) return;
+    if (readCurrentId() !== urlStatement) writeCurrentId(urlStatement);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlStatement]);
+
+  const meta = currentStatementMeta();
+  const [period, setPeriod] = React.useState<Period>("CURRENT");
 
   const viewRows = usePeriodRows(period, transactions);
   const totals = React.useMemo(
     () => computeTotals(viewRows, inputs.beginningBalance ?? 0),
     [viewRows, inputs]
   );
-
-  const money = (n: number) =>
-    n.toLocaleString(undefined, { style: "currency", currency: "USD" });
 
   // True Spend excludes Transfers, Debt, Cash Back
   const trueSpend = React.useMemo(() => {
@@ -129,141 +135,152 @@ export default function DashboardPage() {
   }, [viewRows]);
 
   return (
-    <div className="mx-auto max-w-6xl p-6 space-y-6">
-      {/* Header */}
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-2xl font-semibold">Dashboard</h1>
-        {meta && (
-          <span className="text-xs px-2 py-1 rounded border bg-gray-50 dark:bg-gray-900">
-            Viewing:{" "}
-            {period === "CURRENT"
-              ? meta.label
-              : `YTD ${meta.year} (Jan–${meta.label.split(" ")[0]})`}
-          </span>
-        )}
-        <div className="ml-auto flex flex-wrap items-center gap-2">
-          {/* Statement selector */}
-          <select
-            className="border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
-            value={selectedId}
-            onChange={(e) => onSelectStatement(e.target.value)}
-            title="Statement"
-          >
-            {options.map((o) => (
-              <option key={o.id} value={o.id}>
-                {o.label}
-              </option>
-            ))}
-          </select>
+    <ResponsiveShell
+      title="Dashboard"
+      right={<StatementSwitcher available={options.map((o) => o.id)} />}
+    >
+      <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6">
+        {/* Header row (no duplicate title) */}
+        <div className="flex flex-wrap items-center gap-3">
+          {meta && (
+            <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
+              Viewing:{" "}
+              {period === "CURRENT"
+                ? meta.label
+                : `YTD ${meta.year} (Jan–${meta.label.split(" ")[0]})`}
+            </span>
+          )}
 
-          {/* Period toggle */}
-          <span className="text-sm">Period:</span>
-          <div className="inline-flex rounded border overflow-hidden">
-            <button
-              className={`px-3 py-1 text-sm ${
-                period === "CURRENT"
-                  ? "bg-emerald-600 text-white"
-                  : "hover:bg-gray-50 dark:hover:bg-gray-800"
-              }`}
-              onClick={() => setPeriod("CURRENT")}
-            >
-              Current
-            </button>
-            <button
-              className={`px-3 py-1 text-sm ${
-                period === "YTD"
-                  ? "bg-emerald-600 text-white"
-                  : "hover:bg-gray-50 dark:hover:bg-gray-800"
-              }`}
-              onClick={() => setPeriod("YTD")}
-            >
-              YTD
-            </button>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <span className="text-sm">Period:</span>
+            <div className="inline-flex rounded-lg border border-slate-700 overflow-hidden">
+              <button
+                className={`px-3 py-1 text-sm ${
+                  period === "CURRENT"
+                    ? "bg-emerald-600 text-white"
+                    : "hover:bg-slate-900"
+                }`}
+                onClick={() => setPeriod("CURRENT")}
+              >
+                Current
+              </button>
+              <button
+                className={`px-3 py-1 text-sm ${
+                  period === "YTD"
+                    ? "bg-emerald-600 text-white"
+                    : "hover:bg-slate-900"
+                }`}
+                onClick={() => setPeriod("YTD")}
+              >
+                YTD
+              </button>
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Summary cards */}
-      <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card label="Income" value={money(totals.income)} />
-        <Card label="Expenses" value={money(totals.expense)} />
-        <Card label="Net" value={money(totals.income - totals.expense)} />
-        <Card
-          label="True Spend"
-          value={money(trueSpend)}
-          hint="Excludes Transfers, Debt, Cash Back"
-        />
-      </section>
+        {/* Top KPI row: Deposits | Net | True Spend | Cash Back */}
+        <section className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
+          <KpiCard
+            label="Deposits"
+            value={money(totals.income)}
+            accent="green"
+          />
+          {/* Keeping your original net math to avoid changing semantics */}
+          <KpiCard
+            label="Net"
+            value={money(totals.income - totals.expense)}
+            accent={totals.income - totals.expense >= 0 ? "green" : "red"}
+          />
+          <KpiCard
+            label="True Spend"
+            value={money(trueSpend)}
+            accent="red"
+            hint="Excludes Transfers, Debt, Cash Back"
+          />
+          <KpiCard label="Cash Back" value={money(cashBack)} accent="green" />
+        </section>
 
-      {/* Extras */}
-      <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="rounded border p-4">
-          <h3 className="font-semibold mb-2">Cash Back</h3>
-          <div className="text-2xl font-semibold">{money(cashBack)}</div>
-        </div>
+        {/* Second row: Expenses (moved here) + Spend by Spender */}
+        <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <KpiCard
+            label="Expenses"
+            value={money(totals.expense)}
+            accent="red"
+          />
 
-        <div className="rounded border p-4 lg:col-span-2">
-          <h3 className="font-semibold mb-2">Spend by Spender</h3>
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 dark:bg-gray-900">
+          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4 lg:col-span-2 overflow-x-auto">
+            <h3 className="font-semibold mb-2">Spend by Spender</h3>
+            <table className="w-full text-sm min-w-[420px]">
+              <thead className="bg-slate-800/60">
+                <tr>
+                  <th className="text-left p-2">Person</th>
+                  <th className="text-right p-2">Spend</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(bySpender).map(([who, amt]) => (
+                  <tr key={who} className="border-t border-slate-800">
+                    <td className="p-2">{who}</td>
+                    <td className="p-2 text-right">{money(amt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        {/* Top categories */}
+        <section className="rounded-2xl border border-slate-700 bg-slate-900 p-4 overflow-x-auto">
+          <h3 className="font-semibold mb-2">Top Categories (Expenses)</h3>
+          <table className="w-full text-sm min-w-[420px]">
+            <thead className="bg-slate-800/60">
               <tr>
-                <th className="text-left p-2">Person</th>
-                <th className="text-right p-2">Spend</th>
+                <th className="text-left p-2">Category</th>
+                <th className="text-right p-2">Amount</th>
               </tr>
             </thead>
             <tbody>
-              {Object.entries(bySpender).map(([who, amt]) => (
-                <tr key={who} className="border-t">
-                  <td className="p-2">{who}</td>
+              {topCats.map(([cat, amt], i) => (
+                <tr key={`${cat}-${i}`} className="border-t border-slate-800">
+                  <td className="p-2">{cat}</td>
                   <td className="p-2 text-right">{money(amt)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
-      </section>
-
-      <section className="rounded border p-4">
-        <h3 className="font-semibold mb-2">Top Categories (Expenses)</h3>
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 dark:bg-gray-900">
-            <tr>
-              <th className="text-left p-2">Category</th>
-              <th className="text-right p-2">Amount</th>
-            </tr>
-          </thead>
-          <tbody>
-            {topCats.map(([cat, amt], i) => (
-              <tr key={`${cat}-${i}`} className="border-t">
-                <td className="p-2">{cat}</td>
-                <td className="p-2 text-right">{money(amt)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-    </div>
+        </section>
+      </div>
+    </ResponsiveShell>
   );
 }
 
-function Card({
+/* ------------------------------ UI elements ------------------------------ */
+
+function KpiCard({
   label,
   value,
   hint,
+  accent = "neutral",
 }: {
   label: string;
   value: string;
   hint?: string;
+  accent?: "green" | "red" | "neutral";
 }) {
+  const accentClass =
+    accent === "green"
+      ? "border-emerald-500"
+      : accent === "red"
+      ? "border-rose-500"
+      : "border-slate-700";
+
   return (
-    <div className="rounded border p-4">
-      <div className="text-sm text-gray-500 dark:text-gray-400">{label}</div>
-      <div className="text-xl font-semibold">{value}</div>
-      {hint && (
-        <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-          {hint}
-        </div>
-      )}
+    <div
+      className={`rounded-2xl border ${accentClass} border-l-4 bg-slate-900 p-4`}
+    >
+      <div className="text-sm text-slate-400">{label}</div>
+      <div className="text-xl sm:text-2xl font-semibold mt-0.5">{value}</div>
+      {hint && <div className="text-xs text-slate-400 mt-1">{hint}</div>}
     </div>
   );
 }

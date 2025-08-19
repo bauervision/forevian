@@ -5,6 +5,7 @@ import { ReconcilerProvider } from "./providers/ReconcilerProvider";
 import { CategoriesProvider } from "./providers/CategoriesProvider";
 import Navbar from "@/components/Navbar";
 import { AliasesProvider } from "./providers/AliasesProvider";
+import AuthProvider from "./providers/AuthProvider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -29,16 +30,18 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} min-h-screen overflow-x-hidden antialiased`}
       >
-        <CategoriesProvider>
-          <AliasesProvider>
-            <ReconcilerProvider>
-              <Navbar />
-              <main className="pt-4">{children}</main>
-            </ReconcilerProvider>
-          </AliasesProvider>
-        </CategoriesProvider>
+        <AuthProvider>
+          <CategoriesProvider>
+            <AliasesProvider>
+              <ReconcilerProvider>
+                <Navbar />
+                <main className="pt-4">{children}</main>
+              </ReconcilerProvider>
+            </AliasesProvider>
+          </CategoriesProvider>
+        </AuthProvider>
       </body>
     </html>
   );

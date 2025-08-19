@@ -1,55 +1,61 @@
-import { db, auth } from "@/lib/firebase";
+import { db } from "./firebase";
 import {
   collection,
-  addDoc,
-  serverTimestamp,
-  onSnapshot,
-  query,
-  orderBy,
   doc,
+  getDocs,
+  query,
+  where,
+  orderBy,
+  limit,
   setDoc,
+  Timestamp,
 } from "firebase/firestore";
-import type { Tx } from "./types";
 
-export function userRoot() {
-  const u = auth.currentUser;
-  if (!u) throw new Error("Not signed in");
-  return doc(db, "users", u.uid);
+export type Tx = {
+  id: string;
+  date: Timestamp;
+  amount: number; // cents +/-
+  type: "debit" | "credit";
+  rawDesc: string;
+  prettyDesc: string;
+  categoryId?: string | null;
+  accountId: string;
+  statementMonth: string; // "YYYY-MM"
+  cleared?: boolean;
+  tags?: string[];
+};
+
+export async function listStatements(uid: string): Promise<string[]> {
+  const col = collection(db, "users", uid, "statements");
+  const snap = await getDocs(col);
+  const months: string[] = [];
+  snap.forEach((d) => months.push(d.id));
+  return months.sort().reverse();
 }
 
-export function txColRef() {
-  return collection(userRoot(), "transactions");
-}
-
-export async function addTx(tx: Tx) {
-  const col = txColRef();
-  // Normalize postDay if missing
-  const d = new Date(tx.date);
-  tx.postDay = tx.postDay || d.getDate();
-  return addDoc(col, { ...tx, createdAt: serverTimestamp() });
-}
-
-export function onTxSnapshot(cb: (rows: Tx[]) => void) {
-  const q = query(txColRef(), orderBy("date", "desc"));
-  return onSnapshot(q, (snap) => {
-    const rows = snap.docs.map((d) => ({
-      id: d.id,
-      ...(d.data() as any),
-    })) as Tx[];
-    cb(rows);
-  });
-}
-
-// Optional: user settings (card map)
-export async function ensureSettings() {
-  const ref = doc(userRoot(), "settings", "default");
-  await setDoc(
-    ref,
-    {
-      cardMap: { "5280": "Mike", "0161": "Beth" },
-      safetyBuffer: 500,
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
+export async function getTransactionsByStatement(
+  uid: string,
+  statement: string
+) {
+  const col = collection(db, "users", uid, "transactions");
+  const q = query(
+    col,
+    where("statementMonth", "==", statement),
+    orderBy("date", "desc"),
+    limit(1000)
   );
+  const snap = await getDocs(q);
+  const rows: Tx[] = [];
+  snap.forEach((d) => rows.push({ id: d.id, ...(d.data() as any) }));
+  return rows;
+}
+
+export async function upsertCategory(
+  uid: string,
+  id: string,
+  payload: { name: string; color?: string; icon?: string }
+) {
+  await setDoc(doc(db, "users", uid, "categories", id), payload, {
+    merge: true,
+  });
 }

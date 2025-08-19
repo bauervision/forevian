@@ -1,7 +1,7 @@
-// /app/reconciler/page.tsx
 "use client";
 
 import React from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCategories } from "@/app/providers/CategoriesProvider";
 import CategoryManagerDialog from "@/components/CategoryManagerDialog";
 import { useAliases } from "@/app/providers/AliasesProvider";
@@ -38,11 +38,11 @@ import {
   readCatRules,
   applyCategoryRulesTo,
   upsertCategoryRules,
-  deriveKeyFromDescription,
   candidateKeys,
 } from "@/lib/categoryRules";
 import CategoryRulesManager from "@/components/CategoryRulesManager";
 import { normalizePageText } from "@/lib/textNormalizer";
+import StatementSwitcher from "@/components/StatementSwitcher";
 
 /* ----------------------------- small utilities ---------------------------- */
 
@@ -75,13 +75,12 @@ function persistCurrentStatementSnapshot({
     stmtMonth,
     pagesRaw: pages.map((p) => p.raw),
     inputs,
-    cachedTx: txs, // ← store final tx here
+    cachedTx: txs,
   };
   upsertStatement(updated);
 }
 
 function loadLegacyLocal(): { pagesRaw?: string[]; inputs?: any } {
-  // Primary: reconciler.cache.v1
   try {
     const raw = localStorage.getItem("reconciler.cache.v1");
     if (raw) {
@@ -92,7 +91,6 @@ function loadLegacyLocal(): { pagesRaw?: string[]; inputs?: any } {
       return { pagesRaw, inputs };
     }
   } catch {}
-  // Fallback: split keys (no pages though)
   try {
     const inRaw = localStorage.getItem("reconciler.inputs.v1");
     const inputs = inRaw ? JSON.parse(inRaw) : undefined;
@@ -101,8 +99,11 @@ function loadLegacyLocal(): { pagesRaw?: string[]; inputs?: any } {
   return {};
 }
 
-const money = (n: number) =>
-  n.toLocaleString(undefined, { style: "currency", currency: "USD" });
+const fmtUSD = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+});
+const money = (n: number) => fmtUSD.format(n);
 
 /** Very small canonical merchant mapping (extend as you like) */
 const CANON: Array<[RegExp, string]> = [
@@ -183,19 +184,18 @@ function canonCategory(desc: string, merch?: string | null) {
 /* ------------------------------- types/local ------------------------------ */
 
 type ParsedLine = {
-  dateIso?: string; // for internal calc if needed later
-  dateDisplay: string; // MM/DD
-  description: string; // already cleaned
-  amount: number; // + deposit, - withdrawal
+  dateIso?: string;
+  dateDisplay: string;
+  description: string;
+  amount: number;
   tag?: "cb_cashback" | "card_purchase" | "deposit" | "billpay";
   parseNotes: string[];
 };
 
-/** The Transaction type in your provider should include these fields. */
 type TxRow = {
   running: number;
   id: string;
-  date: string; // MM/DD
+  date: string;
   description: string;
   amount: number;
   raw?: string;
@@ -208,17 +208,11 @@ type TxRow = {
 };
 
 /* --------------------------- lightweight parser --------------------------- */
-/** Focused on your Wells-style pasted pages. Handles:
- *  - date headers (solo '4/24' lines)
- *  - 'Purchase with Cash Back $60.00 ...' split into purchase + cash-back rows
- *  - descriptor lines with amount-only lines after them
- *  - deposits/credits vs withdrawals/debits sign inference
- */
 function rebuildFromPages(
   pagesRaw: string[],
   stmtYear: number,
   applyAlias: (d: string) => string | null
-): { txs: TxRow[]; pageMeta: { idx: number; lines: number }[] } {
+): { txs: TxRow[] } {
   const IS_DATE_SOLO = /^\d{1,2}\/\d{1,2}\s*$/;
   const DATE_AT_START = /^\d{1,2}\/\d{1,2}\b/;
   const AMT_ONLY = /^\$?\s*\d[\d,]*\.\d{2}\s*$/;
@@ -238,8 +232,6 @@ function rebuildFromPages(
   const ACH_DEBIT_RX = /\bach\s*debit\b/i;
   const CARD_PAYMENT_RX =
     /\b(epay|e-?pay|card\s*payment|crd\s*epay|credit\s*card\s*pmt)\b/i;
-  const GOV_BENEFIT_RX =
-    /\b(vacp\s*treas|us\s*treas|irs\s*treas|ssa|social\s*security|treasury)\b/i;
 
   const parseIsoFromMmdd = (mmdd: string) => {
     const m = mmdd.match(/(\d{1,2})\/(\d{1,2})/);
@@ -250,27 +242,22 @@ function rebuildFromPages(
   };
 
   const rows: ParsedLine[] = [];
-  const pageMeta: { idx: number; lines: number }[] = [];
 
-  pagesRaw.forEach((raw, pIdx) => {
+  pagesRaw.forEach((raw) => {
     const L = raw
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean);
-    pageMeta.push({ idx: pIdx, lines: L.length });
 
     let curDateIso: string | null = null;
     for (let i = 0; i < L.length; i++) {
-      const lineOrig = L[i];
-      const line = lineOrig;
+      const line = L[i];
 
-      // Solo date headers like "4/24"
       if (IS_DATE_SOLO.test(line)) {
         curDateIso = parseIsoFromMmdd(line);
         continue;
       }
 
-      // Skip obvious table headers/footers (keep short to avoid nuking valid lines)
       if (
         /^(Beginning balance on|Ending balance on|Deposits\/Additions|Withdrawals\/Subtractions|Account\s+summary|Daily\s+(ending|ledger)\s+balance|Page\s+\d+\s+of\s+\d+|Fee\s+period)/i.test(
           line
@@ -278,9 +265,8 @@ function rebuildFromPages(
       )
         continue;
 
-      // Build descriptor + date (if "4/24 Purchase authorized..." style)
       let descriptor = line;
-      let dispDate: string | null = curDateIso ? curDateIso.slice(5) : null; // keep MM-DD for display assembly
+      let dispDate: string | null = curDateIso ? curDateIso.slice(5) : null;
 
       if (DATE_AT_START.test(line) && PURCHASE_RX.test(line)) {
         const md = line.match(/^\d{1,2}\/\d{1,2}/)![0];
@@ -289,7 +275,7 @@ function rebuildFromPages(
         descriptor = line.replace(/^\d{1,2}\/\d{1,2}\s+/, "");
       }
 
-      // find amount-only after this descriptor (stop at next date/header)
+      // find amount-only after this descriptor
       let amount: number | null = null;
       let amtIdx: number | null = null;
       let hasBalanceNext = false;
@@ -322,10 +308,9 @@ function rebuildFromPages(
         if (nums.length >= 1) amount = nums[0];
       }
 
-      // Special case: Purchase with Cash Back ...
+      // cash back split
       if (CASHBACK_RX.test(descriptor) && amount != null) {
-        const ctx3 = [L[i - 1] || "", descriptor, L[i + 1] || ""].join(" ");
-        const cbM = ctx3.match(
+        const cbM = descriptor.match(
           /cash\s*back\s*\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})?)/i
         );
         const cashback = cbM ? Number(cbM[1].replace(/,/g, "")) : 0;
@@ -333,9 +318,8 @@ function rebuildFromPages(
           ? dispDate
           : curDateIso
           ? curDateIso.slice(5).replace("-", "/")
-          : ""; // MM/DD
+          : "";
 
-        // Split into purchase (gross - cashback) + cash-back row
         const gross = amount;
         const spendPortion = Math.max(0, +(gross - cashback).toFixed(2));
         if (spendPortion > 0) {
@@ -361,28 +345,31 @@ function rebuildFromPages(
         continue;
       }
 
-      if (amount == null) continue; // nothing to post
+      if (amount == null) continue;
 
-      // Sign inference
       const dlow = descriptor.toLowerCase();
       let signed = -Math.abs(amount); // default debit
       if (
-        XFER_FROM_RX.test(dlow) ||
-        ZELLE_FROM_RX.test(dlow) ||
-        ACH_CREDIT_RX.test(dlow) ||
+        /\b(online\s*)?(transfer|xfer)\s*(from)\b/i.test(dlow) ||
+        /\bzelle\b.*\b(from|credit)\b/i.test(dlow) ||
+        /\bach\s*credit\b/i.test(dlow) ||
         /\b(payment\s*received|pmt\s*rcvd|thank\s*you)\b/i.test(dlow) ||
         /\b(refund|reversal|return)\b/i.test(dlow) ||
         /\b(credit\s*interest|interest\s*(payment|credit))\b/i.test(dlow) ||
-        GOV_BENEFIT_RX.test(dlow) ||
+        /\b(vacp\s*treas|us\s*treas|irs\s*treas|ssa|social\s*security|treasury)\b/i.test(
+          dlow
+        ) ||
         DEP_RX.test(dlow)
       ) {
         signed = Math.abs(amount); // credit
       }
       if (
-        XFER_TO_RX.test(dlow) ||
-        ZELLE_TO_RX.test(dlow) ||
-        ACH_DEBIT_RX.test(dlow) ||
-        CARD_PAYMENT_RX.test(dlow)
+        /\b(online\s*)?(transfer|xfer)\s*(to)\b/i.test(dlow) ||
+        /\bzelle\b.*\b(to|payment)\b/i.test(dlow) ||
+        /\bach\s*debit\b/i.test(dlow) ||
+        /\b(epay|e-?pay|card\s*payment|crd\s*epay|credit\s*card\s*pmt)\b/i.test(
+          dlow
+        )
       ) {
         signed = -Math.abs(amount);
       }
@@ -405,14 +392,17 @@ function rebuildFromPages(
     }
   });
 
-  // Map to TxRow with aliasing, merchant/category, user, overrides, and cleaned descriptions
   const overrides: CatOverrideMap =
     typeof window !== "undefined" ? readOverrides() : {};
   const txs: TxRow[] = rows.map((r, idx) => {
     const rawDesc = r.description;
     const last4 = extractCardLast4(rawDesc);
     const cleaned = stripAuthAndCard(rawDesc);
-    const aliasLabel = applyAlias(cleaned);
+    const aliasLabel =
+      (typeof window !== "undefined" && (window as any).__applyAlias
+        ? (window as any).__applyAlias(cleaned)
+        : null) || null;
+
     const merch = aliasLabel ?? canonMerchant(cleaned, null);
     const baseCat =
       r.tag === "cb_cashback" ? "Cash Back" : canonCategory(cleaned, merch);
@@ -435,7 +425,7 @@ function rebuildFromPages(
     };
   });
 
-  return { txs, pageMeta };
+  return { txs };
 }
 
 /* --------------------------- category select UI --------------------------- */
@@ -476,8 +466,7 @@ function CategorySelect({
           }
           onChange(v);
         }}
-        className="bg-white text-gray-700 border border-gray-300 rounded px-2 py-1
-                   placeholder-gray-400 dark:bg-white dark:text-gray-700"
+        className="bg-slate-900 text-slate-100 border border-slate-700 rounded-2xl px-2 py-1"
       >
         {sorted.map((opt) => (
           <option key={opt} value={opt}>
@@ -491,10 +480,88 @@ function CategorySelect({
   );
 }
 
+/* ------------------------------ tiny UI bits ------------------------------ */
+
+function Panel(props: React.HTMLAttributes<HTMLDivElement>) {
+  const { className = "", ...rest } = props;
+  return (
+    <section
+      className={`rounded-2xl border border-slate-700 bg-slate-900 ${className}`}
+      {...rest}
+    />
+  );
+}
+
+function ToolbarButton({
+  children,
+  onClick,
+  variant = "default",
+}: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  variant?: "default" | "danger";
+}) {
+  const base =
+    "h-9 px-3 rounded-2xl border text-sm bg-slate-900 border-slate-700 " +
+    "hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/60";
+  const danger =
+    "border-rose-500/70 text-rose-300 hover:bg-rose-900/20 focus:ring-rose-500/50";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`${base} ${variant === "danger" ? danger : ""}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function StatusTile({
+  title,
+  value,
+  sub,
+  tone,
+}: {
+  title: string;
+  value: string;
+  sub?: string;
+  tone: "ok" | "warn" | "bad";
+}) {
+  const border =
+    tone === "ok"
+      ? "border-emerald-500"
+      : tone === "warn"
+      ? "border-amber-500"
+      : "border-rose-500";
+  const valueColor =
+    tone === "ok"
+      ? "text-emerald-400"
+      : tone === "warn"
+      ? "text-amber-400"
+      : "text-rose-400";
+
+  return (
+    <div className={`rounded-2xl border ${border} border-l-4 p-3`}>
+      <div className="text-xs text-slate-400">{title}</div>
+      <div className={`text-lg font-semibold ${valueColor}`}>{value}</div>
+      {sub && <div className="text-xs text-slate-400 mt-1">{sub}</div>}
+    </div>
+  );
+}
+
 /* --------------------------------- page ---------------------------------- */
 
 export default function ReconcilerPage() {
   const { applyAlias } = useAliases();
+  // make alias available to parser (avoid prop drilling)
+  React.useEffect(() => {
+    (window as any).__applyAlias = applyAlias;
+  }, [applyAlias]);
+
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
 
   // Provider state for sharing with dashboard
   const { transactions, setTransactions, inputs, setInputs } =
@@ -524,11 +591,21 @@ export default function ReconcilerPage() {
   // Accordion state
   const [openDate, setOpenDate] = React.useState<Record<string, boolean>>({});
 
+  // helper: keep ?statement in URL
+  const setStatementInUrl = React.useCallback(
+    (id?: string) => {
+      const sp = new URLSearchParams(searchParams.toString());
+      if (id) sp.set("statement", id);
+      else sp.delete("statement");
+      router.replace(`${pathname}?${sp.toString()}`);
+    },
+    [router, pathname, searchParams]
+  );
+
   React.useEffect(() => {
-    // 1) build index if empty (and try migrating cache → statement)
+    // migrate / bootstrap
     const mig = migrateLegacyIfNeeded();
 
-    // 2) ensure at least one statement exists
     let idx = readIndex();
     if (!Object.keys(idx).length) {
       const now = new Date();
@@ -541,13 +618,15 @@ export default function ReconcilerPage() {
     }
 
     setStatements(idx);
-    const cid = readCurrentId() || Object.keys(idx)[0];
+    const initialUrlStatement = searchParams.get("statement");
+    const cid = initialUrlStatement || readCurrentId() || Object.keys(idx)[0];
     setCurrentId(cid);
+    writeCurrentId(cid);
+    if (!initialUrlStatement) setStatementInUrl(cid);
 
     let cur = idx[cid];
     if (!cur) return;
 
-    // If the current statement has no pages, try to promote legacy cache into it (so user doesn't re-paste)
     if ((!cur.pagesRaw || !cur.pagesRaw.length) && !mig.createdId) {
       const legacy = loadLegacyLocal();
       const pagesRaw = legacy.pagesRaw || [];
@@ -573,10 +652,10 @@ export default function ReconcilerPage() {
         const fresh = readIndex();
         setStatements(fresh);
         setCurrentId(recovered.id);
-        cur = recovered;
         writeCurrentId(recovered.id);
+        setStatementInUrl(recovered.id);
+        cur = recovered;
       } else if (legacy.inputs) {
-        // at least carry inputs forward if available
         cur = {
           ...cur,
           inputs: {
@@ -591,7 +670,6 @@ export default function ReconcilerPage() {
       }
     }
 
-    // Load current statement into UI
     setStmtYear(cur.stmtYear);
     setStmtMonth(cur.stmtMonth);
     setInputs({
@@ -617,20 +695,31 @@ export default function ReconcilerPage() {
       setTransactions(txWithRules);
       persistCurrentStatementSnapshot({
         statements,
-        currentId,
-        stmtYear,
-        stmtMonth,
-        inputs,
-        pages,
+        currentId: cid,
+        stmtYear: cur.stmtYear,
+        stmtMonth: cur.stmtMonth,
+        inputs: {
+          beginningBalance: cur.inputs?.beginningBalance ?? 0,
+          totalDeposits: cur.inputs?.totalDeposits ?? 0,
+          totalWithdrawals: cur.inputs?.totalWithdrawals ?? 0,
+        },
+        pages: cur.pagesRaw.map((raw) => ({ raw })),
         txs: txWithRules,
       });
     } else {
-      // no pages (but we may have inputs)
       setPages([]);
-      // leave transactions as whatever legacy had (if any); else empty
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // respond to URL changes
+  const urlStatement = searchParams.get("statement") ?? "";
+  React.useEffect(() => {
+    if (!urlStatement) return;
+    if (currentId && currentId === urlStatement) return;
+    onSwitchStatement(urlStatement);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlStatement]);
 
   // Keep accordion defaults in sync with transactions
   React.useEffect(() => {
@@ -659,7 +748,6 @@ export default function ReconcilerPage() {
     setPages(next);
     setPaste("");
 
-    // persist into current statement + parse
     const cur = statements[currentId];
     const updated: StatementSnapshot = {
       ...(cur ??
@@ -682,16 +770,16 @@ export default function ReconcilerPage() {
     upsertStatement(updated);
     setStatements(readIndex());
 
-    const pagesSanitized = (cur.pagesRaw || []).map(normalizePageText);
+    const pagesSanitized = (updated.pagesRaw || []).map(normalizePageText);
     const res = rebuildFromPages(pagesSanitized, updated.stmtYear, applyAlias);
     setTransactions(res.txs);
     persistCurrentStatementSnapshot({
       statements,
       currentId,
-      stmtYear,
-      stmtMonth,
+      stmtYear: updated.stmtYear,
+      stmtMonth: updated.stmtMonth,
       inputs,
-      pages,
+      pages: next.map((p) => ({ raw: p.raw })),
       txs: res.txs,
     });
   }
@@ -708,7 +796,7 @@ export default function ReconcilerPage() {
     upsertStatement(updated);
     setStatements(readIndex());
 
-    const pagesSanitized = (cur.pagesRaw || []).map(normalizePageText);
+    const pagesSanitized = (updated.pagesRaw || []).map(normalizePageText);
     const res = rebuildFromPages(pagesSanitized, updated.stmtYear, applyAlias);
     setTransactions(res.txs);
     persistCurrentStatementSnapshot({
@@ -717,7 +805,7 @@ export default function ReconcilerPage() {
       stmtYear,
       stmtMonth,
       inputs,
-      pages,
+      pages: next.map((p) => ({ raw: p.raw })),
       txs: res.txs,
     });
   }
@@ -739,7 +827,6 @@ export default function ReconcilerPage() {
   }
 
   function createStatement() {
-    // start from currently selected Y/M; new statement is next month
     const { year: ny, month: nm } = nextMonth(stmtYear, stmtMonth);
     const id = makeId(ny, nm);
     const label = `${monthLabel(nm)} ${ny}`;
@@ -750,10 +837,10 @@ export default function ReconcilerPage() {
     setStatements(idx);
     setCurrentId(id);
     writeCurrentId(id);
+    setStatementInUrl(id);
     setStmtYear(ny);
     setStmtMonth(nm);
 
-    // reset UI
     setInputs({ beginningBalance: 0, totalDeposits: 0, totalWithdrawals: 0 });
     setPages([]);
     setTransactions([]);
@@ -783,11 +870,11 @@ export default function ReconcilerPage() {
     setTransactions(res.txs);
     persistCurrentStatementSnapshot({
       statements,
-      currentId,
-      stmtYear,
-      stmtMonth,
+      currentId: id,
+      stmtYear: s.stmtYear,
+      stmtMonth: s.stmtMonth,
       inputs,
-      pages,
+      pages: (s.pagesRaw || []).map((raw) => ({ raw })),
       txs: res.txs,
     });
   }
@@ -839,42 +926,45 @@ export default function ReconcilerPage() {
 
   /* ---------------------------------- UI ---------------------------------- */
 
+  // IDs for the switcher
+  const availableIds = React.useMemo(() => {
+    const list = Object.values(statements)
+      .map((s) => ({ id: s.id, y: s.stmtYear, m: s.stmtMonth }))
+      .sort((a, b) => a.y - b.y || a.m - b.m)
+      .map((x) => x.id);
+    return list;
+  }, [statements]);
+
   return (
-    <div className="mx-auto max-w-6xl p-6 space-y-6">
+    <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6">
       <h1 className="text-2xl font-bold">Reconciler</h1>
 
-      {/* Statement switcher */}
-      <div className="flex items-center gap-2">
-        <label className="text-sm opacity-80">Statement:</label>
-        <select
-          className="border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
-          value={currentId}
-          onChange={(e) => onSwitchStatement(e.target.value)}
-        >
-          {Object.values(statements).map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.label}
-            </option>
-          ))}
-        </select>
-        <button
-          className="text-sm border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
-          onClick={createStatement}
-        >
-          + New Statement
-        </button>
+      {/* Toolbar */}
+      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+        <span className="text-xs uppercase tracking-wide text-slate-400">
+          Statement
+        </span>
+        <StatementSwitcher
+          available={availableIds}
+          showLabel={false}
+          size="sm"
+          className="w-44 sm:w-56"
+        />
+
+        <ToolbarButton onClick={createStatement}>+ New Statement</ToolbarButton>
 
         {currentId && (
-          <button
-            className="text-sm border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
+          <ToolbarButton
+            variant="danger"
             onClick={() => {
               if (confirm("Delete this statement?")) {
                 removeStatement(currentId);
                 const idx = readIndex();
                 setStatements(idx);
                 const nextId = readCurrentId();
-                if (nextId) onSwitchStatement(nextId);
-                else {
+                if (nextId) {
+                  onSwitchStatement(nextId);
+                } else {
                   setCurrentId("");
                   setPages([]);
                   setTransactions([]);
@@ -883,53 +973,50 @@ export default function ReconcilerPage() {
             }}
           >
             Delete
-          </button>
+          </ToolbarButton>
         )}
 
-        {/* dialogs toggles */}
-        <button
-          className="ml-auto rounded border px-2 py-1 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-          onClick={() => setOpenAliases(true)}
-        >
-          Manage Aliases
-        </button>
-
-        <button
-          className="rounded border px-2 py-1 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-          onClick={() => setOpenRules(true)}
-        >
-          Manage Rules
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          <ToolbarButton onClick={() => setOpenAliases(true)}>
+            Manage Aliases
+          </ToolbarButton>
+          <ToolbarButton onClick={() => setOpenRules(true)}>
+            Manage Rules
+          </ToolbarButton>
+        </div>
 
         <AliasManagerDialog
           open={openAliases}
           onClose={() => setOpenAliases(false)}
         />
-
         <CategoryRulesManager
           open={openRules}
           onClose={() => setOpenRules(false)}
         />
       </div>
 
-      {/* User inputs */}
-      <section className="rounded border p-4">
+      {/* Statement numbers */}
+      <Panel className="p-4">
         <h3 className="font-semibold mb-3">Statement numbers</h3>
         <div className="grid md:grid-cols-4 gap-3 items-end">
           <div>
-            <label className="text-xs block mb-1">Statement Year</label>
+            <label className="text-xs block mb-1 text-slate-400">
+              Statement Year
+            </label>
             <input
               type="number"
-              className="w-full border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
+              className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
               value={stmtYear}
               onChange={(e) => setStmtYear(Number(e.target.value) || stmtYear)}
             />
           </div>
 
           <div>
-            <label className="text-xs block mb-1">Statement Month</label>
+            <label className="text-xs block mb-1 text-slate-400">
+              Statement Month
+            </label>
             <select
-              className="w-full border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
+              className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
               value={stmtMonth}
               onChange={(e) => setStmtMonth(Number(e.target.value))}
             >
@@ -942,11 +1029,13 @@ export default function ReconcilerPage() {
           </div>
 
           <div>
-            <label className="text-xs block mb-1">Beginning Balance</label>
+            <label className="text-xs block mb-1 text-slate-400">
+              Beginning Balance
+            </label>
             <input
               type="number"
               step="0.01"
-              className="w-full border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
+              className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
               value={inputs.beginningBalance ?? 0}
               onChange={(e) =>
                 setInputs({
@@ -956,12 +1045,15 @@ export default function ReconcilerPage() {
               }
             />
           </div>
+
           <div>
-            <label className="text-xs block mb-1">Total Deposits</label>
+            <label className="text-xs block mb-1 text-slate-400">
+              Total Deposits
+            </label>
             <input
               type="number"
               step="0.01"
-              className="w-full border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
+              className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
               value={inputs.totalDeposits ?? 0}
               onChange={(e) =>
                 setInputs({
@@ -971,12 +1063,15 @@ export default function ReconcilerPage() {
               }
             />
           </div>
+
           <div>
-            <label className="text-xs block mb-1">Total Withdrawals</label>
+            <label className="text-xs block mb-1 text-slate-400">
+              Total Withdrawals
+            </label>
             <input
               type="number"
               step="0.01"
-              className="w-full border rounded px-2 py-1 bg-white dark:bg-white text-gray-700"
+              className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
               value={inputs.totalWithdrawals ?? 0}
               onChange={(e) =>
                 setInputs({
@@ -988,88 +1083,51 @@ export default function ReconcilerPage() {
           </div>
         </div>
 
-        {/* reconciliation status */}
+        {/* Reconciliation status */}
         <div className="grid md:grid-cols-3 gap-3 mt-4 text-sm">
-          <div className="rounded border p-3">
-            <div className="opacity-70">Parsed Deposits</div>
-            <div
-              className={
-                (depDelta === 0
-                  ? "text-emerald-700 dark:text-emerald-400"
-                  : "text-amber-700 dark:text-amber-400") + " font-semibold"
-              }
-            >
-              {depDelta === 0 ? "✅ " : "⚠️ "} {money(parsedDeposits)}
-            </div>
-            <div className="opacity-70">
-              User: {money(inputs.totalDeposits ?? 0)} (Δ {money(depDelta)})
-            </div>
-          </div>
-          <div className="rounded border p-3">
-            <div className="opacity-70">Parsed Withdrawals</div>
-            <div
-              className={
-                (wdrDelta === 0
-                  ? "text-emerald-700 dark:text-emerald-400"
-                  : "text-amber-700 dark:text-amber-400") + " font-semibold"
-              }
-            >
-              {wdrDelta === 0 ? "✅ " : "⚠️ "} {money(parsedWithdrawals)}
-            </div>
-            <div className="opacity-70">
-              User: {money(inputs.totalWithdrawals ?? 0)} (Δ {money(wdrDelta)})
-            </div>
-          </div>
-          <div className="rounded border p-3">
-            <div className="opacity-70">Ending Balance</div>
-            <div
-              className={
-                (endDelta === 0
-                  ? "text-emerald-700 dark:text-emerald-400"
-                  : "text-rose-700 dark:text-rose-400") + " font-semibold"
-              }
-            >
-              {endDelta === 0 ? "✅ " : "❌ "} {money(endingBalance)}
-            </div>
-            <div className="opacity-70">
-              User:{" "}
-              {money(
-                (inputs.beginningBalance ?? 0) +
-                  (inputs.totalDeposits ?? 0) -
-                  (inputs.totalWithdrawals ?? 0)
-              )}{" "}
-              (Δ {money(endDelta)})
-            </div>
-          </div>
+          <StatusTile
+            title="Parsed Deposits"
+            value={money(parsedDeposits)}
+            sub={`User: ${money(inputs.totalDeposits ?? 0)} (Δ ${money(
+              depDelta
+            )})`}
+            tone={depDelta === 0 ? "ok" : "warn"}
+          />
+          <StatusTile
+            title="Parsed Withdrawals"
+            value={money(parsedWithdrawals)}
+            sub={`User: ${money(inputs.totalWithdrawals ?? 0)} (Δ ${money(
+              wdrDelta
+            )})`}
+            tone={wdrDelta === 0 ? "ok" : "warn"}
+          />
+          <StatusTile
+            title="Ending Balance"
+            value={money(endingBalance)}
+            sub={`User: ${money(
+              (inputs.beginningBalance ?? 0) +
+                (inputs.totalDeposits ?? 0) -
+                (inputs.totalWithdrawals ?? 0)
+            )} (Δ ${money(endDelta)})`}
+            tone={endDelta === 0 ? "ok" : "bad"}
+          />
         </div>
-      </section>
+      </Panel>
 
       {/* paste area + pages */}
-      <section className="rounded border p-4 space-y-3">
+      <Panel className="p-4 space-y-3">
         <h3 className="font-semibold">Add page</h3>
         <textarea
           rows={6}
-          className="w-full border rounded px-2 py-2 bg-white dark:bg-white text-gray-700"
+          className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2 placeholder-slate-500"
           placeholder="Paste one statement page here…"
           value={paste}
           onChange={(e) => setPaste(e.target.value)}
         />
-        <div className="flex gap-2">
-          <button
-            className="rounded border px-3 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
-            onClick={addPage}
-          >
-            + Add Page
-          </button>
-          <button
-            className="rounded border px-3 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
-            onClick={rerunParsing}
-          >
-            Re-run parsing
-          </button>
-
-          <button
-            className="text-sm border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
+        <div className="flex flex-wrap gap-2">
+          <ToolbarButton onClick={addPage}>+ Add Page</ToolbarButton>
+          <ToolbarButton onClick={rerunParsing}>Re-run parsing</ToolbarButton>
+          <ToolbarButton
             onClick={() => {
               const rules = readCatRules();
               const reapplied = applyCategoryRulesTo(
@@ -1090,8 +1148,9 @@ export default function ReconcilerPage() {
             }}
           >
             Reapply rules
-          </button>
+          </ToolbarButton>
         </div>
+
         {pages.length > 0 && (
           <div className="text-sm">
             <div className="opacity-70 mb-2">Imported pages</div>
@@ -1099,12 +1158,12 @@ export default function ReconcilerPage() {
               {pages.map((p) => (
                 <li
                   key={p.idx}
-                  className="flex items-center gap-2 border rounded px-2 py-1"
+                  className="flex items-center gap-2 border border-slate-700 rounded-2xl px-2 py-1"
                 >
                   <span>Page {p.idx + 1}</span>
                   <span className="opacity-60">({p.lines} lines)</span>
                   <button
-                    className="text-xs border rounded px-2 py-0.5 hover:bg-gray-50 dark:hover:bg-gray-800"
+                    className="text-xs border border-slate-700 rounded-xl px-2 py-0.5 hover:bg-slate-800"
                     onClick={() => removePage(p.idx)}
                   >
                     Remove
@@ -1114,12 +1173,12 @@ export default function ReconcilerPage() {
             </ul>
           </div>
         )}
-      </section>
+      </Panel>
 
       {/* accordion controls */}
       <div className="flex gap-2">
         <button
-          className="text-xs border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
+          className="text-xs border border-slate-700 rounded-2xl px-2 py-1 hover:bg-slate-800"
           onClick={() => {
             const all: Record<string, boolean> = {};
             for (const [d] of groups) all[d] = true;
@@ -1129,7 +1188,7 @@ export default function ReconcilerPage() {
           Expand all
         </button>
         <button
-          className="text-xs border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
+          className="text-xs border border-slate-700 rounded-2xl px-2 py-1 hover:bg-slate-800"
           onClick={() => {
             const all: Record<string, boolean> = {};
             for (const [d] of groups) all[d] = false;
@@ -1141,22 +1200,22 @@ export default function ReconcilerPage() {
       </div>
 
       {/* withdrawals grouped by date */}
-      <div className="rounded border divide-y">
+      <div className="rounded-2xl border border-slate-700 divide-y divide-slate-800 overflow-x-auto">
         {groups.map(([date, g]) => (
           <div key={date}>
             <button
-              className="w-full flex items-center justify-between px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-900"
+              className="w-full flex items-center justify-between px-3 py-2 hover:bg-slate-900"
               onClick={() => setOpenDate((s) => ({ ...s, [date]: !s[date] }))}
             >
               <div className="flex items-center gap-2">
                 <span className="font-semibold">{date}</span>
-                <span className="text-xs text-gray-500">
+                <span className="text-xs text-slate-400">
                   ({g.rows.length} tx)
                 </span>
               </div>
               <div className="text-sm">
                 Day total:{" "}
-                <span className="font-medium text-red-700 dark:text-red-400">
+                <span className="font-medium text-rose-400">
                   {money(g.total)}
                 </span>
               </div>
@@ -1164,7 +1223,7 @@ export default function ReconcilerPage() {
 
             {openDate[date] && (
               <table className="w-full text-sm">
-                <thead className="bg-gray-50 dark:bg-gray-900">
+                <thead className="bg-slate-800/60">
                   <tr>
                     <th className="text-left p-2 w-1/2">Description</th>
                     <th className="text-left p-2">Category</th>
@@ -1174,7 +1233,7 @@ export default function ReconcilerPage() {
                 </thead>
                 <tbody>
                   {g.rows.map((t) => (
-                    <tr key={t.id} className="border-t">
+                    <tr key={t.id} className="border-t border-slate-800">
                       <td className="p-2">{prettyDesc(t.description)}</td>
                       <td className="p-2">
                         <CategorySelect
@@ -1182,7 +1241,6 @@ export default function ReconcilerPage() {
                             t.categoryOverride ?? t.category ?? "Uncategorized"
                           }
                           onChange={(val) => {
-                            // 2) Learn a general rule from this row (alias preferred)
                             const aliasLabel = applyAlias(
                               stripAuthAndCard(t.description || "")
                             );
@@ -1190,17 +1248,14 @@ export default function ReconcilerPage() {
                               t.description || "",
                               aliasLabel
                             );
-                            // save explicit override for this row (unchanged)
                             const k = keyForTx(
                               t.date || "",
                               t.description || "",
                               t.amount ?? 0
                             );
                             writeOverride(k, val);
-                            // save general rules for all candidates (alias + token)
                             upsertCategoryRules(keys, val);
 
-                            // re-apply rules to all rows and update cache
                             const rules = readCatRules();
                             const withRules = applyCategoryRulesTo(
                               rules,
@@ -1230,7 +1285,7 @@ export default function ReconcilerPage() {
                             ? userFromLast4(t.cardLast4)
                             : "Unknown")}
                       </td>
-                      <td className="p-2 text-right text-red-700 dark:text-red-400">
+                      <td className="p-2 text-right text-rose-400">
                         {money(Math.abs(t.amount))}
                       </td>
                     </tr>
@@ -1241,20 +1296,20 @@ export default function ReconcilerPage() {
           </div>
         ))}
         {groups.length === 0 && (
-          <div className="p-3 text-sm text-gray-500">
+          <div className="p-3 text-sm text-slate-400">
             No withdrawals parsed yet.
           </div>
         )}
       </div>
 
       {/* deposits table */}
-      <section className="rounded border p-4">
+      <Panel className="p-4 overflow-x-auto">
         <h3 className="font-semibold mb-3">Deposits</h3>
         {deposits.length === 0 ? (
-          <div className="text-sm text-gray-500">No deposits.</div>
+          <div className="text-sm text-slate-400">No deposits.</div>
         ) : (
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 dark:bg-gray-900">
+          <table className="w-full text-sm min-w-[420px]">
+            <thead className="bg-slate-800/60">
               <tr>
                 <th className="text-left p-2 w-20">Date</th>
                 <th className="text-left p-2">Description</th>
@@ -1263,15 +1318,15 @@ export default function ReconcilerPage() {
             </thead>
             <tbody>
               {deposits.map((t) => (
-                <tr key={`dep-${t.id}`} className="border-t">
+                <tr key={`dep-${t.id}`} className="border-t border-slate-800">
                   <td className="p-2">{t.date}</td>
                   <td className="p-2">{t.description}</td>
-                  <td className="p-2 text-right text-emerald-700 dark:text-emerald-400">
+                  <td className="p-2 text-right text-emerald-400">
                     {money(t.amount)}
                   </td>
                 </tr>
               ))}
-              <tr className="border-t font-medium">
+              <tr className="border-t border-slate-800 font-medium">
                 <td className="p-2" colSpan={2}>
                   Total
                 </td>
@@ -1280,7 +1335,7 @@ export default function ReconcilerPage() {
             </tbody>
           </table>
         )}
-      </section>
+      </Panel>
     </div>
   );
 }
