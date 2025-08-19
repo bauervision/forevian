@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 
 import { useRowsForSelection } from "@/helpers/useRowsForSelection";
+import { groupLabelForCategory } from "@/lib/categoryGroups";
 
 /* ---------------------------- helpers & hooks ---------------------------- */
 
@@ -161,9 +162,17 @@ export default function CategoriesIndexPage() {
   const catTotals = React.useMemo(() => {
     const m: Record<string, number> = {};
     for (const r of viewRows) {
-      const cat = (r.categoryOverride ?? r.category ?? "Uncategorized").trim();
+      // Only count expenses positive for readability, like before
       const amt = r.amount < 0 ? Math.abs(r.amount) : 0;
-      if (amt > 0) m[cat] = (m[cat] ?? 0) + amt;
+      if (!amt) continue;
+
+      const rawCat = (
+        r.categoryOverride ??
+        r.category ??
+        "Uncategorized"
+      ).trim();
+      const top = groupLabelForCategory(rawCat); // <-- collapse Amazon family to "Amazon"
+      m[top] = (m[top] ?? 0) + amt;
     }
     return Object.entries(m).sort((a, b) => b[1] - a[1]);
   }, [viewRows]);

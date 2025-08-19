@@ -133,7 +133,15 @@ const CANON: Array<[RegExp, string]> = [
   [/target\b|target\s*t-\s*\d+/i, "Target"],
   [/chick-?fil-?a/i, "Chick-fil-A"],
   [/cinema\s*cafe/i, "Cinema Cafe"],
-  [/amazon|amzn\.com\/bill|amazon\s*mktpl|prime\s*video/i, "Amazon"],
+  [/\bprime\s*video\b/i, "Prime Video"],
+  [
+    /\b(amazon\s*fresh|amazon\s*groc\w*|amzn\s*prime\s*now|prime\s*now|whole\s*foods)\b|(?:\bamzn\.?com\/bill\b.*\btip(s)?\b)/i,
+    "Amazon Fresh",
+  ],
+  [
+    /\b(?:amzn|amazon)(?:\s*(?:mktp|market(?:place)?|mark\*|\.?com))?\b/i,
+    "Amazon Marketplace",
+  ],
   [/bp#|shell\b|exxon|circle\s*k|7-?eleven|chevron/i, "Fuel Station"],
   [/adobe/i, "Adobe"],
   [/buzzsprout/i, "Buzzsprout"],
@@ -147,37 +155,68 @@ function canonMerchant(desc: string, fallback: string | null) {
 }
 
 function canonCategory(desc: string, merch?: string | null) {
-  const m = merch ?? "";
-  const dl = desc.toLowerCase();
+  const m = (merch ?? "").toLowerCase();
+  const dl = (desc ?? "").toLowerCase();
+
+  // Credits / income first
   if (
     /\b(payroll|e\s*deposit|deposit|vacp\s*treas|ssa|irs\s*treas|ach\s*credit|zelle\s*(from|credit)|online\s*transfer\s*from|xfer\s*from|branch\s*deposit|mobile\s*deposit|credit\s*interest|interest\s*(payment|credit)|refund|reversal|return)\b/i.test(
       dl
     )
   )
     return "Income";
-  if (m === "Amazon") return "Amazon";
-  if (m === "Newrez (Mortgage)") return "Housing";
-  if (m === "Truist Loan") return "Debt";
+
+  // ---------- Amazon family (specific → general) ----------
+  // Prime Video
+  if (m === "prime video" || /\bprime\s*video\b/.test(dl)) return "Prime Video";
+
+  // Amazon Fresh (grocery-ish, Prime Now, Whole Foods, AMZN tips)
   if (
-    /(Dominion Energy|Virginia Natural Gas|T-Mobile|Cox Communications)/.test(m)
+    m === "amazon fresh" ||
+    /\b(amazon\s*fresh|amazon\s*groc\w*|amzn\s*prime\s*now|prime\s*now|whole\s*foods)\b/.test(
+      dl
+    ) ||
+    (/\bamzn\.?com\/bill\b/.test(dl) && /\btip(s)?\b/.test(dl))
+  )
+    return "Amazon Fresh";
+
+  // Marketplace (catch-all for Amazon / AMZN / Mktp / Mark* / Amazon.com)
+  if (
+    m === "amazon marketplace" ||
+    /\b(?:amzn|amazon)(?:\s*(?:mktp|market(?:place)?|mark\*|\.?com))?\b/.test(
+      dl
+    )
+  )
+    return "Amazon Marketplace";
+
+  // ---------- your existing merchant-based rules ----------
+  if (merch === "Newrez (Mortgage)") return "Housing";
+  if (merch === "Truist Loan") return "Debt";
+  if (
+    /(Dominion Energy|Virginia Natural Gas|T-Mobile|Cox Communications)/i.test(
+      merch ?? ""
+    )
   )
     return "Utilities";
-  if (/(Progressive Insurance|Pacific Life Insurance)/.test(m))
+  if (/(Progressive Insurance|Pacific Life Insurance)/i.test(merch ?? ""))
     return "Insurance";
   if (
-    /(HP Instant Ink|Apple\.com\/Bill|Adobe|Buzzsprout|Discovery\+|Netflix|School of Rock)/.test(
-      m
+    /(HP Instant Ink|Apple\.com\/Bill|Adobe|Buzzsprout|Discovery\+|Netflix|School of Rock)/i.test(
+      merch ?? ""
     )
   )
     return "Subscriptions";
-  if (/(Harris Teeter|Food Lion)/.test(m)) return "Groceries";
-  if (/Home Depot/.test(m ?? "")) return "Shopping/Household";
-  if (/Chick-fil-A/.test(m)) return "Dining";
-  if (/Cinema Cafe/.test(m)) return "Entertainment";
-  if (/Target/.test(m)) return "Shopping/Household";
-  if (/Fuel Station/.test(m)) return "Gas";
+  if (/(Harris Teeter|Food Lion)/i.test(merch ?? "")) return "Groceries";
+  if (/Home Depot/i.test(merch ?? "")) return "Shopping/Household";
+  if (/Chick-fil-A/i.test(merch ?? "")) return "Dining";
+  if (/Cinema Cafe/i.test(merch ?? "")) return "Entertainment";
+  if (/Target/i.test(merch ?? "")) return "Shopping/Household";
+  if (/Fuel Station/i.test(merch ?? "")) return "Gas";
+
+  // Description-based last
   if (/online\s*transfer|inst\s*xfer|xfer/i.test(dl)) return "Transfers";
   if (/cash\s*back/i.test(dl)) return "Cash Back";
+
   return "Impulse/Misc";
 }
 
@@ -602,6 +641,47 @@ export default function ReconcilerPage() {
     [router, pathname, searchParams]
   );
 
+  function sumDeposits(rows: { amount: number }[]) {
+    return rows.reduce((s, r) => s + (r.amount > 0 ? r.amount : 0), 0);
+  }
+  function sumWithdrawals(rows: { amount: number }[]) {
+    return rows.reduce(
+      (s, r) => s + (r.amount < 0 ? Math.abs(r.amount) : 0),
+      0
+    );
+  }
+
+  /** Button: set totals to the parsed sums for the selected statement */
+  function prefillTotalsFromParsed() {
+    const parsedDeposits = +sumDeposits(transactions).toFixed(2);
+    const parsedWithdrawals = +sumWithdrawals(transactions).toFixed(2);
+    updateInputs({
+      totalDeposits: parsedDeposits,
+      totalWithdrawals: parsedWithdrawals,
+    });
+  }
+
+  /** Button: set this month’s beginning to previous month’s computed ending */
+  function prefillBeginningFromPrev() {
+    const idx = readIndex();
+    const list = Object.values(idx).sort(
+      (a, b) => a.stmtYear - b.stmtYear || a.stmtMonth - b.stmtMonth
+    );
+    const curPos = list.findIndex((s) => s.id === currentId);
+    if (curPos <= 0) return; // no previous month
+
+    const prev = list[curPos - 1];
+    const prevRows = Array.isArray(prev.cachedTx) ? prev.cachedTx : [];
+    const prevBegin = prev.inputs?.beginningBalance ?? 0;
+    const prevEnd = +(
+      prevBegin +
+      sumDeposits(prevRows) -
+      sumWithdrawals(prevRows)
+    ).toFixed(2);
+
+    updateInputs({ beginningBalance: prevEnd });
+  }
+
   React.useEffect(() => {
     // migrate / bootstrap
     const mig = migrateLegacyIfNeeded();
@@ -847,17 +927,36 @@ export default function ReconcilerPage() {
   }
 
   function onSwitchStatement(id: string) {
+    // 1) Commit the current statement (save its inputs/pages/txs)
+    const prev = readIndex()[currentId];
+    if (prev) {
+      persistCurrentStatementSnapshot({
+        statements: readIndex(),
+        currentId: currentId,
+        stmtYear: prev.stmtYear,
+        stmtMonth: prev.stmtMonth,
+        inputs, // ← current state's inputs belong to "currentId"
+        pages: (prev.pagesRaw || []).map((raw) => ({ raw })),
+        txs: transactions,
+      });
+    }
+
+    // 2) Switch to the new statement
     setCurrentId(id);
     writeCurrentId(id);
+
     const s = readIndex()[id];
     if (!s) return;
-    setStmtYear(s.stmtYear);
-    setStmtMonth(s.stmtMonth);
-    setInputs({
+
+    const newInputs = {
       beginningBalance: s.inputs?.beginningBalance ?? 0,
       totalDeposits: s.inputs?.totalDeposits ?? 0,
       totalWithdrawals: s.inputs?.totalWithdrawals ?? 0,
-    });
+    };
+    setStmtYear(s.stmtYear);
+    setStmtMonth(s.stmtMonth);
+    setInputs(newInputs);
+
     setPages(
       (s.pagesRaw || []).map((raw, i) => ({
         idx: i,
@@ -865,18 +964,30 @@ export default function ReconcilerPage() {
         lines: raw.split(/\r?\n/).filter(Boolean).length,
       }))
     );
+
     const pagesSanitized = (s.pagesRaw || []).map(normalizePageText);
     const res = rebuildFromPages(pagesSanitized || [], s.stmtYear, applyAlias);
     setTransactions(res.txs);
+
+    // 3) Persist the NEW statement using the **newInputs** (not stale state)
     persistCurrentStatementSnapshot({
-      statements,
+      statements: readIndex(),
       currentId: id,
       stmtYear: s.stmtYear,
       stmtMonth: s.stmtMonth,
-      inputs,
+      inputs: newInputs,
       pages: (s.pagesRaw || []).map((raw) => ({ raw })),
       txs: res.txs,
     });
+  }
+
+  function updateInputs(partial: Partial<typeof inputs>) {
+    const next = { ...inputs, ...partial };
+    setInputs(next);
+    const s = readIndex()[currentId];
+    if (s) {
+      upsertStatement({ ...s, inputs: next });
+    }
   }
 
   // Totals/derived views
@@ -998,7 +1109,17 @@ export default function ReconcilerPage() {
       {/* Statement numbers */}
       <Panel className="p-4">
         <h3 className="font-semibold mb-3">Statement numbers</h3>
+
         <div className="grid md:grid-cols-4 gap-3 items-end">
+          <div className="flex flex-wrap gap-2 mt-2">
+            <ToolbarButton onClick={prefillTotalsFromParsed}>
+              Use parsed totals
+            </ToolbarButton>
+            <ToolbarButton onClick={prefillBeginningFromPrev}>
+              Use previous ending as beginning
+            </ToolbarButton>
+          </div>
+
           <div>
             <label className="text-xs block mb-1 text-slate-400">
               Statement Year
@@ -1038,10 +1159,7 @@ export default function ReconcilerPage() {
               className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
               value={inputs.beginningBalance ?? 0}
               onChange={(e) =>
-                setInputs({
-                  ...inputs,
-                  beginningBalance: Number(e.target.value) || 0,
-                })
+                updateInputs({ beginningBalance: Number(e.target.value) || 0 })
               }
             />
           </div>
@@ -1056,10 +1174,7 @@ export default function ReconcilerPage() {
               className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
               value={inputs.totalDeposits ?? 0}
               onChange={(e) =>
-                setInputs({
-                  ...inputs,
-                  totalDeposits: Number(e.target.value) || 0,
-                })
+                updateInputs({ totalDeposits: Number(e.target.value) || 0 })
               }
             />
           </div>
@@ -1074,10 +1189,7 @@ export default function ReconcilerPage() {
               className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
               value={inputs.totalWithdrawals ?? 0}
               onChange={(e) =>
-                setInputs({
-                  ...inputs,
-                  totalWithdrawals: Number(e.target.value) || 0,
-                })
+                updateInputs({ totalWithdrawals: Number(e.target.value) || 0 })
               }
             />
           </div>

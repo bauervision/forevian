@@ -25,6 +25,7 @@ import {
   Sparkles,
   ArrowUpRight,
 } from "lucide-react";
+import { groupMembersForSlug, labelForSlug } from "@/lib/categoryGroups";
 
 /* ----------------------------- small helpers ----------------------------- */
 
@@ -45,6 +46,12 @@ function unslug(s: string) {
 
 function accentForCategory(catName: string) {
   const c = catName.toLowerCase();
+  if (/amazon\s*marketplace/i.test(c))
+    return "from-pink-600/20 to-pink-500/5 border-pink-500";
+  if (/amazon\s*fresh/i.test(c))
+    return "from-emerald-600/20 to-emerald-500/5 border-emerald-500";
+  if (/prime\s*video/i.test(c))
+    return "from-violet-600/20 to-violet-500/5 border-violet-500";
   if (/grocer/.test(c))
     return "from-emerald-600/20 to-emerald-500/5 border-emerald-500";
   if (/fast\s*food|dining|restaurant/.test(c))
@@ -124,7 +131,18 @@ type BrandPat = { name: string; domain: string; rx: RegExp };
 
 // expand anytime
 export const BRAND_PATS: BrandPat[] = [
-  // Keep boundaries around both sides so we don't match substrings.
+  {
+    name: "Prime Video",
+    domain: "primevideo.com",
+    rx: /\b(prime\s*video|amzn\s*digital\s*video)\b/i,
+  },
+
+  { name: "Amazon Fresh", domain: "amazon.com", rx: /\bamazon\s*fresh\b/i },
+  {
+    name: "Amazon Marketplace",
+    domain: "amazon.com",
+    rx: /\b(?:amzn|amazon)\s*(?:mktp|mktplc|mktpl|market(?:place)?|mark\*)\b/i,
+  },
   {
     name: "Dairy Queen",
     domain: "dairyqueen.com",
@@ -177,21 +195,23 @@ function detectBrand(text: string): { name: string; domain: string } | null {
 function cleanNoise(text: string) {
   let s = text || "";
 
-  // Add SPO* to the list (SpotOn/Stripe-style descriptors)
+  // Common POS/aggregator prefixes (add “SPO*”, “AMZN*”, “AMAZON*” patterns)
   s = s.replace(
-    /^(?:SPO|TST|TS|SQ|SQM|DNH|Doordash|Uber|GH|Grubhub)\s*\*/i,
+    /^(?:SPO|TST|TS|SQ|SQM|DNH|DOORDASH|UBER|GH|GRUBHUB|AMZN|AMAZON)\s*\*/i,
     " "
   );
 
-  // URLs and stray tokens
+  // URLs
   s = s.replace(/https?:\/\/\S+/gi, " ");
-  s = s.replace(/\b(ipch?a?)\b/gi, " ");
 
-  // Store numbers (e.g., "#19452", "004560")
+  // Phone numbers
+  s = s.replace(/\b\d{3}[-\s]?\d{3}[-\s]?\d{4}\b/g, " ");
+
+  // Store numbers
   s = s.replace(/#\s*\d{2,}/g, " ");
   s = s.replace(/\b\d{4,}\b/g, " ");
 
-  // City/state tails (extend anytime)
+  // City/state tails
   s = s.replace(
     /\b(virginia\s*bch|virginia|beach|chesape\w*|chesapeake)\b/gi,
     " "
@@ -211,27 +231,32 @@ function titleCase(s: string) {
 }
 
 function canonicalizeMerchantLabel(raw: string) {
-  // 1) let user aliases win
-  const alias = applyAlias(raw || "");
-  const base = alias || raw || "";
+  const input = raw || "";
+  const aliased = applyAlias(input) || null;
 
-  // 2) try brand detector on the original (better match rate)
-  const hit = detectBrand(base);
-  if (hit) return hit.name;
+  // 1) Try brand patterns on the RAW string first
+  for (const b of BRAND_PATS) if (b.rx.test(input)) return b.name;
 
-  // 3) clean noise and try again
-  const cleaned = cleanNoise(base);
-  const hit2 = detectBrand(cleaned);
-  if (hit2) return hit2.name;
+  // 2) Try brand patterns on the CLEANED RAW
+  const cleaned = cleanNoise(input);
+  for (const b of BRAND_PATS) if (b.rx.test(cleaned)) return b.name;
 
-  // 4) fallback: prettified cleaned string
-  return titleCase(cleaned || base);
+  // 3) If we have an alias, give it a chance too (raw → cleaned)
+  if (aliased) {
+    for (const b of BRAND_PATS) if (b.rx.test(aliased)) return b.name;
+    const aliasedClean = cleanNoise(aliased);
+    for (const b of BRAND_PATS) if (b.rx.test(aliasedClean)) return b.name;
+    // last resort: prettify the alias
+    return titleCase(aliasedClean || aliased);
+  }
+
+  // 4) Final fallback: prettify the cleaned raw
+  return titleCase(cleaned || input);
 }
 
 function logoUrlFor(label: string) {
-  const hit = detectBrand(label);
+  const hit = BRAND_PATS.find((b) => b.rx.test(label));
   if (hit) return `https://logo.clearbit.com/${hit.domain}`;
-  // naive fallback (often good enough)
   const word = label.toLowerCase().split(/\s+/)[0];
   return `https://logo.clearbit.com/${word}.com`;
 }
@@ -311,16 +336,49 @@ export default function CategoryDetailPage() {
     return idx[selectedId];
   }, [selectedId]);
 
-  // Filter to this category
+  // --- read slug and detect if it's a group
+
+  const slug = (params.slug || "").toLowerCase();
+  const groupMembers = groupMembersForSlug(slug); // null if not a group
+  const catDisplay = labelForSlug(slug); // "Amazon" for 'amazon', else prettified text
+
+  const parentLabelLc = catDisplay.toLowerCase();
+
+  // --- filter rows
   const rows = React.useMemo(() => {
-    const want = catName.toLowerCase();
+    // If this slug is a grouped parent (e.g., "amazon"), include:
+    //  - any row whose category equals a member ("Prime Video", "Amazon Fresh", "Amazon Marketplace")
+    //  - any row whose category still equals the parent ("Amazon") from older rules
+    if (groupMembers?.length) {
+      const targets = new Set(groupMembers.map((c) => c.trim().toLowerCase()));
+      return viewRows.filter((r) => {
+        const cat = (r.categoryOverride ?? r.category ?? "Uncategorized")
+          .trim()
+          .toLowerCase();
+        return targets.has(cat) || cat === parentLabelLc;
+      });
+    }
+
+    // Non-grouped: match the parent label exactly
     return viewRows.filter((r) => {
       const cat = (r.categoryOverride ?? r.category ?? "Uncategorized")
         .trim()
         .toLowerCase();
-      return cat === want;
+      return cat === parentLabelLc;
     });
-  }, [viewRows, catName]);
+  }, [viewRows, groupMembers, parentLabelLc]);
+
+  // --- "By subcategory" rollup (only if we're on a group)
+  const bySubcategory = React.useMemo(() => {
+    if (!groupMembers) return [];
+    const m: Record<string, number> = {};
+    for (const r of rows) {
+      const cat = (r.categoryOverride ?? r.category ?? "Uncategorized").trim();
+      const amt = r.amount < 0 ? Math.abs(r.amount) : 0;
+      if (amt) m[cat] = (m[cat] ?? 0) + amt;
+    }
+    return Object.entries(m).sort((a, b) => b[1] - a[1]);
+  }, [rows, groupMembers]);
 
   // Merchant rollup
   const byMerchant = React.useMemo(() => {
@@ -340,7 +398,7 @@ export default function CategoryDetailPage() {
     [rows]
   );
 
-  const catAccent = accentForCategory(catName);
+  const catAccent = accentForCategory(catDisplay);
 
   return (
     <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6 overflow-x-clip">
@@ -348,9 +406,9 @@ export default function CategoryDetailPage() {
       <div className="flex flex-wrap items-center gap-2 sm:gap-3">
         <h1 className="text-2xl font-bold flex items-center gap-2">
           <span className="inline-flex items-center justify-center rounded-xl bg-slate-900 border border-slate-700 p-2">
-            {iconForCategory(catName)}
+            {iconForCategory(catDisplay)}
           </span>
-          <span>{catName}</span>
+          <span>{catDisplay}</span>
         </h1>
 
         {mounted && viewMeta && (
@@ -414,10 +472,12 @@ export default function CategoryDetailPage() {
             </div>
           </div>
           <Link
-            href={`/dashboard${selectedId ? `?statement=${selectedId}` : ""}`}
+            href={`/dashboard/category${
+              selectedId ? `?statement=${selectedId}` : ""
+            }`}
             className="inline-flex items-center gap-1 text-sm underline text-slate-300 hover:text-white"
           >
-            ← Back to Dashboard
+            ← Back to Categories
           </Link>
         </div>
       </section>
@@ -463,7 +523,7 @@ export default function CategoryDetailPage() {
                         <MerchantLogo
                           src={logo}
                           alt={label}
-                          category={catName} // ← picks the right fallback icon
+                          category={catDisplay} // ← picks the right fallback icon
                         />
                       </div>
                       <div className="min-w-0">
