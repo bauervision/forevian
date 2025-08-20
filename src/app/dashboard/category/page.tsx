@@ -29,6 +29,62 @@ import { groupLabelForCategory } from "@/lib/categoryGroups";
 
 /* ---------------------------- helpers & hooks ---------------------------- */
 
+/** Find the previous statement id for a given "YYYY-MM" that actually exists. */
+function prevStatementId(currentId?: string | null) {
+  if (!currentId) return null;
+  const [y, m] = currentId.split("-").map(Number);
+  if (!y || !m) return null;
+  const pm = m === 1 ? 12 : m - 1;
+  const py = m === 1 ? y - 1 : y;
+  const candidate = `${py.toString().padStart(4, "0")}-${pm
+    .toString()
+    .padStart(2, "0")}`;
+  const idx = readIndex();
+  return idx[candidate] ? candidate : null;
+}
+
+/** Simple MoM trend */
+function computeTrend(curr: number, prev: number) {
+  if (!prev && !curr) return { dir: "flat" as const, pct: 0, delta: 0 };
+  if (!prev && curr) return { dir: "up" as const, pct: 100, delta: curr };
+  const delta = curr - prev;
+  const pct = Math.round((delta / prev) * 100);
+  return delta > 0
+    ? { dir: "up" as const, pct, delta }
+    : delta < 0
+    ? { dir: "down" as const, pct, delta }
+    : { dir: "flat" as const, pct: 0, delta: 0 };
+}
+
+/** Tiny pill for trend */
+function TrendPill({
+  dir,
+  pct,
+  deltaMoney,
+}: {
+  dir: "up" | "down" | "flat";
+  pct: number;
+  deltaMoney: string;
+}) {
+  const up = dir === "up";
+  const down = dir === "down";
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] border
+        ${
+          up
+            ? "text-rose-300 border-rose-500/60 bg-rose-900/20"
+            : down
+            ? "text-emerald-300 border-emerald-500/60 bg-emerald-900/20"
+            : "text-slate-300 border-slate-600 bg-slate-800/40"
+        }`}
+      title={`${deltaMoney} vs last month`}
+    >
+      {up ? "▲" : down ? "▼" : "–"} {Math.abs(pct)}%
+    </span>
+  );
+}
+
 function useStatementOptions() {
   return React.useMemo(() => {
     const idx = readIndex();
@@ -74,28 +130,28 @@ const toSlug = (s: string) => s.toLowerCase().replace(/\s+/g, "-");
 
 function iconFor(cat: string) {
   const c = cat.toLowerCase();
-  if (/grocer/.test(c)) return <ShoppingCart className="h-5 w-5" />;
+  if (/grocer/.test(c)) return <ShoppingCart className="h-6 w-6" />;
   if (/fast\s*food|dining|restaurant|coffee|food/.test(c))
-    return <Utensils className="h-5 w-5" />;
-  if (/gas|fuel/.test(c)) return <Fuel className="h-5 w-5" />;
-  if (/housing|mortgage|rent|home/.test(c)) return <Home className="h-5 w-5" />;
+    return <Utensils className="h-6 w-6" />;
+  if (/gas|fuel/.test(c)) return <Fuel className="h-6 w-6" />;
+  if (/housing|mortgage|rent|home/.test(c)) return <Home className="h-6 w-6" />;
   if (/utilities|utility|power|gas|water|internet/.test(c))
-    return <Cable className="h-5 w-5" />;
-  if (/insurance/.test(c)) return <Shield className="h-5 w-5" />;
+    return <Cable className="h-6 w-6" />;
+  if (/insurance/.test(c)) return <Shield className="h-6 w-6" />;
   if (
     /subscriptions?|stream|music|video|prime|netflix|disney|hulu|plus/.test(c)
   )
-    return <MonitorPlay className="h-5 w-5" />;
+    return <MonitorPlay className="h-6 w-6" />;
   if (/amazon|shopping|household|target|depot|store/.test(c))
-    return <ShoppingBag className="h-5 w-5" />;
+    return <ShoppingBag className="h-6 w-6" />;
   if (/debt|loan|credit\s*card/.test(c))
-    return <CreditCard className="h-5 w-5" />;
-  if (/cash\s*back/.test(c)) return <PiggyBank className="h-5 w-5" />;
+    return <CreditCard className="h-6 w-6" />;
+  if (/cash\s*back/.test(c)) return <PiggyBank className="h-6 w-6" />;
   if (/entertainment|movies|cinema/.test(c))
-    return <Music className="h-5 w-5" />;
+    return <Music className="h-6 w-6" />;
   if (/impulse|misc|uncategorized|other/.test(c))
-    return <Sparkles className="h-5 w-5" />;
-  return <Store className="h-5 w-5" />;
+    return <Sparkles className="h-6 w-6" />;
+  return <Store className="h-6 w-6" />;
 }
 
 function accentFor(cat: string) {
@@ -152,6 +208,20 @@ export default function CategoriesIndexPage() {
 
   const viewRows = useRowsForSelection(period, selectedId, transactions);
 
+  // previous month rows (MoM)
+  const prevRows = React.useMemo(() => {
+    if (period !== "CURRENT") return [] as typeof viewRows;
+    const idx = readIndex();
+    const selected = (searchParams.get("statement") ?? readCurrentId()) || "";
+    const prevId = prevStatementId(selected);
+    if (!prevId) return [];
+    const s = idx[prevId];
+    if (!s) return [];
+    const rules = readCatRules();
+    const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
+    return applyCategoryRulesTo(rules, raw, applyAlias) as typeof viewRows;
+  }, [period, searchParams]);
+
   // Viewing chip should reflect the selected statement
   const viewMeta = React.useMemo(() => {
     if (!selectedId) return undefined;
@@ -159,27 +229,38 @@ export default function CategoriesIndexPage() {
     return selectedId ? idx[selectedId] : undefined;
   }, [selectedId]);
 
-  const catTotals = React.useMemo(() => {
-    const m: Record<string, number> = {};
-    for (const r of viewRows) {
-      // Only count expenses positive for readability, like before
-      const amt = r.amount < 0 ? Math.abs(r.amount) : 0;
-      if (!amt) continue;
+  // Build current + previous totals keyed by top-level category (group label)
+  const catCards = React.useMemo(() => {
+    const sumByTop = (rows: any[]) => {
+      const m: Record<string, number> = {};
+      for (const r of rows) {
+        const amt = r.amount < 0 ? Math.abs(r.amount) : 0;
+        if (!amt) continue;
+        const rawCat = (
+          r.categoryOverride ??
+          r.category ??
+          "Uncategorized"
+        ).trim();
+        const top = groupLabelForCategory(rawCat);
+        m[top] = (m[top] ?? 0) + amt;
+      }
+      return m;
+    };
+    const curr = sumByTop(viewRows);
+    const prev = sumByTop(prevRows);
 
-      const rawCat = (
-        r.categoryOverride ??
-        r.category ??
-        "Uncategorized"
-      ).trim();
-      const top = groupLabelForCategory(rawCat); // <-- collapse Amazon family to "Amazon"
-      m[top] = (m[top] ?? 0) + amt;
-    }
-    return Object.entries(m).sort((a, b) => b[1] - a[1]);
-  }, [viewRows]);
+    return Object.entries(curr)
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, value]) => ({
+        name,
+        value,
+        trend: computeTrend(value, prev[name] ?? 0),
+      }));
+  }, [viewRows, prevRows]);
 
   const grandTotal = React.useMemo(
-    () => catTotals.reduce((s, [, v]) => s + v, 0),
-    [catTotals]
+    () => catCards.reduce((s, c) => s + c.value, 0),
+    [catCards]
   );
 
   return (
@@ -237,7 +318,7 @@ export default function CategoriesIndexPage() {
         </div>
       </div>
 
-      {/* Cards grid (SSR-safe: skeleton until mounted) */}
+      {/* Cards grid */}
       {!mounted ? (
         <ul
           className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4"
@@ -248,67 +329,63 @@ export default function CategoriesIndexPage() {
               key={i}
               className="rounded-2xl border border-slate-700 bg-slate-900 p-4 animate-pulse"
             >
-              <div className="flex items-center gap-2">
-                <div className="h-9 w-9 rounded-xl bg-slate-800" />
+              <div className="flex items-center gap-3">
+                <div className="h-14 w-14 rounded-xl bg-slate-800" />
                 <div className="h-4 w-28 bg-slate-800 rounded" />
               </div>
               <div className="h-6 w-24 bg-slate-800 rounded mt-3" />
-              <div className="h-2 w-full bg-slate-800 rounded mt-3" />
+              <div className="h-4 w-20 bg-slate-800 rounded mt-2" />
             </li>
           ))}
         </ul>
-      ) : catTotals.length === 0 ? (
+      ) : catCards.length === 0 ? (
         <div className="rounded-2xl border border-slate-700 bg-slate-900 p-6 text-sm text-slate-400">
           No transactions for this scope.
         </div>
       ) : (
         <ul className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
-          {catTotals.map(([cat, amt]) => {
-            const pct = grandTotal ? Math.round((amt / grandTotal) * 100) : 0;
-            const accent = accentFor(cat);
+          {catCards.map(({ name, value, trend }) => {
+            const pct = grandTotal ? Math.round((value / grandTotal) * 100) : 0;
+            const accent = accentFor(name);
             const href = `/dashboard/category/${encodeURIComponent(
-              toSlug(cat)
+              toSlug(name)
             )}${urlStatement ? `?statement=${urlStatement}` : ""}`;
 
             return (
-              <li key={cat} className="group">
+              <li key={name} className="group">
                 <Link href={href} className="block focus:outline-none">
                   <div
                     className={`relative rounded-2xl border bg-slate-900 border-l-4 p-4
-                                transition-transform duration-150 will-change-transform
-                                group-hover:translate-y-[-2px] group-hover:shadow-lg
-                                bg-gradient-to-br ${accent}`}
+                  transition-transform duration-150 will-change-transform
+                  group-hover:-translate-y-0.5 group-hover:shadow-lg
+                  bg-gradient-to-br ${accent}`}
                   >
-                    {/* Icon + name */}
-                    <div className="flex items-center gap-2">
-                      <div className="shrink-0 rounded-xl bg-slate-950/60 border border-slate-700 p-2">
-                        {iconFor(cat)}
+                    {/* Header row: icon + name (no amount here) */}
+                    <div className="flex items-center gap-3">
+                      <div className="h-14 w-14 rounded-xl bg-slate-950/60 border border-slate-700 flex items-center justify-center shrink-0">
+                        {iconFor(name)}
                       </div>
-                      <div className="font-medium truncate">{cat}</div>
-                    </div>
 
-                    {/* Amount */}
-                    <div className="mt-2 text-lg sm:text-xl font-semibold">
-                      {money(amt)}
-                    </div>
-
-                    {/* Percent bar */}
-                    <div className="mt-3">
-                      <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-                        <span>Share of spend</span>
-                        <span>{pct}%</span>
-                      </div>
-                      <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
-                        <div
-                          className="h-full bg-white/70 group-hover:bg-white transition-all"
-                          style={{ width: `${pct}%` }}
-                        />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-base font-semibold text-white truncate">
+                          {name}
+                        </div>
+                        <div className="text-xs text-slate-300">
+                          {pct}% of spend
+                        </div>
                       </div>
                     </div>
 
-                    {/* Click affordance */}
-                    <div className="pointer-events-none absolute right-3 top-3 text-xs opacity-60 group-hover:opacity-100">
-                      View →
+                    {/* Amount + trend row */}
+                    <div className="mt-3 flex items-center justify-between">
+                      <div className="text-lg sm:text-xl font-semibold">
+                        {money(value)}
+                      </div>
+                      <TrendPill
+                        dir={trend.dir}
+                        pct={trend.pct}
+                        deltaMoney={money(Math.abs(trend.delta))}
+                      />
                     </div>
                   </div>
                 </Link>

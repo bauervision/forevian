@@ -5,6 +5,7 @@ import { useParams, useSearchParams } from "next/navigation";
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 import { type Period } from "@/lib/period";
 import { readIndex, readCurrentId, writeCurrentId } from "@/lib/statements";
+import { readCatRules, applyCategoryRulesTo } from "@/lib/categoryRules";
 import { applyAlias } from "@/lib/aliases";
 import { prettyDesc } from "@/lib/txEnrich";
 import StatementSwitcher from "@/components/StatementSwitcher";
@@ -25,11 +26,66 @@ import {
   Sparkles,
   ArrowUpRight,
   Pencil,
-  Grid2x2,
+  ArrowLeft,
 } from "lucide-react";
 import { groupMembersForSlug, labelForSlug } from "@/lib/categoryGroups";
 import { useBrandMap } from "@/app/providers/BrandMapProvider";
 import BrandLogoDialog from "@/components/BrandLogoDialog";
+
+/* ----------------------------- trends helpers ---------------------------- */
+
+function prevStatementId(currentId?: string | null) {
+  if (!currentId) return null;
+  const [y, m] = currentId.split("-").map(Number);
+  if (!y || !m) return null;
+  const pm = m === 1 ? 12 : m - 1;
+  const py = m === 1 ? y - 1 : y;
+  const candidate = `${py.toString().padStart(4, "0")}-${pm
+    .toString()
+    .padStart(2, "0")}`;
+  const idx = readIndex();
+  return idx[candidate] ? candidate : null;
+}
+
+function computeTrend(curr: number, prev: number) {
+  if (!prev && !curr) return { dir: "flat" as const, pct: 0, delta: 0 };
+  if (!prev && curr) return { dir: "up" as const, pct: 100, delta: curr };
+  const delta = curr - prev;
+  const pct = Math.round((delta / prev) * 100);
+  return delta > 0
+    ? { dir: "up" as const, pct, delta }
+    : delta < 0
+    ? { dir: "down" as const, pct, delta }
+    : { dir: "flat" as const, pct: 0, delta: 0 };
+}
+
+function TrendPill({
+  dir,
+  pct,
+  deltaMoney,
+}: {
+  dir: "up" | "down" | "flat";
+  pct: number;
+  deltaMoney: string;
+}) {
+  const up = dir === "up";
+  const down = dir === "down";
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] border
+        ${
+          up
+            ? "text-rose-300 border-rose-500/60 bg-rose-900/20"
+            : down
+            ? "text-emerald-300 border-emerald-500/60 bg-emerald-900/20"
+            : "text-slate-300 border-slate-600 bg-slate-800/40"
+        }`}
+      title={`${deltaMoney} vs last month`}
+    >
+      {up ? "▲" : down ? "▼" : "–"} {Math.abs(pct)}%
+    </span>
+  );
+}
 
 /* ----------------------------- small helpers ----------------------------- */
 
@@ -124,7 +180,6 @@ const BRAND_DOMAINS: Array<[RegExp, string]> = [
   [/dominion\s*energy/i, "dominionenergy.com"],
 ];
 
-/** Returns a Clearbit logo URL if we can guess the brand; otherwise null. */
 function logoForMerchant(label: string): string | null {
   const hit = BRAND_DOMAINS.find(([rx]) => rx.test(label));
   return hit ? `https://logo.clearbit.com/${hit[1]}` : null;
@@ -140,7 +195,6 @@ export const BRAND_PATS: BrandPat[] = [
     domain: "primevideo.com",
     rx: /\b(prime\s*video|amzn\s*digital\s*video)\b/i,
   },
-
   { name: "Amazon Fresh", domain: "amazon.com", rx: /\bamazon\s*fresh\b/i },
   {
     name: "Amazon Marketplace",
@@ -190,32 +244,16 @@ export const BRAND_PATS: BrandPat[] = [
   },
 ];
 
-function detectBrand(text: string): { name: string; domain: string } | null {
-  for (const b of BRAND_PATS)
-    if (b.rx.test(text)) return { name: b.name, domain: b.domain };
-  return null;
-}
-
 function cleanNoise(text: string) {
   let s = text || "";
-
-  // Common POS/aggregator prefixes (add “SPO*”, “AMZN*”, “AMAZON*” patterns)
   s = s.replace(
     /^(?:SPO|TST|TS|SQ|SQM|DNH|DOORDASH|UBER|GH|GRUBHUB|AMZN|AMAZON)\s*\*/i,
     " "
   );
-
-  // URLs
   s = s.replace(/https?:\/\/\S+/gi, " ");
-
-  // Phone numbers
   s = s.replace(/\b\d{3}[-\s]?\d{3}[-\s]?\d{4}\b/g, " ");
-
-  // Store numbers
   s = s.replace(/#\s*\d{2,}/g, " ");
   s = s.replace(/\b\d{4,}\b/g, " ");
-
-  // City/state tails
   s = s.replace(
     /\b(virginia\s*bch|virginia|beach|chesape\w*|chesapeake)\b/gi,
     " "
@@ -224,8 +262,6 @@ function cleanNoise(text: string) {
     /\b(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV)\b/gi,
     " "
   );
-
-  // Collapse whitespace
   s = s.replace(/\s{2,}/g, " ").trim();
   return s;
 }
@@ -238,23 +274,18 @@ function canonicalizeMerchantLabel(raw: string) {
   const input = raw || "";
   const aliased = applyAlias(input) || null;
 
-  // 1) Try brand patterns on the RAW string first
   for (const b of BRAND_PATS) if (b.rx.test(input)) return b.name;
 
-  // 2) Try brand patterns on the CLEANED RAW
   const cleaned = cleanNoise(input);
   for (const b of BRAND_PATS) if (b.rx.test(cleaned)) return b.name;
 
-  // 3) If we have an alias, give it a chance too (raw → cleaned)
   if (aliased) {
     for (const b of BRAND_PATS) if (b.rx.test(aliased)) return b.name;
     const aliasedClean = cleanNoise(aliased);
     for (const b of BRAND_PATS) if (b.rx.test(aliasedClean)) return b.name;
-    // last resort: prettify the alias
     return titleCase(aliasedClean || aliased);
   }
 
-  // 4) Final fallback: prettify the cleaned raw
   return titleCase(cleaned || input);
 }
 
@@ -274,21 +305,20 @@ function MerchantLogo({
 }: {
   src?: string | null;
   alt?: string;
-  category: string; // use current category name to pick a fitting fallback icon
-  initials?: string; // optional initials fallback (e.g., "JU", "3A")
+  category: string;
+  initials?: string;
   className?: string;
 }) {
   const [failed, setFailed] = React.useState(!src);
 
   if (!src || failed) {
-    // clean, on-brand fallback: icon for the category (restaurants → Utensils)
     return (
       <div
-        className={`h-10 w-10 rounded-xl bg-slate-950/60 border border-slate-700 flex items-center justify-center ${className}`}
+        className={`h-16 w-16 md:h-20 md:w-20 rounded-xl bg-slate-950/60 border border-slate-700 flex items-center justify-center ${className}`}
         aria-label={alt || "merchant"}
       >
         {initials ? (
-          <span className="text-[10px] font-semibold tracking-wide text-slate-300">
+          <span className="text-xs font-semibold tracking-wide text-slate-300">
             {initials}
           </span>
         ) : (
@@ -302,7 +332,7 @@ function MerchantLogo({
     <img
       src={src}
       alt={alt}
-      className={`h-10 w-10 rounded-xl border border-slate-700 bg-white object-contain p-1 ${className}`}
+      className={`h-16 w-16 md:h-20 md:w-20 rounded-xl border border-slate-700 bg-white object-contain p-1 ${className}`}
       referrerPolicy="no-referrer"
       onError={() => setFailed(true)}
     />
@@ -342,18 +372,14 @@ export default function CategoryDetailPage() {
   }, [selectedId]);
 
   // --- read slug and detect if it's a group
-
   const slug = (params.slug || "").toLowerCase();
   const groupMembers = groupMembersForSlug(slug); // null if not a group
-  const catDisplay = labelForSlug(slug); // "Amazon" for 'amazon', else prettified text
+  const catDisplay = labelForSlug(slug); // prettified
 
   const parentLabelLc = catDisplay.toLowerCase();
 
-  // --- filter rows
+  // --- filter current rows
   const rows = React.useMemo(() => {
-    // If this slug is a grouped parent (e.g., "amazon"), include:
-    //  - any row whose category equals a member ("Prime Video", "Amazon Fresh", "Amazon Marketplace")
-    //  - any row whose category still equals the parent ("Amazon") from older rules
     if (groupMembers?.length) {
       const targets = new Set(groupMembers.map((c) => c.trim().toLowerCase()));
       return viewRows.filter((r) => {
@@ -363,8 +389,6 @@ export default function CategoryDetailPage() {
         return targets.has(cat) || cat === parentLabelLc;
       });
     }
-
-    // Non-grouped: match the parent label exactly
     return viewRows.filter((r) => {
       const cat = (r.categoryOverride ?? r.category ?? "Uncategorized")
         .trim()
@@ -373,18 +397,103 @@ export default function CategoryDetailPage() {
     });
   }, [viewRows, groupMembers, parentLabelLc]);
 
-  // Merchant rollup
-  const byMerchant = React.useMemo(() => {
+  // --- previous month rows for the SAME scope (for MoM)
+  const prevScopedRows = React.useMemo(() => {
+    if (period !== "CURRENT") return [] as typeof rows;
+    const idx = readIndex();
+    const prevId = prevStatementId(selectedId);
+    if (!prevId) return [];
+    const s = idx[prevId];
+    if (!s) return [];
+    const rules = readCatRules();
+    const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
+    const allPrev = applyCategoryRulesTo(
+      rules,
+      raw,
+      applyAlias
+    ) as typeof viewRows;
+
+    if (groupMembers?.length) {
+      const targets = new Set(groupMembers.map((c) => c.trim().toLowerCase()));
+      return allPrev.filter((r) => {
+        const cat = (r.categoryOverride ?? r.category ?? "Uncategorized")
+          .trim()
+          .toLowerCase();
+        return targets.has(cat) || cat === parentLabelLc;
+      });
+    } else {
+      return allPrev.filter((r) => {
+        const cat = (r.categoryOverride ?? r.category ?? "Uncategorized")
+          .trim()
+          .toLowerCase();
+        return cat === parentLabelLc;
+      });
+    }
+  }, [period, selectedId, groupMembers, parentLabelLc]);
+
+  // Previous statement rows (for MoM trend)
+  const prevRows = React.useMemo(() => {
+    if (period !== "CURRENT") return [] as typeof viewRows;
+    const idx = readIndex();
+    const prevId = (() => {
+      const cur = (sp.get("statement") ?? readCurrentId()) || "";
+      const [y, m] = cur.split("-").map(Number);
+      if (!y || !m) return null;
+      const pm = m === 1 ? 12 : m - 1;
+      const py = m === 1 ? y - 1 : y;
+      const cand = `${py.toString().padStart(4, "0")}-${pm
+        .toString()
+        .padStart(2, "0")}`;
+      return idx[cand] ? cand : null;
+    })();
+    if (!prevId) return [] as typeof viewRows;
+
+    const snap = idx[prevId];
+    const rules = readCatRules();
+    const raw = Array.isArray(snap?.cachedTx) ? snap.cachedTx : [];
+    return applyCategoryRulesTo(rules, raw, applyAlias) as typeof viewRows;
+  }, [period, sp]);
+
+  // Roll up previous month by merchant (use same canonicalizer)
+  const prevByMerchant = React.useMemo(() => {
     const m: Record<string, number> = {};
-    for (const r of rows) {
-      // prefer description; prettyDesc gives you a cleaner base
+    for (const r of prevRows) {
       const raw = prettyDesc(r.description || r.merchant || "");
       const label = canonicalizeMerchantLabel(raw);
       const amt = Math.abs(r.amount < 0 ? r.amount : 0);
       if (amt > 0) m[label] = (m[label] ?? 0) + amt;
     }
-    return Object.entries(m).sort((a, b) => b[1] - a[1]);
-  }, [rows]);
+    return m;
+  }, [prevRows]);
+
+  // Merchant rollup (current + prev → trend)
+  type TotalsMap = Record<string, number>;
+  const sumMerchants = (rowsIn: typeof rows): TotalsMap => {
+    const m: TotalsMap = {};
+    for (const r of rowsIn) {
+      const raw = prettyDesc(r.description || r.merchant || "");
+      const label = canonicalizeMerchantLabel(raw);
+      const amt = Math.abs(r.amount < 0 ? r.amount : 0);
+      if (amt > 0) m[label] = (m[label] ?? 0) + amt;
+    }
+    return m;
+  };
+
+  const merchCurrent = React.useMemo(() => sumMerchants(rows), [rows]);
+  const merchPrev = React.useMemo(
+    () => sumMerchants(prevScopedRows),
+    [prevScopedRows]
+  );
+
+  const byMerchant = React.useMemo(() => {
+    return Object.entries(merchCurrent)
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, amt]) => ({
+        label,
+        amt,
+        trend: computeTrend(amt, merchPrev[label] ?? 0),
+      }));
+  }, [merchCurrent, merchPrev]);
 
   const total = React.useMemo(
     () => rows.reduce((s, r) => s + Math.abs(r.amount < 0 ? r.amount : 0), 0),
@@ -455,19 +564,19 @@ export default function CategoryDetailPage() {
       <section
         className={`rounded-2xl border border-l-4 p-4 sm:p-5 bg-slate-900 bg-gradient-to-br ${catAccent}`}
       >
-        <div className="flex flex-wrap items-end gap-3 justify-between">
+        <div className="flex flex-wrap items-center gap-3 justify-between">
           <Link
             href={`/dashboard/category${
               selectedId ? `?statement=${selectedId}` : ""
             }`}
             aria-label="Back to Categories"
             title="Back to Categories"
-            className="inline-flex h-9 w-9 items-center justify-center rounded-xl
+            className="inline-flex items-center gap-2 h-9 px-3 rounded-xl
              border border-slate-700 bg-slate-900 hover:bg-slate-800
              focus:outline-none focus:ring-2 focus:ring-emerald-500/60"
           >
-            <Grid2x2 className="h-5 w-5 text-slate-300" />
-            <span className="sr-only">Back to Categories</span>
+            <ArrowLeft className="h-5 w-5 text-slate-300" />
+            <span className="text-sm text-slate-300">Back to Categories</span>
           </Link>
 
           <div className="text-right">
@@ -494,7 +603,7 @@ export default function CategoryDetailPage() {
                 key={i}
                 className="rounded-2xl border border-slate-700 bg-slate-900 p-4 animate-pulse"
               >
-                <div className="h-10 w-10 rounded-xl bg-slate-800 mb-3" />
+                <div className="h-16 w-16 rounded-xl bg-slate-800 mb-3" />
                 <div className="h-4 w-32 bg-slate-800 rounded" />
                 <div className="h-5 w-24 bg-slate-800 rounded mt-3" />
               </li>
@@ -506,31 +615,37 @@ export default function CategoryDetailPage() {
           </div>
         ) : (
           <ul className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-            {byMerchant.map(([label, amt]) => {
+            {byMerchant.map(({ label, amt, trend }) => {
               const share = total ? Math.round((amt / total) * 100) : 0;
-              const brand = detect(label); // BrandRule | null
+              const brand = detect(label);
               const logo = brand
                 ? `https://logo.clearbit.com/${brand.domain}`
-                : logoFor(label);
+                : logoFor(label) || logoForMerchant(label) || logoUrlFor(label);
+
               return (
                 <li key={label} className="group">
                   <div
                     className={`relative rounded-2xl border bg-slate-900 border-l-4 p-4
-                                transition-transform duration-150 will-change-transform
-                                group-hover:translate-y-[-2px] group-hover:shadow-lg
-                                bg-gradient-to-br ${catAccent}`}
+                transition-transform duration-150 will-change-transform
+                group-hover:-translate-y-0.5 group-hover:shadow-lg
+                bg-gradient-to-br ${catAccent}
+                min-h-[152px] flex flex-col justify-between`} // ← lock height + layout
                   >
-                    <div className="flex items-center gap-3">
-                      <div className="shrink-0">
+                    {/* Header: logo | name */}
+                    <div className="grid grid-cols-[56px,1fr] gap-3 items-start">
+                      {/* Bigger logo */}
+                      <div className="relative">
                         <MerchantLogo
                           src={logo}
                           alt={label}
-                          category={catDisplay} // ← picks the right fallback icon
+                          category={catDisplay}
+                          className="h-14 w-14"
                         />
+                        {/* (optional) edit button */}
                         <button
                           type="button"
                           className="absolute -right-1 -bottom-1 h-6 w-6 rounded-lg border border-slate-700 bg-slate-900/90
-               opacity-0 group-hover:opacity-100 transition"
+                     opacity-0 group-hover:opacity-100 transition"
                           title="Edit logo"
                           onClick={(e) => {
                             e.preventDefault();
@@ -541,26 +656,43 @@ export default function CategoryDetailPage() {
                           <Pencil className="h-3.5 w-3.5 mx-auto opacity-80" />
                         </button>
                       </div>
+
+                      {/* Name (wrap to 2 lines) + share */}
                       <div className="min-w-0">
-                        <div className="font-medium truncate">{label}</div>
-                        <div className="text-xs text-slate-400 flex items-center gap-1">
-                          Share {share}%{" "}
-                          <ArrowUpRight className="h-3.5 w-3.5 opacity-70" />
+                        <div
+                          className="text-sm sm:text-base font-semibold text-white leading-tight whitespace-normal break-words"
+                          title={label}
+                          style={{
+                            display: "-webkit-box",
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: "vertical",
+                            overflow: "hidden",
+                          }} // ← 2-line clamp without the plugin
+                        >
+                          {label}
+                        </div>
+                        <div className="mt-1 text-[11px] text-slate-300">
+                          Share {share}%
                         </div>
                       </div>
                     </div>
 
-                    <div className="mt-3 text-lg sm:text-xl font-semibold">
-                      {money(amt)}
-                    </div>
-
-                    <div className="mt-3">
-                      <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
-                        <div
-                          className="h-full bg-white/70 group-hover:bg-white transition-all"
-                          style={{ width: `${share}%` }}
-                        />
+                    {/* Footer: amount + trend (kept on one row) */}
+                    <div className="mt-3 flex items-center justify-between">
+                      <div className="text-2xl sm:text-lg font-semibold text-white">
+                        {money(amt)}
                       </div>
+                      {(() => {
+                        const prevAmt = prevByMerchant[label] ?? 0;
+                        const t = computeTrend(amt, prevAmt);
+                        return (
+                          <TrendPill
+                            dir={t.dir}
+                            pct={t.pct}
+                            deltaMoney={money(Math.abs(t.delta))}
+                          />
+                        );
+                      })()}
                     </div>
                   </div>
                 </li>
@@ -570,7 +702,7 @@ export default function CategoryDetailPage() {
         )}
       </section>
 
-      {/* Transactions (responsive: cards on mobile, table on desktop) */}
+      {/* Transactions */}
       <section className="rounded-2xl border border-slate-700 bg-slate-900 p-4 sm:p-5">
         <h3 className="font-semibold mb-3">Transactions</h3>
 
