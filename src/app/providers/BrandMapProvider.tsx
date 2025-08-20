@@ -13,7 +13,7 @@ export type BrandRule = {
 
 const LS_KEY = "brand.rules.v1";
 
-/** Built-in defaults: keep these minimal—users can add more from the dialog */
+/** Built-in defaults (users’ custom rules will override these) */
 const DEFAULTS: BrandRule[] = [
   {
     id: "prime-video",
@@ -164,14 +164,15 @@ const DEFAULTS: BrandRule[] = [
 ];
 
 function normalize(s: string) {
-  return (s || "").toLowerCase().trim();
+  return (s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function match(rule: BrandRule, text: string) {
   const t = text || "";
-  if (rule.mode === "exact") {
-    return normalize(t) === normalize(rule.pattern);
-  }
+  if (rule.mode === "exact") return normalize(t) === normalize(rule.pattern);
   if (rule.mode === "keywords") {
     const words = rule.pattern
       .split(/[, ]+/)
@@ -180,13 +181,16 @@ function match(rule: BrandRule, text: string) {
     const tl = normalize(t);
     return words.every((w) => tl.includes(w));
   }
-  // regex
   try {
     const rx = new RegExp(rule.pattern, "i");
     return rx.test(t);
   } catch {
     return false;
   }
+}
+
+function escapeRegex(s: string) {
+  return (s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export type BrandContextValue = {
@@ -197,6 +201,8 @@ export type BrandContextValue = {
   removeRule: (id: string) => void;
   detect: (text: string) => BrandRule | null;
   logoFor: (textOrDomain: string) => string | null;
+  /** increments on every rules change; depend on this to recompute UI */
+  version: number;
 };
 
 const BrandCtx = React.createContext<BrandContextValue | null>(null);
@@ -204,6 +210,7 @@ const BrandCtx = React.createContext<BrandContextValue | null>(null);
 export function BrandMapProvider({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = React.useState(false);
   const [rules, setRules] = React.useState<BrandRule[]>([]);
+  const [version, setVersion] = React.useState(0);
 
   React.useEffect(() => {
     try {
@@ -233,30 +240,53 @@ export function BrandMapProvider({ children }: { children: React.ReactNode }) {
     [allRules]
   );
 
-  const upsertRule = React.useCallback((r: BrandRule) => {
+  const upsertRule = React.useCallback((incoming: BrandRule) => {
     setRules((prev) => {
-      const i = prev.findIndex((x) => x.id === r.id);
+      const i = prev.findIndex((x) => x.id === incoming.id);
+
+      const finalize = (base: BrandRule | null, inc: BrandRule): BrandRule => {
+        const mode = inc.mode ?? base?.mode ?? "regex";
+        let pattern = inc.pattern ?? base?.pattern;
+        if (!pattern) {
+          const token = (inc.name || base?.name || inc.id || "").trim();
+          pattern =
+            mode === "regex"
+              ? `\\b${escapeRegex(token).replace(/\s+/g, "\\s*")}\\b`
+              : mode === "keywords"
+              ? token
+              : normalize(token);
+        }
+        return {
+          id: inc.id ?? base?.id ?? crypto.randomUUID(),
+          name: (inc.name ?? base?.name ?? "").trim(),
+          domain: (inc.domain ?? base?.domain ?? "").trim(),
+          mode,
+          pattern,
+          enabled: inc.enabled ?? base?.enabled ?? true,
+        };
+      };
+
       if (i >= 0) {
         const next = [...prev];
-        next[i] = r;
+        next[i] = finalize(prev[i], incoming);
         return next;
       }
-      return [r, ...prev];
+      return [finalize(null, incoming), ...prev];
     });
+    setVersion((v) => v + 1);
   }, []);
 
   const removeRule = React.useCallback((id: string) => {
     setRules((prev) => prev.filter((x) => x.id !== id));
+    setVersion((v) => v + 1);
   }, []);
 
   const logoFor = React.useCallback(
     (textOrDomain: string) => {
       const hit = detect(textOrDomain);
-      if (hit && hit.domain) return `https://logo.clearbit.com/${hit.domain}`;
-      // if it looks like a domain already, try it
+      if (hit?.domain) return `https://logo.clearbit.com/${hit.domain}`;
       if (textOrDomain.includes("."))
         return `https://logo.clearbit.com/${textOrDomain}`;
-      // guess from first word
       const word = normalize(textOrDomain).split(/\s+/)[0];
       if (!word) return null;
       return `https://logo.clearbit.com/${word}.com`;
@@ -272,6 +302,7 @@ export function BrandMapProvider({ children }: { children: React.ReactNode }) {
     removeRule,
     detect,
     logoFor,
+    version,
   };
 
   return <BrandCtx.Provider value={value}>{children}</BrandCtx.Provider>;

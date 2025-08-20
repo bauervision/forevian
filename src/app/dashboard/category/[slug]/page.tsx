@@ -87,6 +87,34 @@ function TrendPill({
   );
 }
 
+function TrendBadgeLarge({
+  dir,
+  pct,
+  deltaMoney,
+}: {
+  dir: "up" | "down" | "flat";
+  pct: number;
+  deltaMoney: string;
+}) {
+  const up = dir === "up";
+  const down = dir === "down";
+  const base =
+    "inline-flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-sm font-medium border";
+  const tone = up
+    ? "text-rose-200 border-rose-500/60 bg-rose-900/30"
+    : down
+    ? "text-emerald-200 border-emerald-500/60 bg-emerald-900/30"
+    : "text-slate-200 border-slate-600 bg-slate-800/50";
+  const arrow = up ? "▲" : down ? "▼" : "–";
+  return (
+    <span className={`${base} ${tone}`} title={`${deltaMoney} vs last month`}>
+      <span className="text-base leading-none">{arrow}</span>
+      <span className="tabular-nums">{Math.abs(pct)}%</span>
+      <span className="text-xs opacity-80">(MoM)</span>
+    </span>
+  );
+}
+
 /* ----------------------------- small helpers ----------------------------- */
 
 type PeriodEx = Period;
@@ -311,6 +339,16 @@ function MerchantLogo({
 }) {
   const [failed, setFailed] = React.useState(!src);
 
+  React.useEffect(() => {
+    // when the src changes (e.g., you saved a new domain), try loading again
+    setFailed(!src);
+  }, [src]);
+
+  // 🔧 when src changes, try again
+  React.useEffect(() => {
+    setFailed(!src);
+  }, [src]);
+
   if (!src || failed) {
     return (
       <div
@@ -339,11 +377,23 @@ function MerchantLogo({
   );
 }
 
+const moneySigned = (n: number) => (n >= 0 ? "" : "−") + money(Math.abs(n));
+
+type MerchantAgg = {
+  label: string;
+  amt: number;
+  logo: string | null;
+  prev: number;
+  trend: ReturnType<typeof computeTrend>;
+  deltaMoney: string;
+};
+
 /* ---------------------------------- page ---------------------------------- */
 
 export default function CategoryDetailPage() {
   const params = useParams<{ slug: string }>();
-  const { mounted: brandMounted, detect, logoFor } = useBrandMap();
+  const { version: brandVersion, detect, logoFor, rules } = useBrandMap();
+
   const [editOpen, setEditOpen] = React.useState(false);
   const [editSeed, setEditSeed] = React.useState<string>("");
   const { transactions } = useReconcilerSelectors();
@@ -434,23 +484,17 @@ export default function CategoryDetailPage() {
   // Previous statement rows (for MoM trend)
   const prevRows = React.useMemo(() => {
     if (period !== "CURRENT") return [] as typeof viewRows;
+
     const idx = readIndex();
-    const prevId = (() => {
-      const cur = (sp.get("statement") ?? readCurrentId()) || "";
-      const [y, m] = cur.split("-").map(Number);
-      if (!y || !m) return null;
-      const pm = m === 1 ? 12 : m - 1;
-      const py = m === 1 ? y - 1 : y;
-      const cand = `${py.toString().padStart(4, "0")}-${pm
-        .toString()
-        .padStart(2, "0")}`;
-      return idx[cand] ? cand : null;
-    })();
+    const selected = (sp.get("statement") ?? readCurrentId()) || "";
+    const prevId = prevStatementId(selected);
     if (!prevId) return [] as typeof viewRows;
 
-    const snap = idx[prevId];
+    const s = idx[prevId];
+    if (!s) return [] as typeof viewRows;
+
     const rules = readCatRules();
-    const raw = Array.isArray(snap?.cachedTx) ? snap.cachedTx : [];
+    const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
     return applyCategoryRulesTo(rules, raw, applyAlias) as typeof viewRows;
   }, [period, sp]);
 
@@ -485,22 +529,80 @@ export default function CategoryDetailPage() {
     [prevScopedRows]
   );
 
-  const byMerchant = React.useMemo(() => {
-    return Object.entries(merchCurrent)
-      .sort((a, b) => b[1] - a[1])
-      .map(([label, amt]) => ({
-        label,
-        amt,
-        trend: computeTrend(amt, merchPrev[label] ?? 0),
-      }));
-  }, [merchCurrent, merchPrev]);
+  const byMerchant = React.useMemo<MerchantAgg[]>(() => {
+    const resolve = (desc: string) => {
+      const raw = prettyDesc(desc || "");
+      const cleaned = cleanNoise(raw);
+
+      // 1) Try pattern detection on description (raw/cleaned)
+      let hit = detect(raw) || detect(cleaned);
+
+      // 2) Make a label from hit or canonicalizer
+      let label = hit?.name?.trim() || canonicalizeMerchantLabel(raw);
+
+      // 3) Also try detection on the *label* itself (helps exact/keywords rules)
+      if (!hit) hit = detect(label);
+
+      // 4) If still no hit, try to find a rule by display name (punctuation-insensitive)
+      const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
+      const nameRule =
+        (rules || []).find(
+          (r) => r.enabled !== false && norm(r.name) === norm(label)
+        ) || null;
+
+      const domain = hit?.domain || nameRule?.domain || null;
+      const logo = domain
+        ? `https://logo.clearbit.com/${domain}`
+        : logoFor(label);
+
+      // Normalize to the rule’s display name if we found a name match
+      if (!hit && nameRule) label = nameRule.name;
+
+      return { label, logo };
+    };
+
+    const prevTotals = new Map<string, number>();
+    for (const r of prevRows) {
+      const amt = Math.abs(r.amount < 0 ? r.amount : 0);
+      if (!amt) continue;
+      const { label } = resolve(r.description || r.merchant || "");
+      prevTotals.set(label, (prevTotals.get(label) ?? 0) + amt);
+    }
+
+    const cur: Record<
+      string,
+      { amt: number; logo: string | null; prev: number }
+    > = {};
+    for (const r of rows) {
+      const amt = Math.abs(r.amount < 0 ? r.amount : 0);
+      if (!amt) continue;
+      const { label, logo } = resolve(r.description || r.merchant || "");
+      const prev = prevTotals.get(label) ?? 0;
+      if (!cur[label]) cur[label] = { amt: 0, logo, prev };
+      cur[label].amt += amt;
+    }
+
+    return Object.entries(cur)
+      .map(([label, v]) => {
+        const trend = computeTrend(v.amt, v.prev);
+        return {
+          label,
+          amt: v.amt,
+          logo: v.logo,
+          prev: v.prev,
+          trend,
+          deltaMoney: moneySigned(trend.delta),
+        };
+      })
+      .sort((a, b) => b.amt - a.amt);
+  }, [rows, prevRows, detect, logoFor, rules, brandVersion]);
+
+  const catAccent = accentForCategory(catDisplay);
 
   const total = React.useMemo(
     () => rows.reduce((s, r) => s + Math.abs(r.amount < 0 ? r.amount : 0), 0),
     [rows]
   );
-
-  const catAccent = accentForCategory(catDisplay);
 
   return (
     <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6 overflow-x-clip">
@@ -615,84 +717,65 @@ export default function CategoryDetailPage() {
           </div>
         ) : (
           <ul className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-            {byMerchant.map(({ label, amt, trend }) => {
+            {byMerchant.map(({ label, amt, logo, trend, deltaMoney, prev }) => {
               const share = total ? Math.round((amt / total) * 100) : 0;
-              const brand = detect(label);
-              const logo = brand
-                ? `https://logo.clearbit.com/${brand.domain}`
-                : logoFor(label) || logoForMerchant(label) || logoUrlFor(label);
-
               return (
                 <li key={label} className="group">
                   <div
                     className={`relative rounded-2xl border bg-slate-900 border-l-4 p-4
-                transition-transform duration-150 will-change-transform
-                group-hover:-translate-y-0.5 group-hover:shadow-lg
-                bg-gradient-to-br ${catAccent}
-                min-h-[152px] flex flex-col justify-between`} // ← lock height + layout
+                         transition-transform duration-150 will-change-transform
+                         group-hover:translate-y-[-2px] group-hover:shadow-lg
+                         bg-gradient-to-br ${catAccent}`}
                   >
-                    {/* Header: logo | name */}
-                    <div className="grid grid-cols-[56px,1fr] gap-3 items-start">
-                      {/* Bigger logo */}
-                      <div className="relative">
-                        <MerchantLogo
-                          src={logo}
-                          alt={label}
-                          category={catDisplay}
-                          className="h-14 w-14"
-                        />
-                        {/* (optional) edit button */}
-                        <button
-                          type="button"
-                          className="absolute -right-1 -bottom-1 h-6 w-6 rounded-lg border border-slate-700 bg-slate-900/90
-                     opacity-0 group-hover:opacity-100 transition"
-                          title="Edit logo"
-                          onClick={(e) => {
-                            e.preventDefault();
-                            setEditSeed(label);
-                            setEditOpen(true);
-                          }}
-                        >
-                          <Pencil className="h-3.5 w-3.5 mx-auto opacity-80" />
-                        </button>
-                      </div>
-
-                      {/* Name (wrap to 2 lines) + share */}
-                      <div className="min-w-0">
-                        <div
-                          className="text-sm sm:text-base font-semibold text-white leading-tight whitespace-normal break-words"
-                          title={label}
-                          style={{
-                            display: "-webkit-box",
-                            WebkitLineClamp: 2,
-                            WebkitBoxOrient: "vertical",
-                            overflow: "hidden",
-                          }} // ← 2-line clamp without the plugin
-                        >
-                          {label}
+                    <div className="flex items-start justify-between">
+                      <TrendBadgeLarge
+                        dir={trend.dir}
+                        pct={trend.pct}
+                        deltaMoney={deltaMoney}
+                      />
+                      <div className="text-right">
+                        <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                          This month
                         </div>
-                        <div className="mt-1 text-[11px] text-slate-300">
-                          Share {share}%
+                        <div className="text-xl sm:text-2xl font-semibold">
+                          {money(amt)}
                         </div>
                       </div>
                     </div>
 
-                    {/* Footer: amount + trend (kept on one row) */}
-                    <div className="mt-3 flex items-center justify-between">
-                      <div className="text-2xl sm:text-lg font-semibold text-white">
-                        {money(amt)}
+                    <div className="mt-4 flex items-center gap-3">
+                      <div className="shrink-0">
+                        <MerchantLogo
+                          src={logo}
+                          alt={label}
+                          category={catDisplay}
+                        />
+                        <button
+                          type="button"
+                          aria-label="Edit brand mapping"
+                          title="Edit brand mapping"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            // if your cards are ever links, also stop bubbling:
+                            // e.stopPropagation();
+                            setEditSeed(label);
+                            setEditOpen(true);
+                          }}
+                          className="absolute -right-1 -bottom-1 h-6 w-6 rounded-lg
+                 border border-slate-700 bg-slate-900/95
+                 opacity-0 group-hover:opacity-100 transition
+                 flex items-center justify-center"
+                        >
+                          <Pencil className="h-3.5 w-3.5 text-slate-300" />
+                          <span className="sr-only">Edit brand mapping</span>
+                        </button>
                       </div>
-                      {(() => {
-                        const prevAmt = prevByMerchant[label] ?? 0;
-                        const t = computeTrend(amt, prevAmt);
-                        return (
-                          <TrendPill
-                            dir={t.dir}
-                            pct={t.pct}
-                            deltaMoney={money(Math.abs(t.delta))}
-                          />
-                        );
-                      })()}
+                      <div className="min-w-0">
+                        <div className="font-medium truncate">{label}</div>
+                        <div className="text-xs text-slate-400">
+                          Share {share}% · Prev {money(prev)}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </li>

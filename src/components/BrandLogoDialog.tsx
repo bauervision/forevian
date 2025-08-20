@@ -9,6 +9,22 @@ function titleCase(s: string) {
     .replace(/\s+/g, " ")
     .trim();
 }
+function slugify(s: string) {
+  return (
+    (s || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "brand"
+  );
+}
+function escapeRegex(s: string) {
+  return (s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+/** Make a forgiving regex source from a label: \bFoo\s*Bar\b */
+function regexFromLabel(label: string) {
+  const esc = escapeRegex(label.trim());
+  return `\\b${esc.replace(/\s+/g, "\\s*")}\\b`;
+}
 
 export default function BrandLogoDialog({
   open,
@@ -19,7 +35,34 @@ export default function BrandLogoDialog({
   onClose: () => void;
   seedLabel: string;
 }) {
-  const { upsertRule, logoFor, mounted } = useBrandMap();
+  const { upsertRule, logoFor, mounted, rules, detect } = useBrandMap() as any;
+
+  const existing = React.useMemo(() => {
+    const norm = (s: string) =>
+      (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+    const byName = rules.find(
+      (r: { name: string }) => norm(r.name) === norm(seedLabel)
+    );
+    if (byName) return byName;
+
+    // soft pattern check (mirrors provider logic enough for the dialog)
+    for (const r of rules) {
+      try {
+        if (r.mode === "exact" && norm(r.pattern) === norm(seedLabel)) return r;
+        if (r.mode === "keywords") {
+          const words = r.pattern.split(/[, ]+/).map(norm).filter(Boolean);
+          if (words.every((w: string) => norm(seedLabel).includes(w))) return r;
+        }
+        if (r.mode === "regex") {
+          if (new RegExp(r.pattern, "i").test(seedLabel)) return r;
+        }
+      } catch {}
+    }
+    return null;
+  }, [rules, seedLabel]);
+
+  const editingIdRef = React.useRef<string | undefined>(existing?.id);
+  // We’ll remember the initially-detected rule (if any)
 
   const [name, setName] = React.useState(titleCase(seedLabel));
   const [domain, setDomain] = React.useState("");
@@ -28,21 +71,30 @@ export default function BrandLogoDialog({
 
   React.useEffect(() => {
     if (!open) return;
-    // initialize from seed each time dialog opens
-    setName(titleCase(seedLabel));
-    setPattern(seedLabel);
-    setDomain("");
-    setMode("keywords");
-  }, [open, seedLabel]);
+    // seed from an existing rule if found; else defaults
+    if (existing) {
+      editingIdRef.current = existing.id;
+      setName(existing.name);
+      setDomain(existing.domain || "");
+      setMode(existing.mode);
+      setPattern(existing.pattern);
+    } else {
+      editingIdRef.current = undefined;
+      setName(titleCase(seedLabel));
+      setDomain("");
+      setMode("keywords");
+      setPattern(seedLabel);
+    }
+  }, [open, seedLabel, existing]);
 
   if (!open) return null;
 
-  const id =
-    name
+  const makeId = (s: string) =>
+    s
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-|-$/g, "") || "brand";
-  const demoText = pattern;
+
   const preview = domain ? logoFor(domain) : logoFor(name);
 
   return (
@@ -86,9 +138,9 @@ export default function BrandLogoDialog({
               value={mode}
               onChange={(e) => setMode(e.target.value as BrandRule["mode"])}
             >
+              <option value="regex">Advanced regex</option>
               <option value="keywords">Contains keywords (all)</option>
               <option value="exact">Exact label</option>
-              <option value="regex">Advanced regex</option>
             </select>
           </div>
           <div>
@@ -108,7 +160,7 @@ export default function BrandLogoDialog({
                   ? "e.g., amzn mktp"
                   : mode === "exact"
                   ? "e.g., Starbucks"
-                  : String(/\btaco\s*bell\b/i)
+                  : String(/\bamazon\s*marketplace\b/i)
               }
             />
           </div>
@@ -116,7 +168,6 @@ export default function BrandLogoDialog({
 
         <div className="mt-4 flex items-center gap-3">
           <div className="h-10 w-10 rounded-xl border border-slate-700 bg-white overflow-hidden flex items-center justify-center">
-            {/* simple preview – no need to block on load errors */}
             {mounted && preview ? (
               <img
                 src={preview}
@@ -142,6 +193,16 @@ export default function BrandLogoDialog({
           <button
             className="rounded-xl border border-emerald-600 bg-emerald-600/10 text-emerald-300 px-3 py-2 hover:bg-emerald-600/20"
             onClick={() => {
+              // If user left pattern empty, generate a robust default
+              const safePattern =
+                (pattern || "").trim() ||
+                (mode === "regex"
+                  ? regexFromLabel(name)
+                  : mode === "keywords"
+                  ? name
+                  : name.toLowerCase());
+
+              const id = editingIdRef.current ?? makeId(name);
               const rule: BrandRule = {
                 id,
                 name: name.trim() || "Brand",
