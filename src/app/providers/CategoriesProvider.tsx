@@ -2,6 +2,13 @@
 import React from "react";
 import { readIndex } from "@/lib/statements";
 import { readCatRules } from "@/lib/categoryRules";
+import {
+  useAuthUID,
+  userDoc,
+  setWithRev,
+  subscribeDoc,
+  debounce,
+} from "@/lib/fx";
 
 type Ctx = {
   categories: string[];
@@ -39,6 +46,7 @@ const DEFAULTS = [
   "Kids/School",
   "Amazon",
   "Starbucks",
+  "Medical/Doctors",
 ];
 
 function uniqOrder(arr: string[]) {
@@ -121,7 +129,7 @@ export function CategoriesProvider({
   children: React.ReactNode;
 }) {
   const [categories, setCats] = React.useState<string[]>(DEFAULTS);
-
+  const uid = useAuthUID();
   // init: localStorage → else build from data → else defaults
   React.useEffect(() => {
     const stored = loadStorage(CATS_KEY);
@@ -138,6 +146,54 @@ export function CategoriesProvider({
     saveStorage(CATS_KEY, norm);
   }, []);
 
+  // 🔥 Firestore: pull remote -> push local (debounced)
+  // Subscribe to remote when signed in
+  React.useEffect(() => {
+    if (!uid) return; // signed out, stick to localStorage
+    const ref = userDoc(uid, "settings", "categories");
+    return subscribeDoc<{ list: string[]; rev: number }>(ref, (data) => {
+      if (!data) return; // nothing yet
+      const remoteList = normalizeList(data.list ?? []);
+      // If remote differs from local, prefer remote to keep devices consistent
+      setCats((prev) => {
+        const same =
+          prev.length === remoteList.length &&
+          prev.every((v, i) => v === remoteList[i]);
+        return same ? prev : remoteList;
+      });
+    });
+  }, [uid]);
+
+  // Debounced remote save when categories change (and user is signed in)
+  const saveRemote = React.useMemo(
+    () =>
+      debounce(async (list: string[]) => {
+        if (!uid) return; // extra guard
+        const ref = userDoc(uid, "settings", "categories");
+        await setWithRev(ref, { list: normalizeList(list) });
+      }, 700),
+    [uid]
+  );
+
+  // Ensure we cancel any pending write when uid changes or unmounts
+  React.useEffect(() => {
+    return () => {
+      // @ts-ignore – our debounce has cancel()
+      saveRemote.cancel?.();
+    };
+  }, [saveRemote]);
+
+  // Only schedule writes when signed-in
+  React.useEffect(() => {
+    if (!uid) return;
+    saveRemote(categories);
+  }, [uid, categories, saveRemote]);
+
+  React.useEffect(() => {
+    if (!uid) return;
+    saveRemote(categories);
+  }, [uid, categories, saveRemote]);
+
   // persist + backup on changes
   React.useEffect(() => {
     saveStorage(CATS_KEY, categories);
@@ -145,7 +201,11 @@ export function CategoriesProvider({
   }, [categories]);
 
   const setCategories = React.useCallback((next: string[]) => {
-    setCats(normalizeList(next));
+    const norm = normalizeList(next);
+    setCats(norm);
+    saveStorage(CATS_KEY, norm);
+    snapshotBackup(norm);
+    // Firestore write is already debounced & uid-guarded
   }, []);
 
   const addCategory = React.useCallback((name: string) => {
@@ -189,6 +249,53 @@ export function CategoriesProvider({
       restoreBackup,
     ]
   );
+
+  React.useEffect(() => {
+    if (!uid) return; // signed out, stick to local
+
+    let unsub = () => {};
+    const run = async () => {
+      const ref = userDoc(uid, "settings", "categories");
+
+      // one-time read/seed
+      try {
+        const snap = await (await import("firebase/firestore")).getDoc(ref);
+        if (snap.exists()) {
+          const remoteList = normalizeList(
+            (snap.data().list ?? []) as string[]
+          );
+          setCats((prev) => {
+            const same =
+              prev.length === remoteList.length &&
+              prev.every((v, i) => v === remoteList[i]);
+            return same ? prev : remoteList;
+          });
+        } else {
+          // seed from local or defaults
+          const seed = normalizeList(loadStorage(CATS_KEY) ?? DEFAULTS);
+          await setWithRev(ref, { list: seed });
+          setCats(seed);
+        }
+      } catch (e) {
+        console.debug("categories initial fetch error", e);
+      }
+
+      // live subscribe
+      unsub = subscribeDoc<{ list: string[]; rev: number }>(ref, (data) => {
+        if (!data) return;
+        const remoteList = normalizeList(data.list ?? []);
+        setCats((prev) => {
+          const same =
+            prev.length === remoteList.length &&
+            prev.every((v, i) => v === remoteList[i]);
+          return same ? prev : remoteList;
+        });
+      });
+    };
+
+    run();
+    return () => unsub();
+  }, [uid]);
 
   return (
     <CategoriesContext.Provider value={value}>

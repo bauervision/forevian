@@ -29,7 +29,7 @@ body,
 
 /* Smoother layout when vertical scrollbar appears/disappears (desktop) */
 :root {
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable;
 }
 
 body {

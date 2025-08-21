@@ -43,6 +43,7 @@ import {
 import CategoryRulesManager from "@/components/CategoryRulesManager";
 import { normalizePageText } from "@/lib/textNormalizer";
 import StatementSwitcher from "@/components/StatementSwitcher";
+import ProtectedRoute from "@/components/ProtectedRoute";
 
 /* ----------------------------- small utilities ---------------------------- */
 
@@ -232,7 +233,7 @@ type ParsedLine = {
 };
 
 type TxRow = {
-  running: number;
+  running?: number;
   id: string;
   date: string;
   description: string;
@@ -1054,407 +1055,419 @@ export default function ReconcilerPage() {
   }, [statements]);
 
   return (
-    <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6">
-      <h1 className="text-2xl font-bold">Reconciler</h1>
+    <ProtectedRoute>
+      <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6">
+        <h1 className="text-2xl font-bold">Reconciler</h1>
 
-      {/* Toolbar */}
-      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-        <span className="text-xs uppercase tracking-wide text-slate-400">
-          Statement
-        </span>
-        <StatementSwitcher
-          available={availableIds}
-          showLabel={false}
-          size="sm"
-          className="w-44 sm:w-56"
-        />
+        {/* Toolbar */}
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+          <span className="text-xs uppercase tracking-wide text-slate-400">
+            Statement
+          </span>
+          <StatementSwitcher
+            available={availableIds}
+            showLabel={false}
+            size="sm"
+            className="w-44 sm:w-56"
+          />
 
-        <ToolbarButton onClick={createStatement}>+ New Statement</ToolbarButton>
+          <ToolbarButton onClick={createStatement}>
+            + New Statement
+          </ToolbarButton>
 
-        {currentId && (
-          <ToolbarButton
-            variant="danger"
-            onClick={() => {
-              if (confirm("Delete this statement?")) {
-                removeStatement(currentId);
-                const idx = readIndex();
-                setStatements(idx);
-                const nextId = readCurrentId();
-                if (nextId) {
-                  onSwitchStatement(nextId);
-                } else {
-                  setCurrentId("");
-                  setPages([]);
-                  setTransactions([]);
+          {currentId && (
+            <ToolbarButton
+              variant="danger"
+              onClick={() => {
+                if (confirm("Delete this statement?")) {
+                  removeStatement(currentId);
+                  const idx = readIndex();
+                  setStatements(idx);
+                  const nextId = readCurrentId();
+                  if (nextId) {
+                    onSwitchStatement(nextId);
+                  } else {
+                    setCurrentId("");
+                    setPages([]);
+                    setTransactions([]);
+                  }
                 }
-              }
-            }}
-          >
-            Delete
-          </ToolbarButton>
-        )}
-
-        <div className="ml-auto flex items-center gap-2">
-          <ToolbarButton onClick={() => setOpenAliases(true)}>
-            Manage Aliases
-          </ToolbarButton>
-          <ToolbarButton onClick={() => setOpenRules(true)}>
-            Manage Rules
-          </ToolbarButton>
-        </div>
-
-        <AliasManagerDialog
-          open={openAliases}
-          onClose={() => setOpenAliases(false)}
-        />
-        <CategoryRulesManager
-          open={openRules}
-          onClose={() => setOpenRules(false)}
-        />
-      </div>
-
-      {/* Statement numbers */}
-      <Panel className="p-4">
-        <h3 className="font-semibold mb-3">Statement numbers</h3>
-
-        <div className="grid md:grid-cols-4 gap-3 items-end">
-          <div className="flex flex-wrap gap-2 mt-2">
-            <ToolbarButton onClick={prefillTotalsFromParsed}>
-              Use parsed totals
-            </ToolbarButton>
-            <ToolbarButton onClick={prefillBeginningFromPrev}>
-              Use previous ending as beginning
-            </ToolbarButton>
-          </div>
-
-          <div>
-            <label className="text-xs block mb-1 text-slate-400">
-              Statement Year
-            </label>
-            <input
-              type="number"
-              className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
-              value={stmtYear}
-              onChange={(e) => setStmtYear(Number(e.target.value) || stmtYear)}
-            />
-          </div>
-
-          <div>
-            <label className="text-xs block mb-1 text-slate-400">
-              Statement Month
-            </label>
-            <select
-              className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
-              value={stmtMonth}
-              onChange={(e) => setStmtMonth(Number(e.target.value))}
+              }}
             >
-              {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                <option key={m} value={m}>
-                  {monthLabel(m)}
-                </option>
-              ))}
-            </select>
+              Delete
+            </ToolbarButton>
+          )}
+
+          <div className="ml-auto flex items-center gap-2">
+            <ToolbarButton onClick={() => setOpenAliases(true)}>
+              Manage Aliases
+            </ToolbarButton>
+            <ToolbarButton onClick={() => setOpenRules(true)}>
+              Manage Rules
+            </ToolbarButton>
           </div>
 
-          <div>
-            <label className="text-xs block mb-1 text-slate-400">
-              Beginning Balance
-            </label>
-            <input
-              type="number"
-              step="0.01"
-              className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
-              value={inputs.beginningBalance ?? 0}
-              onChange={(e) =>
-                updateInputs({ beginningBalance: Number(e.target.value) || 0 })
-              }
-            />
-          </div>
-
-          <div>
-            <label className="text-xs block mb-1 text-slate-400">
-              Total Deposits
-            </label>
-            <input
-              type="number"
-              step="0.01"
-              className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
-              value={inputs.totalDeposits ?? 0}
-              onChange={(e) =>
-                updateInputs({ totalDeposits: Number(e.target.value) || 0 })
-              }
-            />
-          </div>
-
-          <div>
-            <label className="text-xs block mb-1 text-slate-400">
-              Total Withdrawals
-            </label>
-            <input
-              type="number"
-              step="0.01"
-              className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
-              value={inputs.totalWithdrawals ?? 0}
-              onChange={(e) =>
-                updateInputs({ totalWithdrawals: Number(e.target.value) || 0 })
-              }
-            />
-          </div>
-        </div>
-
-        {/* Reconciliation status */}
-        <div className="grid md:grid-cols-3 gap-3 mt-4 text-sm">
-          <StatusTile
-            title="Parsed Deposits"
-            value={money(parsedDeposits)}
-            sub={`User: ${money(inputs.totalDeposits ?? 0)} (Δ ${money(
-              depDelta
-            )})`}
-            tone={depDelta === 0 ? "ok" : "warn"}
+          <AliasManagerDialog
+            open={openAliases}
+            onClose={() => setOpenAliases(false)}
           />
-          <StatusTile
-            title="Parsed Withdrawals"
-            value={money(parsedWithdrawals)}
-            sub={`User: ${money(inputs.totalWithdrawals ?? 0)} (Δ ${money(
-              wdrDelta
-            )})`}
-            tone={wdrDelta === 0 ? "ok" : "warn"}
-          />
-          <StatusTile
-            title="Ending Balance"
-            value={money(endingBalance)}
-            sub={`User: ${money(
-              (inputs.beginningBalance ?? 0) +
-                (inputs.totalDeposits ?? 0) -
-                (inputs.totalWithdrawals ?? 0)
-            )} (Δ ${money(endDelta)})`}
-            tone={endDelta === 0 ? "ok" : "bad"}
+          <CategoryRulesManager
+            open={openRules}
+            onClose={() => setOpenRules(false)}
           />
         </div>
-      </Panel>
 
-      {/* paste area + pages */}
-      <Panel className="p-4 space-y-3">
-        <h3 className="font-semibold">Add page</h3>
-        <textarea
-          rows={6}
-          className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2 placeholder-slate-500"
-          placeholder="Paste one statement page here…"
-          value={paste}
-          onChange={(e) => setPaste(e.target.value)}
-        />
-        <div className="flex flex-wrap gap-2">
-          <ToolbarButton onClick={addPage}>+ Add Page</ToolbarButton>
-          <ToolbarButton onClick={rerunParsing}>Re-run parsing</ToolbarButton>
-          <ToolbarButton
-            onClick={() => {
-              const rules = readCatRules();
-              const reapplied = applyCategoryRulesTo(
-                rules,
-                transactions,
-                applyAlias
-              );
-              setTransactions(reapplied);
-              persistCurrentStatementSnapshot({
-                statements,
-                currentId,
-                stmtYear,
-                stmtMonth,
-                inputs,
-                pages,
-                txs: reapplied,
-              });
-            }}
-          >
-            Reapply rules
-          </ToolbarButton>
-        </div>
+        {/* Statement numbers */}
+        <Panel className="p-4">
+          <h3 className="font-semibold mb-3">Statement numbers</h3>
 
-        {pages.length > 0 && (
-          <div className="text-sm">
-            <div className="opacity-70 mb-2">Imported pages</div>
-            <ul className="flex flex-wrap gap-2">
-              {pages.map((p) => (
-                <li
-                  key={p.idx}
-                  className="flex items-center gap-2 border border-slate-700 rounded-2xl px-2 py-1"
-                >
-                  <span>Page {p.idx + 1}</span>
-                  <span className="opacity-60">({p.lines} lines)</span>
-                  <button
-                    className="text-xs border border-slate-700 rounded-xl px-2 py-0.5 hover:bg-slate-800"
-                    onClick={() => removePage(p.idx)}
+          <div className="grid md:grid-cols-4 gap-3 items-end">
+            <div className="flex flex-wrap gap-2 mt-2">
+              <ToolbarButton onClick={prefillTotalsFromParsed}>
+                Use parsed totals
+              </ToolbarButton>
+              <ToolbarButton onClick={prefillBeginningFromPrev}>
+                Use previous ending as beginning
+              </ToolbarButton>
+            </div>
+
+            <div>
+              <label className="text-xs block mb-1 text-slate-400">
+                Statement Year
+              </label>
+              <input
+                type="number"
+                className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
+                value={stmtYear}
+                onChange={(e) =>
+                  setStmtYear(Number(e.target.value) || stmtYear)
+                }
+              />
+            </div>
+
+            <div>
+              <label className="text-xs block mb-1 text-slate-400">
+                Statement Month
+              </label>
+              <select
+                className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
+                value={stmtMonth}
+                onChange={(e) => setStmtMonth(Number(e.target.value))}
+              >
+                {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                  <option key={m} value={m}>
+                    {monthLabel(m)}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs block mb-1 text-slate-400">
+                Beginning Balance
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
+                value={inputs.beginningBalance ?? 0}
+                onChange={(e) =>
+                  updateInputs({
+                    beginningBalance: Number(e.target.value) || 0,
+                  })
+                }
+              />
+            </div>
+
+            <div>
+              <label className="text-xs block mb-1 text-slate-400">
+                Total Deposits
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
+                value={inputs.totalDeposits ?? 0}
+                onChange={(e) =>
+                  updateInputs({ totalDeposits: Number(e.target.value) || 0 })
+                }
+              />
+            </div>
+
+            <div>
+              <label className="text-xs block mb-1 text-slate-400">
+                Total Withdrawals
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2"
+                value={inputs.totalWithdrawals ?? 0}
+                onChange={(e) =>
+                  updateInputs({
+                    totalWithdrawals: Number(e.target.value) || 0,
+                  })
+                }
+              />
+            </div>
+          </div>
+
+          {/* Reconciliation status */}
+          <div className="grid md:grid-cols-3 gap-3 mt-4 text-sm">
+            <StatusTile
+              title="Parsed Deposits"
+              value={money(parsedDeposits)}
+              sub={`User: ${money(inputs.totalDeposits ?? 0)} (Δ ${money(
+                depDelta
+              )})`}
+              tone={depDelta === 0 ? "ok" : "warn"}
+            />
+            <StatusTile
+              title="Parsed Withdrawals"
+              value={money(parsedWithdrawals)}
+              sub={`User: ${money(inputs.totalWithdrawals ?? 0)} (Δ ${money(
+                wdrDelta
+              )})`}
+              tone={wdrDelta === 0 ? "ok" : "warn"}
+            />
+            <StatusTile
+              title="Ending Balance"
+              value={money(endingBalance)}
+              sub={`User: ${money(
+                (inputs.beginningBalance ?? 0) +
+                  (inputs.totalDeposits ?? 0) -
+                  (inputs.totalWithdrawals ?? 0)
+              )} (Δ ${money(endDelta)})`}
+              tone={endDelta === 0 ? "ok" : "bad"}
+            />
+          </div>
+        </Panel>
+
+        {/* paste area + pages */}
+        <Panel className="p-4 space-y-3">
+          <h3 className="font-semibold">Add page</h3>
+          <textarea
+            rows={6}
+            className="w-full rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 py-2 placeholder-slate-500"
+            placeholder="Paste one statement page here…"
+            value={paste}
+            onChange={(e) => setPaste(e.target.value)}
+          />
+          <div className="flex flex-wrap gap-2">
+            <ToolbarButton onClick={addPage}>+ Add Page</ToolbarButton>
+            <ToolbarButton onClick={rerunParsing}>Re-run parsing</ToolbarButton>
+            <ToolbarButton
+              onClick={() => {
+                const rules = readCatRules();
+                const reapplied = applyCategoryRulesTo(
+                  rules,
+                  transactions,
+                  applyAlias
+                );
+                setTransactions(reapplied);
+                persistCurrentStatementSnapshot({
+                  statements,
+                  currentId,
+                  stmtYear,
+                  stmtMonth,
+                  inputs,
+                  pages,
+                  txs: reapplied,
+                });
+              }}
+            >
+              Reapply rules
+            </ToolbarButton>
+          </div>
+
+          {pages.length > 0 && (
+            <div className="text-sm">
+              <div className="opacity-70 mb-2">Imported pages</div>
+              <ul className="flex flex-wrap gap-2">
+                {pages.map((p) => (
+                  <li
+                    key={p.idx}
+                    className="flex items-center gap-2 border border-slate-700 rounded-2xl px-2 py-1"
                   >
-                    Remove
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </Panel>
+                    <span>Page {p.idx + 1}</span>
+                    <span className="opacity-60">({p.lines} lines)</span>
+                    <button
+                      className="text-xs border border-slate-700 rounded-xl px-2 py-0.5 hover:bg-slate-800"
+                      onClick={() => removePage(p.idx)}
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </Panel>
 
-      {/* accordion controls */}
-      <div className="flex gap-2">
-        <button
-          className="text-xs border border-slate-700 rounded-2xl px-2 py-1 hover:bg-slate-800"
-          onClick={() => {
-            const all: Record<string, boolean> = {};
-            for (const [d] of groups) all[d] = true;
-            setOpenDate(all);
-          }}
-        >
-          Expand all
-        </button>
-        <button
-          className="text-xs border border-slate-700 rounded-2xl px-2 py-1 hover:bg-slate-800"
-          onClick={() => {
-            const all: Record<string, boolean> = {};
-            for (const [d] of groups) all[d] = false;
-            setOpenDate(all);
-          }}
-        >
-          Collapse all
-        </button>
-      </div>
+        {/* accordion controls */}
+        <div className="flex gap-2">
+          <button
+            className="text-xs border border-slate-700 rounded-2xl px-2 py-1 hover:bg-slate-800"
+            onClick={() => {
+              const all: Record<string, boolean> = {};
+              for (const [d] of groups) all[d] = true;
+              setOpenDate(all);
+            }}
+          >
+            Expand all
+          </button>
+          <button
+            className="text-xs border border-slate-700 rounded-2xl px-2 py-1 hover:bg-slate-800"
+            onClick={() => {
+              const all: Record<string, boolean> = {};
+              for (const [d] of groups) all[d] = false;
+              setOpenDate(all);
+            }}
+          >
+            Collapse all
+          </button>
+        </div>
 
-      {/* withdrawals grouped by date */}
-      <div className="rounded-2xl border border-slate-700 divide-y divide-slate-800 overflow-x-auto">
-        {groups.map(([date, g]) => (
-          <div key={date}>
-            <button
-              className="w-full flex items-center justify-between px-3 py-2 hover:bg-slate-900"
-              onClick={() => setOpenDate((s) => ({ ...s, [date]: !s[date] }))}
-            >
-              <div className="flex items-center gap-2">
-                <span className="font-semibold">{date}</span>
-                <span className="text-xs text-slate-400">
-                  ({g.rows.length} tx)
-                </span>
-              </div>
-              <div className="text-sm">
-                Day total:{" "}
-                <span className="font-medium text-rose-400">
-                  {money(g.total)}
-                </span>
-              </div>
-            </button>
+        {/* withdrawals grouped by date */}
+        <div className="rounded-2xl border border-slate-700 divide-y divide-slate-800 overflow-x-auto">
+          {groups.map(([date, g]) => (
+            <div key={date}>
+              <button
+                className="w-full flex items-center justify-between px-3 py-2 hover:bg-slate-900"
+                onClick={() => setOpenDate((s) => ({ ...s, [date]: !s[date] }))}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold">{date}</span>
+                  <span className="text-xs text-slate-400">
+                    ({g.rows.length} tx)
+                  </span>
+                </div>
+                <div className="text-sm">
+                  Day total:{" "}
+                  <span className="font-medium text-rose-400">
+                    {money(g.total)}
+                  </span>
+                </div>
+              </button>
 
-            {openDate[date] && (
-              <table className="w-full text-sm">
-                <thead className="bg-slate-800/60">
-                  <tr>
-                    <th className="text-left p-2 w-1/2">Description</th>
-                    <th className="text-left p-2">Category</th>
-                    <th className="text-left p-2">User</th>
-                    <th className="text-right p-2">Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {g.rows.map((t) => (
-                    <tr key={t.id} className="border-t border-slate-800">
-                      <td className="p-2">{prettyDesc(t.description)}</td>
-                      <td className="p-2">
-                        <CategorySelect
-                          value={
-                            t.categoryOverride ?? t.category ?? "Uncategorized"
-                          }
-                          onChange={(val) => {
-                            const aliasLabel = applyAlias(
-                              stripAuthAndCard(t.description || "")
-                            );
-                            const keys = candidateKeys(
-                              t.description || "",
-                              aliasLabel
-                            );
-                            const k = keyForTx(
-                              t.date || "",
-                              t.description || "",
-                              t.amount ?? 0
-                            );
-                            writeOverride(k, val);
-                            upsertCategoryRules(keys, val);
-
-                            const rules = readCatRules();
-                            const withRules = applyCategoryRulesTo(
-                              rules,
-                              transactions,
-                              applyAlias
-                            ).map((r) =>
-                              r.id === t.id
-                                ? { ...r, categoryOverride: val }
-                                : r
-                            );
-                            setTransactions(withRules);
-                            persistCurrentStatementSnapshot({
-                              statements,
-                              currentId,
-                              stmtYear,
-                              stmtMonth,
-                              inputs,
-                              pages,
-                              txs: withRules,
-                            });
-                          }}
-                        />
-                      </td>
-                      <td className="p-2">
-                        {t.user ??
-                          (t.cardLast4
-                            ? userFromLast4(t.cardLast4)
-                            : "Unknown")}
-                      </td>
-                      <td className="p-2 text-right text-rose-400">
-                        {money(Math.abs(t.amount))}
-                      </td>
+              {openDate[date] && (
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-800/60">
+                    <tr>
+                      <th className="text-left p-2 w-1/2">Description</th>
+                      <th className="text-left p-2">Category</th>
+                      <th className="text-left p-2">User</th>
+                      <th className="text-right p-2">Amount</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        ))}
-        {groups.length === 0 && (
-          <div className="p-3 text-sm text-slate-400">
-            No withdrawals parsed yet.
-          </div>
-        )}
-      </div>
+                  </thead>
+                  <tbody>
+                    {g.rows.map((t) => (
+                      <tr key={t.id} className="border-t border-slate-800">
+                        <td className="p-2">{prettyDesc(t.description)}</td>
+                        <td className="p-2">
+                          <CategorySelect
+                            value={
+                              t.categoryOverride ??
+                              t.category ??
+                              "Uncategorized"
+                            }
+                            onChange={(val) => {
+                              const aliasLabel = applyAlias(
+                                stripAuthAndCard(t.description || "")
+                              );
+                              const keys = candidateKeys(
+                                t.description || "",
+                                aliasLabel
+                              );
+                              const k = keyForTx(
+                                t.date || "",
+                                t.description || "",
+                                t.amount ?? 0
+                              );
+                              writeOverride(k, val);
+                              upsertCategoryRules(keys, val);
 
-      {/* deposits table */}
-      <Panel className="p-4 overflow-x-auto">
-        <h3 className="font-semibold mb-3">Deposits</h3>
-        {deposits.length === 0 ? (
-          <div className="text-sm text-slate-400">No deposits.</div>
-        ) : (
-          <table className="w-full text-sm min-w-[420px]">
-            <thead className="bg-slate-800/60">
-              <tr>
-                <th className="text-left p-2 w-20">Date</th>
-                <th className="text-left p-2">Description</th>
-                <th className="text-right p-2">Amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              {deposits.map((t) => (
-                <tr key={`dep-${t.id}`} className="border-t border-slate-800">
-                  <td className="p-2">{t.date}</td>
-                  <td className="p-2">{t.description}</td>
-                  <td className="p-2 text-right text-emerald-400">
-                    {money(t.amount)}
-                  </td>
+                              const rules = readCatRules();
+                              const withRules = applyCategoryRulesTo(
+                                rules,
+                                transactions,
+                                applyAlias
+                              ).map((r) =>
+                                r.id === t.id
+                                  ? { ...r, categoryOverride: val }
+                                  : r
+                              );
+                              setTransactions(withRules);
+                              persistCurrentStatementSnapshot({
+                                statements,
+                                currentId,
+                                stmtYear,
+                                stmtMonth,
+                                inputs,
+                                pages,
+                                txs: withRules,
+                              });
+                            }}
+                          />
+                        </td>
+                        <td className="p-2">
+                          {t.user ??
+                            (t.cardLast4
+                              ? userFromLast4(t.cardLast4)
+                              : "Unknown")}
+                        </td>
+                        <td className="p-2 text-right text-rose-400">
+                          {money(Math.abs(t.amount))}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          ))}
+          {groups.length === 0 && (
+            <div className="p-3 text-sm text-slate-400">
+              No withdrawals parsed yet.
+            </div>
+          )}
+        </div>
+
+        {/* deposits table */}
+        <Panel className="p-4 overflow-x-auto">
+          <h3 className="font-semibold mb-3">Deposits</h3>
+          {deposits.length === 0 ? (
+            <div className="text-sm text-slate-400">No deposits.</div>
+          ) : (
+            <table className="w-full text-sm min-w-[420px]">
+              <thead className="bg-slate-800/60">
+                <tr>
+                  <th className="text-left p-2 w-20">Date</th>
+                  <th className="text-left p-2">Description</th>
+                  <th className="text-right p-2">Amount</th>
                 </tr>
-              ))}
-              <tr className="border-t border-slate-800 font-medium">
-                <td className="p-2" colSpan={2}>
-                  Total
-                </td>
-                <td className="p-2 text-right">{money(parsedDeposits)}</td>
-              </tr>
-            </tbody>
-          </table>
-        )}
-      </Panel>
-    </div>
+              </thead>
+              <tbody>
+                {deposits.map((t) => (
+                  <tr key={`dep-${t.id}`} className="border-t border-slate-800">
+                    <td className="p-2">{t.date}</td>
+                    <td className="p-2">{t.description}</td>
+                    <td className="p-2 text-right text-emerald-400">
+                      {money(t.amount)}
+                    </td>
+                  </tr>
+                ))}
+                <tr className="border-t border-slate-800 font-medium">
+                  <td className="p-2" colSpan={2}>
+                    Total
+                  </td>
+                  <td className="p-2 text-right">{money(parsedDeposits)}</td>
+                </tr>
+              </tbody>
+            </table>
+          )}
+        </Panel>
+      </div>
+    </ProtectedRoute>
   );
 }

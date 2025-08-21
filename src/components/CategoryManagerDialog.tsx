@@ -2,6 +2,15 @@
 import React from "react";
 import { useCategories } from "@/app/providers/CategoriesProvider";
 
+type CatRow = { id: string; name: string };
+
+function makeId() {
+  // crypto.randomUUID is fine in modern browsers; fall back for SSR/older
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 export default function CategoryManagerDialog({
   open,
   onClose,
@@ -17,19 +26,24 @@ export default function CategoryManagerDialog({
     recoverFromData,
     restoreBackup,
   } = useCategories();
-  const [list, setList] = React.useState<string[]>(categories);
+
+  const [list, setList] = React.useState<CatRow[]>(
+    categories.map((c) => ({ id: makeId(), name: c }))
+  );
 
   React.useEffect(() => {
-    if (open) setList(categories);
+    if (open) {
+      setList(categories.map((c) => ({ id: makeId(), name: c })));
+    }
   }, [open, categories]);
 
   function addLocal() {
-    // new entries top-first in the dialog
-    setList((prev) => ["New Category", ...prev]);
+    setList((prev) => [{ id: makeId(), name: "New Category" }, ...prev]);
   }
+
   function save() {
     const normalized = Array.from(
-      new Set(list.map((s) => s.trim()).filter(Boolean))
+      new Set(list.map((r) => r.name.trim()).filter(Boolean))
     );
     setCategories(normalized);
     onClose();
@@ -57,7 +71,10 @@ export default function CategoryManagerDialog({
               onClick={() => {
                 // add via provider too (keeps provider state consistent if you save immediately)
                 addCategory("New Category");
-                setList((prev) => ["New Category", ...prev]);
+                setList((prev) => [
+                  { id: makeId(), name: "New Category" },
+                  ...prev,
+                ]);
               }}
               title="Add (provider)"
               style={{ display: "none" }}
@@ -68,21 +85,23 @@ export default function CategoryManagerDialog({
         </div>
 
         <div className="max-h-80 overflow-auto p-3">
-          {list.map((name, i) => (
+          {list.map((row, i) => (
             <div
-              key={`${name}-${i}`}
+              key={row.id}
               className="flex items-center gap-2 border-b last:border-b-0 py-2"
             >
               <input
                 className="flex-1 border rounded px-2 py-1 bg-white text-gray-700
                   placeholder-gray-400 dark:bg-white dark:text-gray-700"
-                value={name}
+                value={row.name}
                 onChange={(e) => {
                   const v = e.target.value;
-                  setList((prev) => prev.map((c, idx) => (idx === i ? v : c)));
+                  setList((prev) =>
+                    prev.map((r) => (r.id === row.id ? { ...r, name: v } : r))
+                  );
                 }}
               />
-              {name !== "Uncategorized" && (
+              {row.name !== "Uncategorized" && (
                 <button
                   className="text-xs border rounded px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
                   onClick={() =>
@@ -103,8 +122,12 @@ export default function CategoryManagerDialog({
               onClick={() => {
                 // Merge defaults with current and re-open at top
                 const merged = Array.from(
-                  new Set(["Uncategorized", ...list, ...DEFAULTS])
-                );
+                  new Set([
+                    "Uncategorized",
+                    ...list.map((r) => r.name),
+                    ...DEFAULTS,
+                  ])
+                ).map((name) => ({ id: makeId(), name }));
                 setList(merged);
               }}
               title="Merge defaults"

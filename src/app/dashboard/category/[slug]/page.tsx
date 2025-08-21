@@ -10,29 +10,15 @@ import { applyAlias } from "@/lib/aliases";
 import { prettyDesc } from "@/lib/txEnrich";
 import StatementSwitcher from "@/components/StatementSwitcher";
 import { useRowsForSelection } from "@/helpers/useRowsForSelection";
-import {
-  ShoppingCart,
-  Utensils,
-  Fuel,
-  Home,
-  Shield,
-  Cable,
-  MonitorPlay,
-  CreditCard,
-  ShoppingBag,
-  PiggyBank,
-  Music,
-  Store,
-  Sparkles,
-  ArrowUpRight,
-  Pencil,
-  ArrowLeft,
-} from "lucide-react";
+import { Pencil, ArrowLeft } from "lucide-react";
 import { groupMembersForSlug, labelForSlug } from "@/lib/categoryGroups";
 import { useBrandMap } from "@/app/providers/BrandMapProvider";
 import BrandLogoDialog from "@/components/BrandLogoDialog";
 import { catToSlug, slugToCat } from "@/lib/slug";
 import { useCategories } from "@/app/providers/CategoriesProvider";
+import { iconForCategory, IconFromKey, IconKey, isIconKey } from "@/lib/icons";
+
+import ProtectedRoute from "@/components/ProtectedRoute";
 
 /* ----------------------------- trends helpers ---------------------------- */
 
@@ -167,29 +153,6 @@ function accentForCategory(catName: string) {
   if (/impulse|misc|uncategorized|other/.test(c))
     return "from-slate-600/20 to-slate-500/5 border-slate-500";
   return "from-rose-600/20 to-rose-500/5 border-rose-500";
-}
-
-function iconForCategory(catName: string) {
-  const c = catName.toLowerCase();
-  if (/grocer/.test(c)) return <ShoppingCart className="h-5 w-5" />;
-  if (/fast\s*food|dining|restaurant|coffee|food/.test(c))
-    return <Utensils className="h-5 w-5" />;
-  if (/gas|fuel/.test(c)) return <Fuel className="h-5 w-5" />;
-  if (/housing|mortgage|rent|home/.test(c)) return <Home className="h-5 w-5" />;
-  if (/utilities?/.test(c)) return <Cable className="h-5 w-5" />;
-  if (/insurance/.test(c)) return <Shield className="h-5 w-5" />;
-  if (/subscriptions?|stream|music|video|plus|netflix|hulu|disney/.test(c))
-    return <MonitorPlay className="h-5 w-5" />;
-  if (/amazon|shopping|household|target|depot|store/.test(c))
-    return <ShoppingBag className="h-5 w-5" />;
-  if (/debt|loan|credit\s*card/.test(c))
-    return <CreditCard className="h-5 w-5" />;
-  if (/cash\s*back/.test(c)) return <PiggyBank className="h-5 w-5" />;
-  if (/entertainment|movies|cinema/.test(c))
-    return <Music className="h-5 w-5" />;
-  if (/impulse|misc|uncategorized|other/.test(c))
-    return <Sparkles className="h-5 w-5" />;
-  return <Store className="h-5 w-5" />;
 }
 
 /** Very small brand-domain map for logo fetching (extend anytime). */
@@ -332,12 +295,14 @@ function MerchantLogo({
   category,
   initials,
   className = "",
+  iconOverride,
 }: {
   src?: string | null;
   alt?: string;
   category: string;
   initials?: string;
   className?: string;
+  iconOverride?: IconKey | null;
 }) {
   const [failed, setFailed] = React.useState(!src);
 
@@ -357,12 +322,10 @@ function MerchantLogo({
         className={`h-16 w-16 md:h-20 md:w-20 rounded-xl bg-slate-950/60 border border-slate-700 flex items-center justify-center ${className}`}
         aria-label={alt || "merchant"}
       >
-        {initials ? (
-          <span className="text-xs font-semibold tracking-wide text-slate-300">
-            {initials}
-          </span>
+        {iconOverride ? (
+          <IconFromKey icon={iconOverride} className="h-6 w-6" />
         ) : (
-          iconForCategory(category)
+          iconForCategory(category, "h-6 w-6")
         )}
       </div>
     );
@@ -388,6 +351,7 @@ type MerchantAgg = {
   prev: number;
   trend: ReturnType<typeof computeTrend>;
   deltaMoney: string;
+  icon: IconKey | null;
 };
 
 /* ---------------------------------- page ---------------------------------- */
@@ -529,35 +493,39 @@ export default function CategoryDetailPage() {
   );
 
   const byMerchant = React.useMemo<MerchantAgg[]>(() => {
+    const normalize = (s: string) =>
+      (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+
     const resolve = (desc: string) => {
       const raw = prettyDesc(desc || "");
       const cleaned = cleanNoise(raw);
 
-      // 1) Try pattern detection on description (raw/cleaned)
-      let hit = detect(raw) || detect(cleaned);
+      let label = canonicalizeMerchantLabel(raw);
 
-      // 2) Make a label from hit or canonicalizer
-      let label = hit?.name?.trim() || canonicalizeMerchantLabel(raw);
-
-      // 3) Also try detection on the *label* itself (helps exact/keywords rules)
-      if (!hit) hit = detect(label);
-
-      // 4) If still no hit, try to find a rule by display name (punctuation-insensitive)
-      const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
-      const nameRule =
+      const ruleByName =
         (rules || []).find(
-          (r) => r.enabled !== false && norm(r.name) === norm(label)
+          (r: any) =>
+            r.enabled !== false && normalize(r.name) === normalize(label)
         ) || null;
 
-      const domain = hit?.domain || nameRule?.domain || null;
-      const logo = domain
-        ? `https://logo.clearbit.com/${domain}`
-        : logoFor(label);
+      const hit =
+        ruleByName || detect(raw) || detect(cleaned) || detect(label) || null;
 
-      // Normalize to the rule’s display name if we found a name match
-      if (!hit && nameRule) label = nameRule.name;
+      if (hit?.name) label = hit.name.trim();
 
-      return { label, logo };
+      let iconOverride: IconKey | null = null;
+      let logo: string | null = null;
+
+      if (hit?.noLogo) {
+        // user wants icon-only → coerce to valid IconKey (fallback to 'generic')
+        iconOverride = isIconKey(hit.icon) ? hit.icon : "generic";
+      } else if (hit?.domain) {
+        logo = `https://logo.clearbit.com/${hit.domain}`;
+      } else {
+        logo = logoFor(hit?.name || label);
+      }
+
+      return { label, logo, iconOverride }; // iconOverride is now IconKey | null
     };
 
     const prevTotals = new Map<string, number>();
@@ -570,14 +538,16 @@ export default function CategoryDetailPage() {
 
     const cur: Record<
       string,
-      { amt: number; logo: string | null; prev: number }
+      { amt: number; logo: string | null; prev: number; icon: IconKey | null }
     > = {};
     for (const r of rows) {
       const amt = Math.abs(r.amount < 0 ? r.amount : 0);
       if (!amt) continue;
-      const { label, logo } = resolve(r.description || r.merchant || "");
+      const { label, logo, iconOverride } = resolve(
+        r.description || r.merchant || ""
+      );
       const prev = prevTotals.get(label) ?? 0;
-      if (!cur[label]) cur[label] = { amt: 0, logo, prev };
+      if (!cur[label]) cur[label] = { amt: 0, logo, prev, icon: iconOverride }; // NEW
       cur[label].amt += amt;
     }
 
@@ -591,6 +561,7 @@ export default function CategoryDetailPage() {
           prev: v.prev,
           trend,
           deltaMoney: moneySigned(trend.delta),
+          icon: v.icon,
         };
       })
       .sort((a, b) => b.amt - a.amt);
@@ -604,260 +575,269 @@ export default function CategoryDetailPage() {
   );
 
   return (
-    <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6 overflow-x-clip">
-      {/* Header / toolbar */}
-      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-          <span className="inline-flex items-center justify-center rounded-xl bg-slate-900 border border-slate-700 p-2">
-            {iconForCategory(catDisplay)}
-          </span>
-          <span>{headerLabel}</span>
-        </h1>
+    <ProtectedRoute>
+      <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6 overflow-x-clip">
+        {/* Header / toolbar */}
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+          <h1 className="text-2xl font-bold flex items-center gap-2">
+            <span className="inline-flex items-center justify-center rounded-xl bg-slate-900 border border-slate-700 p-2">
+              {iconForCategory(catDisplay)}
+            </span>
+            <span>{headerLabel}</span>
+          </h1>
 
-        {mounted && viewMeta && (
-          <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
-            Viewing:{" "}
-            {period === "CURRENT"
-              ? viewMeta.label
-              : `YTD ${viewMeta.stmtYear} (Jan–${
-                  viewMeta.label.split(" ")[0]
-                })`}
-          </span>
-        )}
+          {mounted && viewMeta && (
+            <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
+              Viewing:{" "}
+              {period === "CURRENT"
+                ? viewMeta.label
+                : `YTD ${viewMeta.stmtYear} (Jan–${
+                    viewMeta.label.split(" ")[0]
+                  })`}
+            </span>
+          )}
 
-        <div className="ml-auto flex flex-wrap items-center gap-2">
-          <span className="text-xs uppercase tracking-wide text-slate-400">
-            Statement
-          </span>
-          <StatementSwitcher
-            showLabel={false}
-            size="sm"
-            className="w-44 sm:w-56"
-          />
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <span className="text-xs uppercase tracking-wide text-slate-400">
+              Statement
+            </span>
+            <StatementSwitcher
+              showLabel={false}
+              size="sm"
+              className="w-44 sm:w-56"
+            />
 
-          <span className="text-sm">Period:</span>
-          <div className="inline-flex rounded-lg border border-slate-700 overflow-hidden">
-            <button
-              className={`px-3 py-1 text-sm ${
-                period === "CURRENT"
-                  ? "bg-emerald-600 text-white"
-                  : "hover:bg-slate-900"
-              }`}
-              onClick={() => setPeriod("CURRENT")}
-            >
-              Current
-            </button>
-            <button
-              className={`px-3 py-1 text-sm ${
-                period === "YTD"
-                  ? "bg-emerald-600 text-white"
-                  : "hover:bg-slate-900"
-              }`}
-              onClick={() => setPeriod("YTD")}
-            >
-              YTD
-            </button>
+            <span className="text-sm">Period:</span>
+            <div className="inline-flex rounded-lg border border-slate-700 overflow-hidden">
+              <button
+                className={`px-3 py-1 text-sm ${
+                  period === "CURRENT"
+                    ? "bg-emerald-600 text-white"
+                    : "hover:bg-slate-900"
+                }`}
+                onClick={() => setPeriod("CURRENT")}
+              >
+                Current
+              </button>
+              <button
+                className={`px-3 py-1 text-sm ${
+                  period === "YTD"
+                    ? "bg-emerald-600 text-white"
+                    : "hover:bg-slate-900"
+                }`}
+                onClick={() => setPeriod("YTD")}
+              >
+                YTD
+              </button>
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Summary */}
-      <section
-        className={`rounded-2xl border border-l-4 p-4 sm:p-5 bg-slate-900 bg-gradient-to-br ${catAccent}`}
-      >
-        <div className="flex flex-wrap items-center gap-3 justify-between">
-          <Link
-            href={`/dashboard/category${
-              selectedId ? `?statement=${selectedId}` : ""
-            }`}
-            aria-label="Back to Categories"
-            title="Back to Categories"
-            className="inline-flex items-center gap-2 h-9 px-3 rounded-xl
+        {/* Summary */}
+        <section
+          className={`rounded-2xl border border-l-4 p-4 sm:p-5 bg-slate-900 bg-gradient-to-br ${catAccent}`}
+        >
+          <div className="flex flex-wrap items-center gap-3 justify-between">
+            <Link
+              href={`/dashboard/category${
+                selectedId ? `?statement=${selectedId}` : ""
+              }`}
+              aria-label="Back to Categories"
+              title="Back to Categories"
+              className="inline-flex items-center gap-2 h-9 px-3 rounded-xl
              border border-slate-700 bg-slate-900 hover:bg-slate-800
              focus:outline-none focus:ring-2 focus:ring-emerald-500/60"
-          >
-            <ArrowLeft className="h-5 w-5 text-slate-300" />
-            <span className="text-sm text-slate-300">Back to Categories</span>
-          </Link>
+            >
+              <ArrowLeft className="h-5 w-5 text-slate-300" />
+              <span className="text-sm text-slate-300">Back to Categories</span>
+            </Link>
 
-          <div className="text-right">
-            <div className="text-xs uppercase tracking-wide text-slate-400">
-              Total spend
-            </div>
-            <div className="text-2xl sm:text-3xl font-semibold">
-              {money(total)}
+            <div className="text-right">
+              <div className="text-xs uppercase tracking-wide text-slate-400">
+                Total spend
+              </div>
+              <div className="text-2xl sm:text-3xl font-semibold">
+                {money(total)}
+              </div>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      {/* Merchants grid (cards) */}
-      <section>
-        <h3 className="font-semibold mb-2">By Merchant</h3>
-        {!mounted ? (
-          <ul
-            className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4"
-            suppressHydrationWarning
-          >
-            {Array.from({ length: 8 }).map((_, i) => (
-              <li
-                key={i}
-                className="rounded-2xl border border-slate-700 bg-slate-900 p-4 animate-pulse"
-              >
-                <div className="h-16 w-16 rounded-xl bg-slate-800 mb-3" />
-                <div className="h-4 w-32 bg-slate-800 rounded" />
-                <div className="h-5 w-24 bg-slate-800 rounded mt-3" />
-              </li>
-            ))}
-          </ul>
-        ) : byMerchant.length === 0 ? (
-          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-6 text-sm text-slate-400">
-            No transactions in this scope.
-          </div>
-        ) : (
-          <ul className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-            {byMerchant.map(({ label, amt, logo, trend, deltaMoney, prev }) => {
-              const share = total ? Math.round((amt / total) * 100) : 0;
-              return (
-                <li key={label} className="group">
-                  <div
-                    className={`relative rounded-2xl border bg-slate-900 border-l-4 p-4
+        {/* Merchants grid (cards) */}
+        <section>
+          <h3 className="font-semibold mb-2">By Merchant</h3>
+          {!mounted ? (
+            <ul
+              className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4"
+              suppressHydrationWarning
+            >
+              {Array.from({ length: 8 }).map((_, i) => (
+                <li
+                  key={i}
+                  className="rounded-2xl border border-slate-700 bg-slate-900 p-4 animate-pulse"
+                >
+                  <div className="h-16 w-16 rounded-xl bg-slate-800 mb-3" />
+                  <div className="h-4 w-32 bg-slate-800 rounded" />
+                  <div className="h-5 w-24 bg-slate-800 rounded mt-3" />
+                </li>
+              ))}
+            </ul>
+          ) : byMerchant.length === 0 ? (
+            <div className="rounded-2xl border border-slate-700 bg-slate-900 p-6 text-sm text-slate-400">
+              No transactions in this scope.
+            </div>
+          ) : (
+            <ul className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+              {byMerchant.map(
+                ({ label, amt, logo, trend, deltaMoney, prev, icon }) => {
+                  const share = total ? Math.round((amt / total) * 100) : 0;
+                  return (
+                    <li key={label} className="group">
+                      <div
+                        className={`relative rounded-2xl border bg-slate-900 border-l-4 p-4
                          transition-transform duration-150 will-change-transform
                          group-hover:translate-y-[-2px] group-hover:shadow-lg
                          bg-gradient-to-br ${catAccent}`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <TrendBadgeLarge
-                        dir={trend.dir}
-                        pct={trend.pct}
-                        deltaMoney={deltaMoney}
-                      />
-                      <div className="text-right">
-                        <div className="text-[11px] uppercase tracking-wide text-slate-400">
-                          This month
+                      >
+                        <div className="flex items-start justify-between">
+                          <TrendBadgeLarge
+                            dir={trend.dir}
+                            pct={trend.pct}
+                            deltaMoney={deltaMoney}
+                          />
+                          <div className="text-right">
+                            <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                              This month
+                            </div>
+                            <div className="text-xl sm:text-2xl font-semibold">
+                              {money(amt)}
+                            </div>
+                          </div>
                         </div>
-                        <div className="text-xl sm:text-2xl font-semibold">
-                          {money(amt)}
-                        </div>
-                      </div>
-                    </div>
 
-                    <div className="mt-4 flex items-center gap-3">
-                      <div className="shrink-0">
-                        <MerchantLogo
-                          src={logo}
-                          alt={label}
-                          category={catDisplay}
-                        />
-                        <button
-                          type="button"
-                          aria-label="Edit brand mapping"
-                          title="Edit brand mapping"
-                          onClick={(e) => {
-                            e.preventDefault();
-                            // if your cards are ever links, also stop bubbling:
-                            // e.stopPropagation();
-                            setEditSeed(label);
-                            setEditOpen(true);
-                          }}
-                          className="absolute -right-1 -bottom-1 h-6 w-6 rounded-lg
+                        <div className="mt-4 flex items-center gap-3">
+                          <div className="shrink-0">
+                            <MerchantLogo
+                              src={logo}
+                              alt={label}
+                              category={catDisplay}
+                              iconOverride={icon}
+                            />
+                            <button
+                              type="button"
+                              aria-label="Edit brand mapping"
+                              title="Edit brand mapping"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                // if your cards are ever links, also stop bubbling:
+                                // e.stopPropagation();
+                                setEditSeed(label);
+                                setEditOpen(true);
+                              }}
+                              className="absolute -right-1 -bottom-1 h-6 w-6 rounded-lg
                  border border-slate-700 bg-slate-900/95
                  opacity-0 group-hover:opacity-100 transition
                  flex items-center justify-center"
-                        >
-                          <Pencil className="h-3.5 w-3.5 text-slate-300" />
-                          <span className="sr-only">Edit brand mapping</span>
-                        </button>
-                      </div>
-                      <div className="min-w-0">
-                        <div className="font-medium truncate">{label}</div>
-                        <div className="text-xs text-slate-400">
-                          Share {share}% · Prev {money(prev)}
+                            >
+                              <Pencil className="h-3.5 w-3.5 text-slate-300" />
+                              <span className="sr-only">
+                                Edit brand mapping
+                              </span>
+                            </button>
+                          </div>
+                          <div className="min-w-0">
+                            <div className="font-medium truncate">{label}</div>
+                            <div className="text-xs text-slate-400">
+                              Share {share}% · Prev {money(prev)}
+                            </div>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
-
-      {/* Transactions */}
-      <section className="rounded-2xl border border-slate-700 bg-slate-900 p-4 sm:p-5">
-        <h3 className="font-semibold mb-3">Transactions</h3>
-
-        {/* Mobile list */}
-        <ul className="md:hidden divide-y divide-slate-800">
-          {rows.length === 0 && (
-            <li className="py-3 text-sm text-slate-400">No transactions.</li>
+                    </li>
+                  );
+                }
+              )}
+            </ul>
           )}
-          {rows.map((r, i) => (
-            <li key={`${r.id || "row"}-${i}`} className="py-3">
-              <div className="flex items-center justify-between">
-                <div className="text-sm font-medium">
-                  {money(Math.abs(r.amount))}
+        </section>
+
+        {/* Transactions */}
+        <section className="rounded-2xl border border-slate-700 bg-slate-900 p-4 sm:p-5">
+          <h3 className="font-semibold mb-3">Transactions</h3>
+
+          {/* Mobile list */}
+          <ul className="md:hidden divide-y divide-slate-800">
+            {rows.length === 0 && (
+              <li className="py-3 text-sm text-slate-400">No transactions.</li>
+            )}
+            {rows.map((r, i) => (
+              <li key={`${r.id || "row"}-${i}`} className="py-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-medium">
+                    {money(Math.abs(r.amount))}
+                  </div>
+                  <div className="text-xs text-slate-400">{r.date || ""}</div>
                 </div>
-                <div className="text-xs text-slate-400">{r.date || ""}</div>
-              </div>
-              <div className="text-sm mt-0.5">{prettyDesc(r.description)}</div>
-              <div className="text-xs text-slate-400 mt-0.5">
-                {r.user ||
-                  (r.cardLast4 === "5280"
-                    ? "Mike"
-                    : r.cardLast4 === "0161"
-                    ? "Beth"
-                    : "Unknown")}
-              </div>
-            </li>
-          ))}
-        </ul>
+                <div className="text-sm mt-0.5">
+                  {prettyDesc(r.description)}
+                </div>
+                <div className="text-xs text-slate-400 mt-0.5">
+                  {r.user ||
+                    (r.cardLast4 === "5280"
+                      ? "Mike"
+                      : r.cardLast4 === "0161"
+                      ? "Beth"
+                      : "Joint")}
+                </div>
+              </li>
+            ))}
+          </ul>
 
-        {/* Desktop table */}
-        {rows.length > 0 && (
-          <div className="hidden md:block overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-slate-950">
-                <tr>
-                  <th className="text-left p-2 w-24">Date</th>
-                  <th className="text-left p-2">Description</th>
-                  <th className="text-left p-2 w-32">User</th>
-                  <th className="text-right p-2 w-32">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r, i) => (
-                  <tr
-                    key={`${r.id || "row"}-${i}`}
-                    className="border-t border-slate-800"
-                  >
-                    <td className="p-2">{r.date || ""}</td>
-                    <td className="p-2">{prettyDesc(r.description)}</td>
-                    <td className="p-2">
-                      {r.user ||
-                        (r.cardLast4 === "5280"
-                          ? "Mike"
-                          : r.cardLast4 === "0161"
-                          ? "Beth"
-                          : "Unknown")}
-                    </td>
-                    <td className="p-2 text-right">
-                      {money(Math.abs(r.amount))}
-                    </td>
+          {/* Desktop table */}
+          {rows.length > 0 && (
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-950">
+                  <tr>
+                    <th className="text-left p-2 w-24">Date</th>
+                    <th className="text-left p-2">Description</th>
+                    <th className="text-left p-2 w-32">User</th>
+                    <th className="text-right p-2 w-32">Amount</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+                </thead>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr
+                      key={`${r.id || "row"}-${i}`}
+                      className="border-t border-slate-800"
+                    >
+                      <td className="p-2">{r.date || ""}</td>
+                      <td className="p-2">{prettyDesc(r.description)}</td>
+                      <td className="p-2">
+                        {r.user ||
+                          (r.cardLast4 === "5280"
+                            ? "Mike"
+                            : r.cardLast4 === "0161"
+                            ? "Beth"
+                            : "Joint")}
+                      </td>
+                      <td className="p-2 text-right">
+                        {money(Math.abs(r.amount))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
 
-      <BrandLogoDialog
-        open={editOpen}
-        onClose={() => setEditOpen(false)}
-        seedLabel={editSeed}
-      />
-    </div>
+        <BrandLogoDialog
+          open={editOpen}
+          onClose={() => setEditOpen(false)}
+          seedLabel={editSeed}
+        />
+      </div>
+    </ProtectedRoute>
   );
 }

@@ -15,7 +15,7 @@ export type ReconcilerInputs = {
 };
 
 export type Transaction = {
-  running: number;
+  running?: number;
   id: string;
   date: string; // MM/DD
   description: string;
@@ -25,7 +25,7 @@ export type Transaction = {
   category?: string; // base auto category
   categoryOverride?: string; // user-selected category (takes precedence)
   cardLast4?: string; // e.g., "0161", "5280"
-  user?: string; // "Mike" | "Beth" | "Unknown"
+  user?: string; // "Mike" | "Beth" | "Joint"
   parseWarnings?: string[];
 };
 

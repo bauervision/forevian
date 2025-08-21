@@ -2,15 +2,90 @@
 import React from "react";
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 import { computeTotals } from "@/lib/metrics";
-import { currentStatementMeta, type Period } from "@/lib/period";
+import { type Period } from "@/lib/period";
 import { readIndex, readCurrentId, writeCurrentId } from "@/lib/statements";
-import { readCatRules, applyCategoryRulesTo } from "@/lib/categoryRules";
-import { applyAlias } from "@/lib/aliases";
-import StatementSwitcher from "@/components/StatementSwitcher";
-import ResponsiveShell from "@/components/ResponsiveShell";
-import { useSearchParams } from "next/navigation";
 
+import StatementSwitcher from "@/components/StatementSwitcher";
+import { User, User2, HelpCircle } from "lucide-react";
+import { useSearchParams } from "next/navigation";
+import Link from "next/link";
+import { iconForCategory } from "@/lib/icons"; // uses your shared icon util
+import { useRowsForSelection } from "@/helpers/useRowsForSelection";
+
+import ProtectedRoute from "@/components/ProtectedRoute";
 /* ---------------------------- helpers & hooks ---------------------------- */
+
+const spenderAccent = (who: string) => {
+  switch ((who || "").toLowerCase()) {
+    case "mike":
+      return "from-sky-600/20 to-sky-500/5 border-sky-500";
+    case "beth":
+      return "from-fuchsia-600/20 to-fuchsia-500/5 border-fuchsia-500";
+    default:
+      return "from-slate-600/20 to-slate-500/5 border-slate-500";
+  }
+};
+const spenderIcon = (who: string, className = "h-6 w-6") => {
+  switch ((who || "").toLowerCase()) {
+    case "mike":
+      return <User className={className} />;
+    case "beth":
+      return <User2 className={className} />;
+    default:
+      return <HelpCircle className={className} />;
+  }
+};
+const slugSpender = (s: string) => (s || "").toLowerCase();
+
+// put near the top of the file (below imports)
+const kpiAccent = (
+  accent: "green" | "red" | "neutral" | "violet" | "amber" = "neutral"
+) => {
+  switch (accent) {
+    case "green":
+      return "from-emerald-600/20 to-emerald-500/5 border-emerald-500";
+    case "red":
+      return "from-rose-600/20 to-rose-500/5 border-rose-500";
+    case "violet":
+      return "from-violet-600/20 to-violet-500/5 border-violet-500";
+    case "amber":
+      return "from-amber-600/20 to-amber-500/5 border-amber-500";
+    default:
+      return "from-slate-600/20 to-slate-500/5 border-slate-500";
+  }
+};
+
+const toSlug = (s: string) => (s || "").toLowerCase().replace(/\s+/g, "-");
+
+// lightweight accent util (reuse your category look)
+function accentFor(cat: string) {
+  const c = (cat || "").toLowerCase();
+  if (/grocer/.test(c))
+    return "from-emerald-600/20 to-emerald-500/5 border-emerald-500";
+  if (/fast\s*food|dining|restaurant/.test(c))
+    return "from-orange-600/20 to-orange-500/5 border-orange-500";
+  if (/gas|fuel/.test(c))
+    return "from-amber-600/20 to-amber-500/5 border-amber-500";
+  if (/housing|mortgage|rent/.test(c))
+    return "from-cyan-600/20 to-cyan-500/5 border-cyan-500";
+  if (/utilities|utility/.test(c))
+    return "from-sky-600/20 to-sky-500/5 border-sky-500";
+  if (/insurance/.test(c))
+    return "from-teal-600/20 to-teal-500/5 border-teal-500";
+  if (/subscriptions?/.test(c))
+    return "from-violet-600/20 to-violet-500/5 border-violet-500";
+  if (/amazon|shopping|household|target|depot|store/.test(c))
+    return "from-pink-600/20 to-pink-500/5 border-pink-500";
+  if (/debt|loan|credit\s*card/.test(c))
+    return "from-rose-600/20 to-rose-500/5 border-rose-500";
+  if (/entertainment|movies|cinema/.test(c))
+    return "from-fuchsia-600/20 to-fuchsia-500/5 border-fuchsia-500";
+  if (/cash\s*back/.test(c))
+    return "from-emerald-600/20 to-emerald-500/5 border-emerald-500";
+  if (/impulse|misc|uncategorized|other/.test(c))
+    return "from-slate-600/20 to-slate-500/5 border-slate-500";
+  return "from-rose-600/20 to-rose-500/5 border-rose-500";
+}
 
 function useStatementOptions() {
   return React.useMemo(() => {
@@ -27,31 +102,6 @@ function useStatementOptions() {
   }, []);
 }
 
-/** Build rows for the requested period. */
-function usePeriodRows(period: Period, liveRows: any[]) {
-  const meta = currentStatementMeta();
-  return React.useMemo(() => {
-    if (!meta || period === "CURRENT") return liveRows;
-
-    const idx = readIndex();
-    const rules = readCatRules();
-    const all: any[] = [];
-    for (const s of Object.values(idx)) {
-      if (!s) continue;
-      if (s.stmtYear !== meta.year) continue;
-      if (s.stmtMonth > meta.month) continue;
-      if (Array.isArray(s.cachedTx)) {
-        all.push(...s.cachedTx);
-      } else {
-        const curId = readCurrentId();
-        if (curId && s.id === curId) all.push(...liveRows);
-      }
-    }
-    const reapplied = applyCategoryRulesTo(rules, all, applyAlias);
-    return reapplied as typeof liveRows;
-  }, [period, liveRows, meta]);
-}
-
 const money = (n: number) =>
   n.toLocaleString(undefined, { style: "currency", currency: "USD" });
 
@@ -63,17 +113,24 @@ export default function DashboardPage() {
 
   // URL ↔ localStorage sync for statement
   const searchParams = useSearchParams();
-  const urlStatement = searchParams.get("statement") ?? "";
+  const urlStatement = searchParams.get("statement");
   React.useEffect(() => {
     if (!urlStatement) return;
     if (readCurrentId() !== urlStatement) writeCurrentId(urlStatement);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlStatement]);
 
-  const meta = currentStatementMeta();
+  const selectedId = urlStatement ?? readCurrentId() ?? "";
+
+  const viewMeta = React.useMemo(() => {
+    if (!selectedId) return undefined;
+    const idx = readIndex();
+    return idx[selectedId];
+  }, [selectedId]);
+
   const [period, setPeriod] = React.useState<Period>("CURRENT");
 
-  const viewRows = usePeriodRows(period, transactions);
+  const viewRows = useRowsForSelection(period, selectedId, transactions);
   const totals = React.useMemo(
     () => computeTotals(viewRows, inputs.beginningBalance ?? 0),
     [viewRows, inputs]
@@ -116,7 +173,7 @@ export default function DashboardPage() {
           ? "Mike"
           : r.cardLast4 === "0161"
           ? "Beth"
-          : "Unknown";
+          : "Joint";
       map[who] = (map[who] ?? 0) + Math.abs(r.amount);
     }
     return map;
@@ -131,24 +188,41 @@ export default function DashboardPage() {
     }
     return Object.entries(m)
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 8);
+      .slice(0, 10);
   }, [viewRows]);
 
+  React.useEffect(() => {
+    if (!urlStatement) return;
+    if (readCurrentId() !== urlStatement) writeCurrentId(urlStatement);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlStatement]);
+
   return (
-    <ResponsiveShell
-      title="Dashboard"
-      right={<StatementSwitcher available={options.map((o) => o.id)} />}
-    >
+    <ProtectedRoute>
       <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6">
         {/* Header row (no duplicate title) */}
         <div className="flex flex-wrap items-center gap-3">
-          {meta && (
-            <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
+          <h1 className="text-2xl font-bold">Dashboard</h1>
+
+          {viewMeta && (
+            <>
+              <StatementSwitcher
+                available={
+                  options.length ? options.map((o) => o.id) : undefined
+                }
+                showLabel={false}
+                size="sm"
+                className="w-44 sm:w-56"
+              />
+              {/* <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
               Viewing:{" "}
               {period === "CURRENT"
-                ? meta.label
-                : `YTD ${meta.year} (Jan–${meta.label.split(" ")[0]})`}
-            </span>
+                ? viewMeta.label
+                : `YTD ${viewMeta.stmtYear} (Jan–${
+                    viewMeta.label.split(" ")[0]
+                  })`}
+            </span> */}
+            </>
           )}
 
           <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -200,62 +274,107 @@ export default function DashboardPage() {
           <KpiCard label="Cash Back" value={money(cashBack)} accent="green" />
         </section>
 
-        {/* Second row: Expenses (moved here) + Spend by Spender */}
-        <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <KpiCard
-            label="Expenses"
-            value={money(totals.expense)}
-            accent="red"
-          />
+        {/* Second row: Spend by Spender */}
+        <section className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
+          <h3 className="font-semibold mb-2">Spend by Spender</h3>
 
-          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4 lg:col-span-2 overflow-x-auto">
-            <h3 className="font-semibold mb-2">Spend by Spender</h3>
-            <table className="w-full text-sm min-w-[420px]">
-              <thead className="bg-slate-800/60">
-                <tr>
-                  <th className="text-left p-2">Person</th>
-                  <th className="text-right p-2">Spend</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(bySpender).map(([who, amt]) => (
-                  <tr key={who} className="border-t border-slate-800">
-                    <td className="p-2">{who}</td>
-                    <td className="p-2 text-right">{money(amt)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          {Object.keys(bySpender).length === 0 ? (
+            <div className="text-sm text-slate-400">
+              No spenders in this scope.
+            </div>
+          ) : (
+            <ul className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+              {Object.entries(bySpender)
+                .sort((a, b) => b[1] - a[1])
+                .map(([who, amt]) => {
+                  const accent = spenderAccent(who);
+                  const href = `/dashboard/spender/${encodeURIComponent(
+                    slugSpender(who)
+                  )}${selectedId ? `?statement=${selectedId}` : ""}`;
+                  return (
+                    <li key={who} className="group">
+                      <Link href={href} className="block focus:outline-none">
+                        <div
+                          className={`relative rounded-2xl border bg-slate-900 border-l-4 p-4
+                    transition-transform duration-150 will-change-transform
+                    group-hover:-translate-y-0.5 group-hover:shadow-lg
+                    bg-gradient-to-br ${accent}`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="h-14 w-14 rounded-xl bg-slate-950/60 border border-slate-700 flex items-center justify-center shrink-0">
+                              {spenderIcon(who)}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="text-base font-semibold text-white truncate">
+                                {who}
+                              </div>
+                              <div className="text-lg sm:text-xl font-semibold">
+                                {money(amt)}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </Link>
+                    </li>
+                  );
+                })}
+            </ul>
+          )}
         </section>
 
         {/* Top categories */}
-        <section className="rounded-2xl border border-slate-700 bg-slate-900 p-4 overflow-x-auto">
+        {/* Top categories (as cards) */}
+        <section>
           <h3 className="font-semibold mb-2">Top Categories (Expenses)</h3>
-          <table className="w-full text-sm min-w-[420px]">
-            <thead className="bg-slate-800/60">
-              <tr>
-                <th className="text-left p-2">Category</th>
-                <th className="text-right p-2">Amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              {topCats.map(([cat, amt], i) => (
-                <tr key={`${cat}-${i}`} className="border-t border-slate-800">
-                  <td className="p-2">{cat}</td>
-                  <td className="p-2 text-right">{money(amt)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {topCats.length === 0 ? (
+            <div className="rounded-2xl border border-slate-700 bg-slate-900 p-6 text-sm text-slate-400">
+              No expense categories for this scope.
+            </div>
+          ) : (
+            <ul className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
+              {topCats.map(([cat, amt]) => {
+                const accent = accentFor(cat);
+                const href = `/dashboard/category/${encodeURIComponent(
+                  toSlug(cat)
+                )}${selectedId ? `?statement=${selectedId}` : ""}`;
+                return (
+                  <li key={cat} className="group">
+                    <Link href={href} className="block focus:outline-none">
+                      <div
+                        className={`relative rounded-2xl border bg-slate-900 border-l-4 p-4
+                  transition-transform duration-150 will-change-transform
+                  group-hover:-translate-y-0.5 group-hover:shadow-lg
+                  bg-gradient-to-br ${accent}`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="h-14 w-14 rounded-xl bg-slate-950/60 border border-slate-700 flex items-center justify-center shrink-0">
+                            {iconForCategory(cat, "h-6 w-6")}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="text-base font-semibold text-white truncate">
+                              {cat}
+                            </div>
+                            <div className="text-lg sm:text-xl font-semibold">
+                              {money(amt)}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </section>
       </div>
-    </ResponsiveShell>
+    </ProtectedRoute>
   );
 }
 
 /* ------------------------------ UI elements ------------------------------ */
 
+// replace your existing KpiCard with this
 function KpiCard({
   label,
   value,
@@ -265,22 +384,16 @@ function KpiCard({
   label: string;
   value: string;
   hint?: string;
-  accent?: "green" | "red" | "neutral";
+  accent?: "green" | "red" | "neutral" | "violet" | "amber";
 }) {
-  const accentClass =
-    accent === "green"
-      ? "border-emerald-500"
-      : accent === "red"
-      ? "border-rose-500"
-      : "border-slate-700";
-
   return (
     <div
-      className={`rounded-2xl border ${accentClass} border-l-4 bg-slate-900 p-4`}
+      className={`rounded-2xl border border-l-4 p-4
+                  bg-slate-900 bg-gradient-to-br ${kpiAccent(accent)}`}
     >
-      <div className="text-sm text-slate-400">{label}</div>
+      <div className="text-sm text-slate-300">{label}</div>
       <div className="text-xl sm:text-2xl font-semibold mt-0.5">{value}</div>
-      {hint && <div className="text-xs text-slate-400 mt-1">{hint}</div>}
+      {hint && <div className="text-xs text-slate-300/80 mt-1">{hint}</div>}
     </div>
   );
 }

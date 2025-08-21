@@ -27,6 +27,8 @@ import {
 import { useRowsForSelection } from "@/helpers/useRowsForSelection";
 import { groupLabelForCategory } from "@/lib/categoryGroups";
 import { catToSlug } from "@/lib/slug";
+
+import ProtectedRoute from "@/components/ProtectedRoute";
 /* ---------------------------- helpers & hooks ---------------------------- */
 
 /** Find the previous statement id for a given "YYYY-MM" that actually exists. */
@@ -264,136 +266,140 @@ export default function CategoriesIndexPage() {
   );
 
   return (
-    <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6">
-      {/* Toolbar */}
-      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-        <h1 className="text-2xl font-bold">Categories</h1>
+    <ProtectedRoute>
+      <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6">
+        {/* Toolbar */}
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+          <h1 className="text-2xl font-bold">Categories</h1>
 
-        {/* Avoid server/client mismatch: only show dynamic chip after mount */}
-        {mounted && viewMeta && (
-          <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
-            Viewing:{" "}
-            {period === "CURRENT"
-              ? viewMeta.label
-              : `YTD ${viewMeta.stmtYear} (Jan–${
-                  viewMeta.label.split(" ")[0]
-                })`}
-          </span>
-        )}
+          {/* Avoid server/client mismatch: only show dynamic chip after mount */}
+          {mounted && viewMeta && (
+            <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
+              Viewing:{" "}
+              {period === "CURRENT"
+                ? viewMeta.label
+                : `YTD ${viewMeta.stmtYear} (Jan–${
+                    viewMeta.label.split(" ")[0]
+                  })`}
+            </span>
+          )}
 
-        <div className="ml-auto flex flex-wrap items-center gap-2">
-          <span className="text-xs uppercase tracking-wide text-slate-400">
-            Statement
-          </span>
-          <StatementSwitcher
-            available={options.length ? options.map((o) => o.id) : undefined}
-            showLabel={false}
-            size="sm"
-            className="w-44 sm:w-56"
-          />
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <span className="text-xs uppercase tracking-wide text-slate-400">
+              Statement
+            </span>
+            <StatementSwitcher
+              available={options.length ? options.map((o) => o.id) : undefined}
+              showLabel={false}
+              size="sm"
+              className="w-44 sm:w-56"
+            />
 
-          <span className="text-sm">Period:</span>
-          <div className="inline-flex rounded-lg border border-slate-700 overflow-hidden">
-            <button
-              className={`px-3 py-1 text-sm ${
-                period === "CURRENT"
-                  ? "bg-emerald-600 text-white"
-                  : "hover:bg-slate-900"
-              }`}
-              onClick={() => setPeriod("CURRENT")}
-            >
-              Current
-            </button>
-            <button
-              className={`px-3 py-1 text-sm ${
-                period === "YTD"
-                  ? "bg-emerald-600 text-white"
-                  : "hover:bg-slate-900"
-              }`}
-              onClick={() => setPeriod("YTD")}
-            >
-              YTD
-            </button>
+            <span className="text-sm">Period:</span>
+            <div className="inline-flex rounded-lg border border-slate-700 overflow-hidden">
+              <button
+                className={`px-3 py-1 text-sm ${
+                  period === "CURRENT"
+                    ? "bg-emerald-600 text-white"
+                    : "hover:bg-slate-900"
+                }`}
+                onClick={() => setPeriod("CURRENT")}
+              >
+                Current
+              </button>
+              <button
+                className={`px-3 py-1 text-sm ${
+                  period === "YTD"
+                    ? "bg-emerald-600 text-white"
+                    : "hover:bg-slate-900"
+                }`}
+                onClick={() => setPeriod("YTD")}
+              >
+                YTD
+              </button>
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Cards grid */}
-      {!mounted ? (
-        <ul
-          className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4"
-          suppressHydrationWarning
-        >
-          {Array.from({ length: 8 }).map((_, i) => (
-            <li
-              key={i}
-              className="rounded-2xl border border-slate-700 bg-slate-900 p-4 animate-pulse"
-            >
-              <div className="flex items-center gap-3">
-                <div className="h-14 w-14 rounded-xl bg-slate-800" />
-                <div className="h-4 w-28 bg-slate-800 rounded" />
-              </div>
-              <div className="h-6 w-24 bg-slate-800 rounded mt-3" />
-              <div className="h-4 w-20 bg-slate-800 rounded mt-2" />
-            </li>
-          ))}
-        </ul>
-      ) : catCards.length === 0 ? (
-        <div className="rounded-2xl border border-slate-700 bg-slate-900 p-6 text-sm text-slate-400">
-          No transactions for this scope.
-        </div>
-      ) : (
-        <ul className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
-          {catCards.map(({ name, value, trend }) => {
-            const pct = grandTotal ? Math.round((value / grandTotal) * 100) : 0;
-            const accent = accentFor(name);
-            const href = `/dashboard/category/${encodeURIComponent(
-              catToSlug(name)
-            )}${urlStatement ? `?statement=${urlStatement}` : ""}`;
+        {/* Cards grid */}
+        {!mounted ? (
+          <ul
+            className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4"
+            suppressHydrationWarning
+          >
+            {Array.from({ length: 10 }).map((_, i) => (
+              <li
+                key={i}
+                className="rounded-2xl border border-slate-700 bg-slate-900 p-4 animate-pulse"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="h-14 w-14 rounded-xl bg-slate-800" />
+                  <div className="h-4 w-28 bg-slate-800 rounded" />
+                </div>
+                <div className="h-6 w-24 bg-slate-800 rounded mt-3" />
+                <div className="h-4 w-20 bg-slate-800 rounded mt-2" />
+              </li>
+            ))}
+          </ul>
+        ) : catCards.length === 0 ? (
+          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-6 text-sm text-slate-400">
+            No transactions for this scope.
+          </div>
+        ) : (
+          <ul className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
+            {catCards.map(({ name, value, trend }) => {
+              const pct = grandTotal
+                ? Math.round((value / grandTotal) * 100)
+                : 0;
+              const accent = accentFor(name);
+              const href = `/dashboard/category/${encodeURIComponent(
+                catToSlug(name)
+              )}${urlStatement ? `?statement=${urlStatement}` : ""}`;
 
-            return (
-              <li key={name} className="group">
-                <Link href={href} className="block focus:outline-none">
-                  <div
-                    className={`relative rounded-2xl border bg-slate-900 border-l-4 p-4
+              return (
+                <li key={name} className="group">
+                  <Link href={href} className="block focus:outline-none">
+                    <div
+                      className={`relative rounded-2xl border bg-slate-900 border-l-4 p-4
                   transition-transform duration-150 will-change-transform
                   group-hover:-translate-y-0.5 group-hover:shadow-lg
                   bg-gradient-to-br ${accent}`}
-                  >
-                    {/* Header row: icon + name (no amount here) */}
-                    <div className="flex items-center gap-3">
-                      <div className="h-14 w-14 rounded-xl bg-slate-950/60 border border-slate-700 flex items-center justify-center shrink-0">
-                        {iconFor(name)}
+                    >
+                      {/* Header row: icon + name (no amount here) */}
+                      <div className="flex items-center gap-3">
+                        <div className="h-14 w-14 rounded-xl bg-slate-950/60 border border-slate-700 flex items-center justify-center shrink-0">
+                          {iconFor(name)}
+                        </div>
+
+                        <div className="flex-1 min-w-0">
+                          <div className="text-base font-semibold text-white truncate">
+                            {name}
+                          </div>
+                          <div className="text-xs text-slate-300">
+                            {pct}% of spend
+                          </div>
+                        </div>
                       </div>
 
-                      <div className="flex-1 min-w-0">
-                        <div className="text-base font-semibold text-white truncate">
-                          {name}
+                      {/* Amount + trend row */}
+                      <div className="mt-3 flex items-center justify-between">
+                        <div className="text-lg sm:text-xl font-semibold">
+                          {money(value)}
                         </div>
-                        <div className="text-xs text-slate-300">
-                          {pct}% of spend
-                        </div>
+                        <TrendPill
+                          dir={trend.dir}
+                          pct={trend.pct}
+                          deltaMoney={money(Math.abs(trend.delta))}
+                        />
                       </div>
                     </div>
-
-                    {/* Amount + trend row */}
-                    <div className="mt-3 flex items-center justify-between">
-                      <div className="text-lg sm:text-xl font-semibold">
-                        {money(value)}
-                      </div>
-                      <TrendPill
-                        dir={trend.dir}
-                        pct={trend.pct}
-                        deltaMoney={money(Math.abs(trend.delta))}
-                      />
-                    </div>
-                  </div>
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </div>
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </ProtectedRoute>
   );
 }

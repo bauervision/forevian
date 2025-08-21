@@ -1,315 +1,266 @@
 "use client";
+import { IconKey } from "@/lib/icons";
 import React from "react";
+import {
+  useAuthUID,
+  userDoc,
+  setWithRev,
+  subscribeDoc,
+  debounce,
+} from "@/lib/fx";
 
-/** How a rule is stored */
 export type BrandRule = {
-  id: string; // stable id
-  name: string; // display name shown on cards
-  domain: string; // e.g. "wendys.com"
-  mode: "exact" | "keywords" | "regex";
-  pattern: string; // label (exact), keywords (space/comma), or regex source
+  id: string;
+  name: string;
+  domain?: string;
+  mode: "regex" | "keywords" | "exact";
+  pattern: string;
   enabled?: boolean;
+  noLogo?: boolean;
+  icon?: IconKey | null;
 };
 
-const LS_KEY = "brand.rules.v1";
-
-/** Built-in defaults (users’ custom rules will override these) */
-const DEFAULTS: BrandRule[] = [
-  {
-    id: "prime-video",
-    name: "Prime Video",
-    domain: "primevideo.com",
-    mode: "regex",
-    pattern: String(/\bprime\s*video\b/i).slice(1, -2),
-  },
-  {
-    id: "amazon-fresh",
-    name: "Amazon Fresh",
-    domain: "amazon.com",
-    mode: "regex",
-    pattern: String(/\bamazon\s*fresh\b/i).slice(1, -2),
-  },
-  {
-    id: "amazon-mkt",
-    name: "Amazon Marketplace",
-    domain: "amazon.com",
-    mode: "regex",
-    pattern: String(
-      /\b(?:amzn|amazon)(?:\s*(?:mktp|market(?:place)?|mark\*|\.?com))?\b/i
-    ).slice(1, -2),
-  },
-
-  {
-    id: "dairy-queen",
-    name: "Dairy Queen",
-    domain: "dairyqueen.com",
-    mode: "regex",
-    pattern: String(/\b(?:dairy\s*queen|dq)\b/i).slice(1, -2),
-  },
-  {
-    id: "cracker-barrel",
-    name: "Cracker Barrel",
-    domain: "crackerbarrel.com",
-    mode: "regex",
-    pattern: String(/\bcracker\s*barrel\b/i).slice(1, -2),
-  },
-  {
-    id: "taste",
-    name: "Taste",
-    domain: "tasteunlimited.com",
-    mode: "regex",
-    pattern: String(/\btaste(?:\s+unlimited)?\b/i).slice(1, -2),
-  },
-  {
-    id: "zaxbys",
-    name: "Zaxby's",
-    domain: "zaxbys.com",
-    mode: "regex",
-    pattern: String(/\bzaxby'?s?\b/i).slice(1, -2),
-  },
-
-  {
-    id: "cava",
-    name: "Cava",
-    domain: "cava.com",
-    mode: "exact",
-    pattern: "cava",
-  },
-  {
-    id: "pizza-hut",
-    name: "Pizza Hut",
-    domain: "pizzahut.com",
-    mode: "regex",
-    pattern: String(/\bpizza\s*hut\b/i).slice(1, -2),
-  },
-  {
-    id: "wendys",
-    name: "Wendy's",
-    domain: "wendys.com",
-    mode: "regex",
-    pattern: String(/\bwendy'?s\b/i).slice(1, -2),
-  },
-  {
-    id: "taco-bell",
-    name: "Taco Bell",
-    domain: "tacobell.com",
-    mode: "regex",
-    pattern: String(/\btaco\s*bell\b/i).slice(1, -2),
-  },
-  {
-    id: "starbucks",
-    name: "Starbucks",
-    domain: "starbucks.com",
-    mode: "exact",
-    pattern: "starbucks",
-  },
-  {
-    id: "target",
-    name: "Target",
-    domain: "target.com",
-    mode: "exact",
-    pattern: "target",
-  },
-  {
-    id: "amazon",
-    name: "Amazon",
-    domain: "amazon.com",
-    mode: "regex",
-    pattern: String(/\b(?:amazon|amzn)\b/i).slice(1, -2),
-  },
-  {
-    id: "costco",
-    name: "Costco",
-    domain: "costco.com",
-    mode: "exact",
-    pattern: "costco",
-  },
-  {
-    id: "home-depot",
-    name: "Home Depot",
-    domain: "homedepot.com",
-    mode: "regex",
-    pattern: String(/\bhome\s*depot\b/i).slice(1, -2),
-  },
-  {
-    id: "netflix",
-    name: "Netflix",
-    domain: "netflix.com",
-    mode: "exact",
-    pattern: "netflix",
-  },
-  {
-    id: "judys",
-    name: "Judy's",
-    domain: "judyssichuancuisine.com",
-    mode: "regex",
-    pattern: String(/\bjudy'?s(?:\s+sichuan(?:\s+(?:ii|2))?)?\b/i).slice(1, -2),
-  },
-  {
-    id: "honey-hooch",
-    name: "Honey & Hooch",
-    domain: "honeyandhooch.com",
-    mode: "regex",
-    pattern: String(/\bhoney\s*(?:&|and)\s*hooch\b/i).slice(1, -2),
-  },
-  {
-    id: "three-amigos",
-    name: "3 Amigos",
-    domain: "3amigosmexicanrestaurants.com",
-    mode: "regex",
-    pattern: String(
-      /\b3\s*amigos(?:\s+mexican(?:\s*r(?:estaurant|estaurants)?)?)?\b/i
-    ).slice(1, -2),
-  },
-];
-
-function normalize(s: string) {
-  return (s || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-function match(rule: BrandRule, text: string) {
-  const t = text || "";
-  if (rule.mode === "exact") return normalize(t) === normalize(rule.pattern);
-  if (rule.mode === "keywords") {
-    const words = rule.pattern
-      .split(/[, ]+/)
-      .map((w) => normalize(w))
-      .filter(Boolean);
-    const tl = normalize(t);
-    return words.every((w) => tl.includes(w));
-  }
-  try {
-    const rx = new RegExp(rule.pattern, "i");
-    return rx.test(t);
-  } catch {
-    return false;
-  }
-}
-
-function escapeRegex(s: string) {
-  return (s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-export type BrandContextValue = {
-  mounted: boolean;
-  rules: BrandRule[]; // user rules
-  allRules: BrandRule[]; // user-first, then defaults
-  upsertRule: (r: BrandRule) => void;
-  removeRule: (id: string) => void;
-  detect: (text: string) => BrandRule | null;
-  logoFor: (textOrDomain: string) => string | null;
-  /** increments on every rules change; depend on this to recompute UI */
+type Ctx = {
+  rules: BrandRule[];
   version: number;
+  mounted: boolean;
+  detect: (label: string) => BrandRule | null;
+  logoFor: (labelOrDomain?: string | null) => string | null;
+  upsertRule: (rule: BrandRule) => void;
+  removeRule: (id: string) => void;
 };
 
-const BrandCtx = React.createContext<BrandContextValue | null>(null);
+const BrandMapContext = React.createContext<Ctx | null>(null);
 
+/* ---------- storage helpers ---------- */
+const LS_KEY = "ui.brand.rules.v1";
+const norm = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+function normalizeRule(r: any): BrandRule {
+  const mode: BrandRule["mode"] =
+    r?.mode === "regex" || r?.mode === "exact" ? r.mode : "keywords";
+  return {
+    id: String(r?.id || ""),
+    name: String(r?.name || "Brand"),
+    domain: r?.domain ? String(r.domain) : "",
+    mode,
+    pattern: String(r?.pattern ?? r?.name ?? ""),
+    enabled: r?.enabled !== false,
+    noLogo: !!r?.noLogo,
+    icon: (r?.icon ?? null) as IconKey | null,
+  };
+}
+function loadRules(): BrandRule[] {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.map(normalizeRule) : [];
+  } catch {
+    return [];
+  }
+}
+function saveRules(rules: BrandRule[]) {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(rules));
+  } catch {}
+}
+
+/* ---------- provider ---------- */
 export function BrandMapProvider({ children }: { children: React.ReactNode }) {
-  const [mounted, setMounted] = React.useState(false);
+  const uid = useAuthUID();
   const [rules, setRules] = React.useState<BrandRule[]>([]);
   const [version, setVersion] = React.useState(0);
+  const [mounted, setMounted] = React.useState(false);
 
+  // init from localStorage only
   React.useEffect(() => {
-    try {
-      const raw = localStorage.getItem(LS_KEY);
-      if (raw) setRules(JSON.parse(raw));
-    } catch {}
+    setRules(loadRules());
     setMounted(true);
   }, []);
 
+  // persist to localStorage
   React.useEffect(() => {
-    if (!mounted) return;
-    try {
-      localStorage.setItem(LS_KEY, JSON.stringify(rules));
-    } catch {}
+    if (mounted) saveRules(rules);
   }, [rules, mounted]);
 
-  const allRules = React.useMemo(() => [...rules, ...DEFAULTS], [rules]);
-
   const detect = React.useCallback(
-    (text: string) => {
-      for (const r of allRules) {
-        if (r.enabled === false) continue;
-        if (match(r, text)) return r;
+    (label: string): BrandRule | null => {
+      if (!label) return null;
+      const L = norm(label);
+
+      const byName = rules.find(
+        (r) => r.enabled !== false && norm(r.name) === L
+      );
+      if (byName) return byName;
+
+      for (const r of rules) {
+        if (r.enabled === false || r.mode !== "exact") continue;
+        if (norm(r.pattern) === L) return r;
+      }
+      for (const r of rules) {
+        if (r.enabled === false || r.mode !== "keywords") continue;
+        const words = (r.pattern || "")
+          .split(/[, ]+/)
+          .map(norm)
+          .filter(Boolean);
+        if (words.length && words.every((w) => L.includes(w))) return r;
+      }
+      for (const r of rules) {
+        if (r.enabled === false || r.mode !== "regex") continue;
+        try {
+          if (new RegExp(r.pattern, "i").test(label)) return r;
+        } catch {}
       }
       return null;
     },
-    [allRules]
+    [rules]
   );
 
-  const upsertRule = React.useCallback((incoming: BrandRule) => {
-    setRules((prev) => {
-      const i = prev.findIndex((x) => x.id === incoming.id);
+  const logoFor = React.useCallback(
+    (labelOrDomain?: string | null): string | null => {
+      if (!labelOrDomain) return null;
 
-      const finalize = (base: BrandRule | null, inc: BrandRule): BrandRule => {
-        const mode = inc.mode ?? base?.mode ?? "regex";
-        let pattern = inc.pattern ?? base?.pattern;
-        if (!pattern) {
-          const token = (inc.name || base?.name || inc.id || "").trim();
-          pattern =
-            mode === "regex"
-              ? `\\b${escapeRegex(token).replace(/\s+/g, "\\s*")}\\b`
-              : mode === "keywords"
-              ? token
-              : normalize(token);
-        }
-        return {
-          id: inc.id ?? base?.id ?? crypto.randomUUID(),
-          name: (inc.name ?? base?.name ?? "").trim(),
-          domain: (inc.domain ?? base?.domain ?? "").trim(),
-          mode,
-          pattern,
-          enabled: inc.enabled ?? base?.enabled ?? true,
-        };
-      };
-
-      if (i >= 0) {
-        const next = [...prev];
-        next[i] = finalize(prev[i], incoming);
-        return next;
+      if (!/\s/.test(labelOrDomain) && labelOrDomain.includes(".")) {
+        return `https://logo.clearbit.com/${labelOrDomain}`;
       }
-      return [finalize(null, incoming), ...prev];
+      const hit = detect(labelOrDomain);
+      if (hit?.noLogo) return null;
+      if (hit?.domain) return `https://logo.clearbit.com/${hit.domain}`;
+
+      const first = labelOrDomain.toLowerCase().split(/\s+/)[0] || "brand";
+      return `https://logo.clearbit.com/${first}.com`;
+    },
+    [detect]
+  );
+
+  /* ===== Firestore sync (permission-safe) ===== */
+
+  // 1) Debounced writer with cancel()
+  const saveRemote = React.useMemo(() => {
+    const d = debounce(async (list: BrandRule[]) => {
+      // guard inside the debounce too
+      if (!uid) return;
+      const ref = userDoc(uid, "settings", "brandRules");
+      await setWithRev(ref, { rules: list });
+    }, 700);
+    return d;
+  }, [uid]);
+
+  // cancel any pending write on uid change/unmount
+  React.useEffect(() => {
+    return () => {
+      // @ts-ignore
+      saveRemote.cancel?.();
+    };
+  }, [saveRemote]);
+
+  // 2) Bootstrap on sign-in (seed/pull once), then live-subscribe
+  React.useEffect(() => {
+    if (!uid) return; // signed out → no Firestore
+
+    let unsub = () => {};
+    (async () => {
+      const ref = userDoc(uid, "settings", "brandRules");
+      try {
+        const { getDoc } = await import("firebase/firestore");
+        const snap = await getDoc(ref);
+        if (snap.exists()) {
+          const remote = Array.isArray(snap.data().rules)
+            ? (snap.data().rules as BrandRule[]).map(normalizeRule)
+            : [];
+          setRules((prev) => {
+            const same =
+              prev.length === remote.length &&
+              prev.every(
+                (p, i) => JSON.stringify(p) === JSON.stringify(remote[i])
+              );
+            return same ? prev : remote;
+          });
+        } else {
+          // seed from local
+          const seed = loadRules();
+          await setWithRev(ref, { rules: seed });
+          setRules(seed);
+        }
+      } catch (e) {
+        console.debug("brandRules initial sync error", e);
+      }
+
+      // live subscribe (cleaned on uid change or unmount)
+      unsub = subscribeDoc<{ rules: BrandRule[]; rev: number }>(ref, (data) => {
+        if (!data) return;
+        const remote = Array.isArray(data.rules)
+          ? (data.rules as BrandRule[]).map(normalizeRule)
+          : [];
+        setRules((prev) => {
+          const same =
+            prev.length === remote.length &&
+            prev.every(
+              (p, i) => JSON.stringify(p) === JSON.stringify(remote[i])
+            );
+          return same ? prev : remote;
+        });
+      });
+    })();
+
+    return () => unsub();
+  }, [uid]);
+
+  // 3) Schedule debounced writes when signed in
+  React.useEffect(() => {
+    if (!uid) return;
+    saveRemote(rules);
+  }, [uid, rules, saveRemote]);
+
+  /* ===== mutations ===== */
+  const upsertRule = React.useCallback((incoming: BrandRule) => {
+    const nextRule = normalizeRule(incoming);
+    setRules((prev) => {
+      let i = prev.findIndex((r) => r.id === nextRule.id);
+      if (i < 0 && nextRule.name) {
+        i = prev.findIndex((r) => norm(r.name) === norm(nextRule.name));
+      }
+      const updated =
+        i >= 0
+          ? [
+              ...prev.slice(0, i),
+              { ...prev[i], ...nextRule },
+              ...prev.slice(i + 1),
+            ]
+          : [nextRule, ...prev];
+      return updated;
     });
     setVersion((v) => v + 1);
   }, []);
 
   const removeRule = React.useCallback((id: string) => {
-    setRules((prev) => prev.filter((x) => x.id !== id));
+    setRules((prev) => prev.filter((r) => r.id !== id));
     setVersion((v) => v + 1);
   }, []);
 
-  const logoFor = React.useCallback(
-    (textOrDomain: string) => {
-      const hit = detect(textOrDomain);
-      if (hit?.domain) return `https://logo.clearbit.com/${hit.domain}`;
-      if (textOrDomain.includes("."))
-        return `https://logo.clearbit.com/${textOrDomain}`;
-      const word = normalize(textOrDomain).split(/\s+/)[0];
-      if (!word) return null;
-      return `https://logo.clearbit.com/${word}.com`;
-    },
-    [detect]
+  const value = React.useMemo<Ctx>(
+    () => ({
+      rules,
+      version,
+      mounted,
+      detect,
+      logoFor,
+      upsertRule,
+      removeRule,
+    }),
+    [rules, version, mounted, detect, logoFor, upsertRule, removeRule]
   );
 
-  const value: BrandContextValue = {
-    mounted,
-    rules,
-    allRules,
-    upsertRule,
-    removeRule,
-    detect,
-    logoFor,
-    version,
-  };
-
-  return <BrandCtx.Provider value={value}>{children}</BrandCtx.Provider>;
+  return (
+    <BrandMapContext.Provider value={value}>
+      {children}
+    </BrandMapContext.Provider>
+  );
 }
 
 export function useBrandMap() {
-  const ctx = React.useContext(BrandCtx);
-  if (!ctx) throw new Error("useBrandMap must be used within BrandMapProvider");
+  const ctx = React.useContext(BrandMapContext);
+  if (!ctx) throw new Error("useBrandMap must be used inside BrandMapProvider");
   return ctx;
 }
