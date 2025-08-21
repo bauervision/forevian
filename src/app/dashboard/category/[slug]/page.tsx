@@ -31,6 +31,8 @@ import {
 import { groupMembersForSlug, labelForSlug } from "@/lib/categoryGroups";
 import { useBrandMap } from "@/app/providers/BrandMapProvider";
 import BrandLogoDialog from "@/components/BrandLogoDialog";
+import { catToSlug, slugToCat } from "@/lib/slug";
+import { useCategories } from "@/app/providers/CategoriesProvider";
 
 /* ----------------------------- trends helpers ---------------------------- */
 
@@ -391,6 +393,7 @@ type MerchantAgg = {
 /* ---------------------------------- page ---------------------------------- */
 
 export default function CategoryDetailPage() {
+  const { categories } = useCategories();
   const params = useParams<{ slug: string }>();
   const { version: brandVersion, detect, logoFor, rules } = useBrandMap();
 
@@ -425,36 +428,38 @@ export default function CategoryDetailPage() {
   const slug = (params.slug || "").toLowerCase();
   const groupMembers = groupMembersForSlug(slug); // null if not a group
   const catDisplay = labelForSlug(slug); // prettified
+  const headerLabel = slugToCat(slug, categories);
 
   const parentLabelLc = catDisplay.toLowerCase();
 
-  // --- filter current rows
+  // --- filter current rows (slug compare)
   const rows = React.useMemo(() => {
+    const rowSlug = (r: any) =>
+      catToSlug((r.categoryOverride ?? r.category ?? "Uncategorized").trim());
+
     if (groupMembers?.length) {
-      const targets = new Set(groupMembers.map((c) => c.trim().toLowerCase()));
-      return viewRows.filter((r) => {
-        const cat = (r.categoryOverride ?? r.category ?? "Uncategorized")
-          .trim()
-          .toLowerCase();
-        return targets.has(cat) || cat === parentLabelLc;
-      });
+      // normalize all group members to slugs once
+      const targetSlugs = new Set(groupMembers.map((c) => catToSlug(c.trim())));
+      // also accept the parent slug itself
+      targetSlugs.add(slug);
+
+      return viewRows.filter((r) => targetSlugs.has(rowSlug(r)));
     }
-    return viewRows.filter((r) => {
-      const cat = (r.categoryOverride ?? r.category ?? "Uncategorized")
-        .trim()
-        .toLowerCase();
-      return cat === parentLabelLc;
-    });
-  }, [viewRows, groupMembers, parentLabelLc]);
+
+    return viewRows.filter((r) => rowSlug(r) === slug);
+  }, [viewRows, groupMembers, slug]);
 
   // --- previous month rows for the SAME scope (for MoM)
   const prevScopedRows = React.useMemo(() => {
     if (period !== "CURRENT") return [] as typeof rows;
+
     const idx = readIndex();
     const prevId = prevStatementId(selectedId);
-    if (!prevId) return [];
+    if (!prevId) return [] as typeof rows;
+
     const s = idx[prevId];
-    if (!s) return [];
+    if (!s) return [] as typeof rows;
+
     const rules = readCatRules();
     const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
     const allPrev = applyCategoryRulesTo(
@@ -463,23 +468,17 @@ export default function CategoryDetailPage() {
       applyAlias
     ) as typeof viewRows;
 
+    const rowSlug = (r: any) =>
+      catToSlug((r.categoryOverride ?? r.category ?? "Uncategorized").trim());
+
     if (groupMembers?.length) {
-      const targets = new Set(groupMembers.map((c) => c.trim().toLowerCase()));
-      return allPrev.filter((r) => {
-        const cat = (r.categoryOverride ?? r.category ?? "Uncategorized")
-          .trim()
-          .toLowerCase();
-        return targets.has(cat) || cat === parentLabelLc;
-      });
-    } else {
-      return allPrev.filter((r) => {
-        const cat = (r.categoryOverride ?? r.category ?? "Uncategorized")
-          .trim()
-          .toLowerCase();
-        return cat === parentLabelLc;
-      });
+      const targetSlugs = new Set(groupMembers.map((c) => catToSlug(c.trim())));
+      targetSlugs.add(slug);
+      return allPrev.filter((r) => targetSlugs.has(rowSlug(r)));
     }
-  }, [period, selectedId, groupMembers, parentLabelLc]);
+
+    return allPrev.filter((r) => rowSlug(r) === slug);
+  }, [period, selectedId, groupMembers, slug]);
 
   // Previous statement rows (for MoM trend)
   const prevRows = React.useMemo(() => {
@@ -612,7 +611,7 @@ export default function CategoryDetailPage() {
           <span className="inline-flex items-center justify-center rounded-xl bg-slate-900 border border-slate-700 p-2">
             {iconForCategory(catDisplay)}
           </span>
-          <span>{catDisplay}</span>
+          <span>{headerLabel}</span>
         </h1>
 
         {mounted && viewMeta && (

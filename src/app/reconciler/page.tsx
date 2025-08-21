@@ -482,16 +482,23 @@ function CategorySelect({
   const [openMgr, setOpenMgr] = React.useState(false);
 
   const sorted = React.useMemo(() => {
-    const list = [...categories].sort((a, b) =>
+    // Start with unique set from provider
+    const set = new Set(categories.map((c) => c.trim()).filter(Boolean));
+
+    // Ensure the current value is present (e.g., "Impulse/Misc")
+    if (value && !set.has(value)) set.add(value);
+
+    // Promote consistent casing for 'Uncategorized' to render last
+    const list = Array.from(set).sort((a, b) =>
       a.localeCompare(b, undefined, { sensitivity: "base" })
     );
     const i = list.findIndex((x) => x.toLowerCase() === "uncategorized");
     if (i >= 0) {
-      list.splice(i, 1);
-      list.push("Uncategorized");
+      const [u] = list.splice(i, 1);
+      list.push(u === "Uncategorized" ? u : "Uncategorized");
     }
     return list;
-  }, [categories]);
+  }, [categories, value]);
 
   return (
     <>

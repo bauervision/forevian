@@ -26,7 +26,7 @@ import {
 
 import { useRowsForSelection } from "@/helpers/useRowsForSelection";
 import { groupLabelForCategory } from "@/lib/categoryGroups";
-
+import { catToSlug } from "@/lib/slug";
 /* ---------------------------- helpers & hooks ---------------------------- */
 
 /** Find the previous statement id for a given "YYYY-MM" that actually exists. */
@@ -348,7 +348,7 @@ export default function CategoriesIndexPage() {
             const pct = grandTotal ? Math.round((value / grandTotal) * 100) : 0;
             const accent = accentFor(name);
             const href = `/dashboard/category/${encodeURIComponent(
-              toSlug(name)
+              catToSlug(name)
             )}${urlStatement ? `?statement=${urlStatement}` : ""}`;
 
             return (

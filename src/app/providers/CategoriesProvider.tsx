@@ -20,6 +20,7 @@ const BACKUP_KEY = "ui.categories.backup.v1";
 
 // Keep “Uncategorized” pinned first; dropdowns elsewhere sort alphabetically in their own components.
 const DEFAULTS = [
+  "Impulse/Misc",
   "Uncategorized",
   "Income",
   "Transfers",
