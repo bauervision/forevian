@@ -8,8 +8,10 @@ import {
   createUserWithEmailAndPassword,
 } from "firebase/auth";
 import { useRouter } from "next/navigation";
+import { useImportProfile } from "@/lib/import/store";
 
 export default function Login() {
+  const { profile } = useImportProfile();
   const r = useRouter();
   const [email, setEmail] = useState("");
   const [pass, setPass] = useState("");
@@ -25,7 +27,13 @@ export default function Login() {
       if (mode === "signin")
         await signInWithEmailAndPassword(auth, email, pass);
       else await createUserWithEmailAndPassword(auth, email, pass);
-      r.push("/dashboard");
+
+      if (!profile) {
+        r.push("/onboarding");
+        return;
+      } else {
+        r.push("/dashboard");
+      }
     } catch (e: any) {
       setErr(e.message ?? "Auth error");
     } finally {

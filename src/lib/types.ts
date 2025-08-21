@@ -33,3 +33,27 @@ export type Tx = {
   recurrenceKey?: string;
   accountId: string; // e.g., 'wells-checking'
 };
+
+export type ParsedLine = {
+  dateIso?: string;
+  dateDisplay: string;
+  description: string;
+  amount: number;
+  tag?: "cb_cashback" | "card_purchase" | "deposit" | "billpay";
+  parseNotes: string[];
+};
+
+export type TxRow = {
+  running?: number;
+  id: string;
+  date: string;
+  description: string;
+  amount: number;
+  raw?: string;
+  notes?: string;
+  category?: string;
+  categoryOverride?: string;
+  cardLast4?: string;
+  user?: string;
+  parseWarnings?: string[];
+};
