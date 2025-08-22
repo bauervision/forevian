@@ -1,7 +1,6 @@
 "use client";
-import React from "react";
-import { readIndex } from "@/lib/statements";
-import { readCatRules } from "@/lib/categoryRules";
+
+import * as React from "react";
 import {
   useAuthUID,
   userDoc,
@@ -9,233 +8,267 @@ import {
   subscribeDoc,
   debounce,
 } from "@/lib/fx";
+import { readCatRules } from "@/lib/categoryRules";
+import { readIndex } from "@/lib/statements";
+
+/* ----------------------------- types & context ---------------------------- */
 
 type Ctx = {
   categories: string[];
   setCategories: (next: string[]) => void;
   addCategory: (name: string) => void;
-  resetDefaults: () => void;
-  recoverFromData: () => void;
-  restoreBackup: () => void;
+  removeCategory: (name: string) => void;
+
+  // kept for compatibility with existing UI, but NOT using baked-in defaults
+  resetDefaults: () => void; // -> resets to ["Uncategorized"]
+  recoverFromData: () => void; // -> scans rules + cached tx to rebuild a list
+  restoreBackup: () => void; // -> restores the last saved copy
 };
 
-const CategoriesContext = React.createContext<Ctx | null>(null);
+const CategoriesContext = React.createContext<Ctx | undefined>(undefined);
 
-// Stable storage keys
-const CATS_KEY = "ui.categories.v1";
-const BACKUP_KEY = "ui.categories.backup.v1";
+/* --------------------------------- utils --------------------------------- */
 
-// Keep “Uncategorized” pinned first; dropdowns elsewhere sort alphabetically in their own components.
-const DEFAULTS = [
-  "Impulse/Misc",
-  "Uncategorized",
-  "Income",
-  "Transfers",
-  "Debt",
-  "Cash Back",
-  "Utilities",
-  "Housing",
-  "Insurance",
-  "Subscriptions",
-  "Groceries",
-  "Dining",
-  "Fast Food",
-  "Gas",
-  "Shopping/Household",
-  "Entertainment",
-  "Kids/School",
-  "Amazon",
-  "Starbucks",
-  "Medical/Doctors",
-];
-
-function uniqOrder(arr: string[]) {
+function uniqPreserve<T>(
+  xs: T[],
+  key = (x: T) => String(x).toLowerCase()
+): T[] {
   const seen = new Set<string>();
-  const out: string[] = [];
-  for (const s of arr) {
-    const v = s?.trim();
-    if (!v) continue;
-    const norm = v.replace(/\s+/g, " ");
-    if (!seen.has(norm.toLowerCase())) {
-      seen.add(norm.toLowerCase());
-      out.push(norm);
+  const out: T[] = [];
+  for (const x of xs) {
+    const k = key(x);
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(x);
     }
   }
   return out;
 }
 
-function normalizeList(list: string[]): string[] {
-  // 1) ensure uniqueness
-  const uniques = uniqOrder(list);
-  // 2) make sure “Uncategorized” exists and is first
-  const rest = uniques.filter((c) => c.toLowerCase() !== "uncategorized");
-  return ["Uncategorized", ...rest];
+function normalizeList(input: string[]): string[] {
+  // trim, drop blanks, ensure "Uncategorized" exists and is first, uniq CI, preserve order
+  const trimmed = input.map((s) => (s ?? "").trim()).filter(Boolean);
+  const withoutUncat = trimmed.filter(
+    (s) => s.toLowerCase() !== "uncategorized"
+  );
+  const merged = uniqPreserve<string>(["Uncategorized", ...withoutUncat]);
+  return merged;
 }
 
-function loadStorage(key: string): string[] | null {
+function eqCI(a: string[], b: string[]) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++)
+    if (a[i].toLowerCase() !== b[i].toLowerCase()) return false;
+  return true;
+}
+
+function lsKey(uid?: string | null) {
+  return `ui.categories.v1::${uid ?? "anon"}`;
+}
+function lsBackupKey(uid?: string | null) {
+  return `ui.categories.backup.v1::${uid ?? "anon"}`;
+}
+function startersKey(uid?: string | null) {
+  return `ui.import.starters.cats::${uid ?? "anon"}`;
+}
+function startersAppliedKey(uid?: string | null) {
+  return `ui.import.starters.applied::${uid ?? "anon"}`;
+}
+
+function safeReadJSON<T>(key: string): T | undefined {
   try {
     const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    const list = JSON.parse(raw);
-    return Array.isArray(list) ? list.map(String) : null;
+    return raw ? (JSON.parse(raw) as T) : undefined;
   } catch {
-    return null;
+    return undefined;
   }
 }
 
-function saveStorage(key: string, list: string[]) {
-  try {
-    localStorage.setItem(key, JSON.stringify(list));
-  } catch {}
+function readOnboardingCategoryNames(uid?: string | null): string[] {
+  // onboarding stored [{id,name,icon?,color?}] or string[]
+  const blob = safeReadJSON<any[]>(startersKey(uid)) ?? [];
+  if (!Array.isArray(blob)) return [];
+  const names = blob
+    .map((x) => (typeof x === "string" ? x : x?.name))
+    .filter(Boolean);
+  return normalizeList(names);
 }
 
-function snapshotBackup(list: string[]) {
-  try {
-    saveStorage(BACKUP_KEY, list);
-  } catch {}
-}
-
-// Build a merged category list from defaults + rules + cached transactions
-function buildFromData(): string[] {
-  const base = new Set(DEFAULTS.map((c) => c));
-  // From rules
-  try {
-    const rules = readCatRules(); // [{key, category, source}]
-    for (const r of rules) {
-      if (r?.category) base.add(String(r.category));
-    }
-  } catch {}
-
-  // From cached statements
-  try {
-    const idx = readIndex();
-    for (const s of Object.values(idx)) {
-      const tx: any[] = Array.isArray((s as any)?.cachedTx)
-        ? (s as any).cachedTx
-        : [];
-      for (const r of tx) {
-        const cat = (r.categoryOverride ?? r.category) as string | undefined;
-        if (cat && cat.trim()) base.add(cat.trim());
-      }
-    }
-  } catch {}
-
-  return normalizeList(Array.from(base));
-}
+/* ------------------------------- provider -------------------------------- */
 
 export function CategoriesProvider({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const [categories, setCats] = React.useState<string[]>(DEFAULTS);
   const uid = useAuthUID();
-  // init: localStorage → else build from data → else defaults
-  React.useEffect(() => {
-    const stored = loadStorage(CATS_KEY);
-    if (stored && stored.length) {
-      const norm = normalizeList(stored);
-      setCats(norm);
-      snapshotBackup(norm);
-      return;
-    }
-    const rebuilt = buildFromData();
-    const norm = normalizeList(rebuilt.length ? rebuilt : DEFAULTS);
-    setCats(norm);
-    snapshotBackup(norm);
-    saveStorage(CATS_KEY, norm);
-  }, []);
 
-  // 🔥 Firestore: pull remote -> push local (debounced)
-  // Subscribe to remote when signed in
-  React.useEffect(() => {
-    if (!uid) return; // signed out, stick to localStorage
-    const ref = userDoc(uid, "settings", "categories");
-    return subscribeDoc<{ list: string[]; rev: number }>(ref, (data) => {
-      if (!data) return; // nothing yet
-      const remoteList = normalizeList(data.list ?? []);
-      // If remote differs from local, prefer remote to keep devices consistent
-      setCats((prev) => {
-        const same =
-          prev.length === remoteList.length &&
-          prev.every((v, i) => v === remoteList[i]);
-        return same ? prev : remoteList;
-      });
-    });
-  }, [uid]);
+  // Start minimal; we’ll hydrate from local -> firestore -> onboarding
+  const [categories, _setCategories] = React.useState<string[]>([
+    "Uncategorized",
+  ]);
+  const categoriesRef = React.useRef(categories);
+  React.useEffect(
+    () => void (categoriesRef.current = categories),
+    [categories]
+  );
 
-  // Debounced remote save when categories change (and user is signed in)
-  const saveRemote = React.useMemo(
-    () =>
-      debounce(async (list: string[]) => {
-        if (!uid) return; // extra guard
-        const ref = userDoc(uid, "settings", "categories");
-        await setWithRev(ref, { list: normalizeList(list) });
-      }, 700),
+  // Local backup each time we change (before remote debounce)
+  const saveLocal = React.useCallback(
+    (list: string[]) => {
+      try {
+        localStorage.setItem(lsKey(uid), JSON.stringify(list));
+        localStorage.setItem(lsBackupKey(uid), JSON.stringify(list));
+      } catch {}
+    },
     [uid]
   );
 
-  // Ensure we cancel any pending write when uid changes or unmounts
-  React.useEffect(() => {
-    return () => {
-      // @ts-ignore – our debounce has cancel()
-      saveRemote.cancel?.();
-    };
-  }, [saveRemote]);
+  // Debounced remote save
+  const saveRemote = React.useMemo(
+    () =>
+      debounce(async (list: string[]) => {
+        if (!uid) return;
+        try {
+          const ref = userDoc(uid, "settings", "categories");
+          await setWithRev(ref, { list });
+        } catch {
+          /* ignore remote errors */
+        }
+      }, 500),
+    [uid]
+  );
 
-  // Only schedule writes when signed-in
+  // Public setter — normalize, persist local + remote
+  const setCategories = React.useCallback(
+    (next: string[]) => {
+      const norm = normalizeList(next || []);
+      if (eqCI(categoriesRef.current, norm)) return;
+      _setCategories(norm);
+      saveLocal(norm);
+      saveRemote(norm);
+    },
+    [saveLocal, saveRemote]
+  );
+
+  // Add/remove helpers
+  const addCategory = React.useCallback(
+    (name: string) => {
+      const norm = normalizeList([...categoriesRef.current, name]);
+      if (!eqCI(categoriesRef.current, norm)) setCategories(norm);
+    },
+    [setCategories]
+  );
+
+  const removeCategory = React.useCallback(
+    (name: string) => {
+      const norm = normalizeList(
+        categoriesRef.current.filter(
+          (c) => c.toLowerCase() !== (name || "").toLowerCase()
+        )
+      );
+      if (!eqCI(categoriesRef.current, norm)) setCategories(norm);
+    },
+    [setCategories]
+  );
+
+  // Local boot
+  React.useEffect(() => {
+    const local = safeReadJSON<string[]>(lsKey(uid));
+    if (Array.isArray(local) && local.length) {
+      _setCategories(normalizeList(local));
+    }
+  }, [uid]);
+
+  // Remote subscribe (if logged in)
   React.useEffect(() => {
     if (!uid) return;
-    saveRemote(categories);
-  }, [uid, categories, saveRemote]);
+    const ref = userDoc(uid, "settings", "categories");
+    return subscribeDoc<{ list?: string[]; rev?: number }>(ref, (data) => {
+      const incoming = normalizeList(
+        Array.isArray(data?.list) ? data!.list : []
+      );
+      if (!incoming.length) return; // ignore empty remote payloads
+      if (!eqCI(categoriesRef.current, incoming)) {
+        _setCategories(incoming);
+        // also refresh local caches
+        try {
+          localStorage.setItem(lsKey(uid), JSON.stringify(incoming));
+          localStorage.setItem(lsBackupKey(uid), JSON.stringify(incoming));
+        } catch {}
+      }
+    });
+  }, [uid]);
 
+  // Adopt onboarding categories ONCE per user/session if current is baseline (only Uncategorized)
   React.useEffect(() => {
-    if (!uid) return;
-    saveRemote(categories);
-  }, [uid, categories, saveRemote]);
+    const applied =
+      typeof window !== "undefined"
+        ? localStorage.getItem(startersAppliedKey(uid))
+        : "1";
+    if (applied) return;
 
-  // persist + backup on changes
-  React.useEffect(() => {
-    saveStorage(CATS_KEY, categories);
-    snapshotBackup(categories);
-  }, [categories]);
+    const current = categoriesRef.current;
+    const baseline = current.length <= 1; // treat 0/1 as baseline
 
-  const setCategories = React.useCallback((next: string[]) => {
-    const norm = normalizeList(next);
-    setCats(norm);
-    saveStorage(CATS_KEY, norm);
-    snapshotBackup(norm);
-    // Firestore write is already debounced & uid-guarded
-  }, []);
+    const starters = readOnboardingCategoryNames(uid);
+    if (!starters.length) {
+      try {
+        localStorage.setItem(startersAppliedKey(uid), "1");
+      } catch {}
+      return;
+    }
 
-  const addCategory = React.useCallback((name: string) => {
-    const v = name.trim();
-    if (!v) return;
-    setCats((prev) => normalizeList([v, ...prev]));
-  }, []);
+    if (baseline || !eqCI(current, starters)) {
+      setCategories(starters);
+    }
 
+    try {
+      localStorage.setItem(startersAppliedKey(uid), "1");
+    } catch {}
+  }, [uid, setCategories]);
+
+  /* ---------------------------- compat utilities --------------------------- */
+
+  // “Reset defaults” now means “minimal reset” (no baked-in list).
   const resetDefaults = React.useCallback(() => {
-    const norm = normalizeList(DEFAULTS);
-    setCats(norm);
-  }, []);
+    setCategories(["Uncategorized"]);
+  }, [setCategories]);
+
+  // Recover by scanning rules & cached transactions
+  const recoverFromData = React.useCallback(() => {
+    const ruleMap = readCatRules(); // your structure likely { key: "Category" }
+    const fromRules = Object.values(ruleMap || {}) as unknown as string[];
+
+    const idx = readIndex();
+    const fromTx = new Set<string>();
+    for (const s of Object.values(idx || {})) {
+      const rows = Array.isArray((s as any).cachedTx)
+        ? (s as any).cachedTx
+        : [];
+      for (const r of rows) {
+        const c = (r?.categoryOverride || r?.category || "").trim();
+        if (c) fromTx.add(c);
+      }
+    }
+
+    const next = normalizeList([...fromRules, ...Array.from(fromTx)]);
+    if (next.length === 0) return;
+    setCategories(next);
+  }, [setCategories]);
 
   const restoreBackup = React.useCallback(() => {
-    const backup = loadStorage(BACKUP_KEY);
-    if (backup && backup.length) {
-      setCats(normalizeList(backup));
-    }
-  }, []);
+    const backup = safeReadJSON<string[]>(lsBackupKey(uid)) || [];
+    if (!backup.length) return;
+    setCategories(backup);
+  }, [uid, setCategories]);
 
-  const recoverFromData = React.useCallback(() => {
-    const merged = buildFromData();
-    setCats(normalizeList([...merged]));
-  }, []);
-
-  const value: Ctx = React.useMemo(
+  const value = React.useMemo<Ctx>(
     () => ({
       categories,
       setCategories,
       addCategory,
+      removeCategory,
       resetDefaults,
       recoverFromData,
       restoreBackup,
@@ -244,58 +277,12 @@ export function CategoriesProvider({
       categories,
       setCategories,
       addCategory,
+      removeCategory,
       resetDefaults,
       recoverFromData,
       restoreBackup,
     ]
   );
-
-  React.useEffect(() => {
-    if (!uid) return; // signed out, stick to local
-
-    let unsub = () => {};
-    const run = async () => {
-      const ref = userDoc(uid, "settings", "categories");
-
-      // one-time read/seed
-      try {
-        const snap = await (await import("firebase/firestore")).getDoc(ref);
-        if (snap.exists()) {
-          const remoteList = normalizeList(
-            (snap.data().list ?? []) as string[]
-          );
-          setCats((prev) => {
-            const same =
-              prev.length === remoteList.length &&
-              prev.every((v, i) => v === remoteList[i]);
-            return same ? prev : remoteList;
-          });
-        } else {
-          // seed from local or defaults
-          const seed = normalizeList(loadStorage(CATS_KEY) ?? DEFAULTS);
-          await setWithRev(ref, { list: seed });
-          setCats(seed);
-        }
-      } catch (e) {
-        console.debug("categories initial fetch error", e);
-      }
-
-      // live subscribe
-      unsub = subscribeDoc<{ list: string[]; rev: number }>(ref, (data) => {
-        if (!data) return;
-        const remoteList = normalizeList(data.list ?? []);
-        setCats((prev) => {
-          const same =
-            prev.length === remoteList.length &&
-            prev.every((v, i) => v === remoteList[i]);
-          return same ? prev : remoteList;
-        });
-      });
-    };
-
-    run();
-    return () => unsub();
-  }, [uid]);
 
   return (
     <CategoriesContext.Provider value={value}>
@@ -304,7 +291,9 @@ export function CategoriesProvider({
   );
 }
 
-export function useCategories() {
+/* ---------------------------------- hook --------------------------------- */
+
+export function useCategories(): Ctx {
   const ctx = React.useContext(CategoriesContext);
   if (!ctx)
     throw new Error("useCategories must be used within CategoriesProvider");

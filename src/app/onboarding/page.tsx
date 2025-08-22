@@ -9,6 +9,7 @@ import { parseWithProfile } from "@/lib/import/run";
 import type { ImportProfile } from "@/lib/import/profile";
 import { useAuthUID } from "@/lib/fx";
 import { useSpenders } from "@/lib/spenders";
+import { useCategories } from "@/app/providers/CategoriesProvider";
 
 /* ---------------- helpers ---------------- */
 
@@ -205,6 +206,8 @@ export default function Onboarding() {
     confirmSetup,
   } = useSpenders();
 
+  const { categories, setCategories } = useCategories();
+
   // drafts
   const DRAFT_W_KEY = `ui.import.onboard.withdrawal::${uid ?? "anon"}`;
   const DRAFT_D_KEY = `ui.import.onboard.deposit::${uid ?? "anon"}`;
@@ -330,6 +333,13 @@ export default function Onboarding() {
     };
     updateProfile(fullProfile);
     persistStarters(uid, cats, rules);
+
+    const names = cats.map((c) => c.name).filter(Boolean);
+    const lower = new Set(categories.map((n: string) => n.toLowerCase()));
+    const merged = [...categories];
+    for (const n of names) if (!lower.has(n.toLowerCase())) merged.push(n);
+
+    setCategories(merged);
   }
 
   /* ---------- Step 4: Spenders save ---------- */

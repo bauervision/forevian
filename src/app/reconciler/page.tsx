@@ -33,6 +33,13 @@ import { useCategories } from "@/app/providers/CategoriesProvider";
 import { TxRow } from "@/lib/types";
 import { useSpenders } from "@/lib/spenders";
 import CategoryManagerDialog from "@/components/CategoryManagerDialog";
+import { useAuthUID } from "@/lib/fx";
+import {
+  markStartersApplied,
+  readStarterCats,
+  readStarterRules,
+  startersAlreadyApplied,
+} from "@/lib/starters";
 
 /* --- tiny UI bits --- */
 
@@ -134,6 +141,47 @@ function CategorySelect({
 /* --- page --- */
 
 export default function ReconcilerPage() {
+  const uid = useAuthUID();
+  const { categories, setAll, setCategories } = useCategories() as any;
+
+  React.useEffect(() => {
+    if (!uid) return;
+    if (startersAlreadyApplied(uid)) return;
+
+    const starters = readStarterCats(uid); // [{ id, name, icon?, color? }]
+    if (!Array.isArray(starters) || starters.length === 0) {
+      markStartersApplied(uid);
+      return;
+    }
+
+    // Merge by name (case-insensitive) into provider
+    const existing = Array.isArray(categories) ? categories : [];
+    const lower = new Set(existing.map((n: string) => (n || "").toLowerCase()));
+    const merged = [...existing];
+    for (const c of starters) {
+      const name = (c?.name || "").trim();
+      if (name && !lower.has(name.toLowerCase())) merged.push(name);
+    }
+
+    // Use whichever setter your provider exposes:
+    if (typeof setAll === "function") setAll(merged);
+    else if (typeof setCategories === "function") setCategories(merged);
+
+    // (Optional) Seed simple rules so they’re available immediately.
+    // We translate starter rules’ categoryId -> category name.
+    const idToName = new Map(starters.map((c) => [c.id, c.name]));
+    const srules = readStarterRules(uid);
+    for (const r of srules) {
+      const catName = idToName.get(r.categoryId);
+      if (!catName) continue;
+      // Minimal seed: treat pattern as a candidate key.
+      // Your upsertCategoryRules(keys, category) already handles storage/merge.
+      upsertCategoryRules([r.pattern], catName);
+    }
+
+    markStartersApplied(uid);
+  }, [uid, categories, setAll, setCategories]);
+
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -420,7 +468,7 @@ export default function ReconcilerPage() {
                           {t.user ??
                             (t.cardLast4
                               ? userFromLast4(t.cardLast4)
-                              : "Unknown")}
+                              : "Joint")}
                         </td>
                       )}
                       <td className="p-2 text-right text-rose-400">
