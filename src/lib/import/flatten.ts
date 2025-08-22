@@ -2,15 +2,18 @@
 import { normalizePageText } from "@/lib/textNormalizer";
 import { collapseBlocks } from "@/lib/import/block";
 
-/** Collapse a pasted multi-line example into one normalized line. */
-export function flattenSample(text: string): string {
+/** Returns the first normalized non-empty block WITH line breaks (for parsing). */
+export function firstBlock(text: string): string {
   if (!text) return "";
-  // Grab the first “content block” like your reconciler does,
-  // then normalize, then smash to a single line.
   const blocks = collapseBlocks(text);
-  const first = blocks.map((b) => b.trim()).find(Boolean) || "";
-  const normalized = normalizePageText(first);
-  return normalized
+  const raw = blocks.map((b) => b.trim()).find(Boolean) || "";
+  return normalizePageText(raw); // still may contain line breaks
+}
+
+/** Returns a single-line preview for UI only. */
+export function previewOneLine(blockOrText: string): string {
+  if (!blockOrText) return "";
+  return blockOrText
     .split(/\r?\n/)
     .map((s) => s.trim())
     .filter(Boolean)

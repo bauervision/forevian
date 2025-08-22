@@ -12,6 +12,7 @@ export type StatementSnapshot = {
   };
   // store parsed rows so other pages (Trends) can read without re-parsing
   cachedTx?: import("@/app/providers/ReconcilerProvider").Transaction[];
+  normalizerVersion?: number;
 };
 
 const IDX_KEY = "reconciler.statements.index.v2";

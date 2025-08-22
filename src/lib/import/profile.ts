@@ -1,5 +1,11 @@
 // lib/import/profile.ts
-export type DateFmt = "MDY" | "DMY" | "YMD";
+export type DateFmt =
+  | "MM/DD"
+  | "M/D"
+  | "MM/DD/YY"
+  | "M/D/YY"
+  | "MM/DD/YYYY"
+  | "M/D/YYYY";
 
 export type GroupMap = {
   date: number; // capture index (1-based) or -1 if none
