@@ -154,18 +154,22 @@ export default function ReconcilerPage() {
       return;
     }
 
-    // Merge by name (case-insensitive) into provider
-    const existing = Array.isArray(categories) ? categories : [];
-    const lower = new Set(existing.map((n: string) => (n || "").toLowerCase()));
-    const merged = [...existing];
-    for (const c of starters) {
-      const name = (c?.name || "").trim();
-      if (name && !lower.has(name.toLowerCase())) merged.push(name);
-    }
+    // Use ONLY starter categories (trim + dedupe, case-insensitive)
+    const deduped = Array.from(
+      new Set(
+        starters
+          .map((c) => (c?.name || "").trim())
+          .filter(Boolean)
+          .map((n) => n.toLowerCase())
+      )
+    ).map(
+      (n) =>
+        starters.find((c) => c.name?.toLowerCase() === n)?.name?.trim() || n
+    );
 
     // Use whichever setter your provider exposes:
-    if (typeof setAll === "function") setAll(merged);
-    else if (typeof setCategories === "function") setCategories(merged);
+    if (typeof setAll === "function") setAll(deduped);
+    else if (typeof setCategories === "function") setCategories(deduped);
 
     // (Optional) Seed simple rules so they’re available immediately.
     // We translate starter rules’ categoryId -> category name.

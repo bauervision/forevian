@@ -10,6 +10,7 @@ import type { ImportProfile } from "@/lib/import/profile";
 import { useAuthUID } from "@/lib/fx";
 import { useSpenders } from "@/lib/spenders";
 import { useCategories } from "@/app/providers/CategoriesProvider";
+import WelcomeDialog from "@/components/WelcomeDialog";
 
 /* ---------------- helpers ---------------- */
 
@@ -207,6 +208,28 @@ export default function Onboarding() {
   } = useSpenders();
 
   const { categories, setCategories } = useCategories();
+
+  // welcome modal gating
+  const WELCOME_KEY = `ui.import.onboard.welcome::${uid ?? "anon"}`;
+  const [showWelcome, setShowWelcome] = React.useState(false);
+
+  // Re-evaluate once uid is known so the per-user key is correct
+  React.useEffect(() => {
+    try {
+      const suppressed = localStorage.getItem(WELCOME_KEY) === "1";
+      setShowWelcome(!suppressed);
+    } catch {
+      setShowWelcome(true); // fall back to showing
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uid]);
+
+  function dismissWelcome(remember: boolean) {
+    try {
+      if (remember) localStorage.setItem(WELCOME_KEY, "1");
+    } catch {}
+    setShowWelcome(false);
+  }
 
   // drafts
   const DRAFT_W_KEY = `ui.import.onboard.withdrawal::${uid ?? "anon"}`;
@@ -1018,6 +1041,15 @@ FANG 3141 Payroll Jul 15 TRN*1*9000852321
           </div>
         </section>
       )}
+
+      <WelcomeDialog
+        open={showWelcome}
+        onClose={(remember) => dismissWelcome(remember)}
+        onStart={() => {
+          // Ensure we’re at step 1 (in case anything changed)
+          setStep(1);
+        }}
+      />
     </div>
   );
 }

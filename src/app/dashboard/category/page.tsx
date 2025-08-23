@@ -22,8 +22,9 @@ import {
   Music,
   Store,
   Sparkles,
+  Pencil,
 } from "lucide-react";
-
+import CategoryManagerDialog from "@/components/CategoryManagerDialog";
 import { useRowsForSelection } from "@/helpers/useRowsForSelection";
 import { groupLabelForCategory } from "@/lib/categoryGroups";
 import { catToSlug } from "@/lib/slug";
@@ -190,6 +191,7 @@ function accentFor(cat: string) {
 export default function CategoriesIndexPage() {
   const { transactions } = useReconcilerSelectors();
   const options = useStatementOptions();
+  const [openMgr, setOpenMgr] = React.useState(false);
 
   // URL-driven statement sync
   const searchParams = useSearchParams();
@@ -271,6 +273,17 @@ export default function CategoriesIndexPage() {
         {/* Toolbar */}
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           <h1 className="text-2xl font-bold">Categories</h1>
+
+          {/* Edit Categories button */}
+          <button
+            type="button"
+            onClick={() => setOpenMgr(true)}
+            className="h-9 px-3 rounded-2xl border text-sm bg-slate-900 border-slate-700 hover:bg-slate-800 inline-flex items-center gap-2"
+            title="Edit Categories"
+          >
+            <Pencil className="h-4 w-4" />
+            Edit Categories
+          </button>
 
           {/* Avoid server/client mismatch: only show dynamic chip after mount */}
           {mounted && viewMeta && (
@@ -400,6 +413,7 @@ export default function CategoriesIndexPage() {
           </ul>
         )}
       </div>
+      <CategoryManagerDialog open={openMgr} onClose={() => setOpenMgr(false)} />
     </ProtectedRoute>
   );
 }
