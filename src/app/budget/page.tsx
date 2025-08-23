@@ -12,7 +12,6 @@ import {
 import { applyAlias } from "@/lib/aliases";
 import { writeOverride, keyForTx } from "@/lib/overrides";
 import { useCategories } from "@/app/providers/CategoriesProvider";
-import CategoryManagerDialog from "@/components/CategoryManagerDialog";
 
 /* ------------------------------------------------------------------ */
 /* Types & utils                                                      */
@@ -59,32 +58,27 @@ function normalizeDateToDay(s?: string): number | null {
   return dd >= 1 && dd <= 31 ? dd : null;
 }
 
-/** Minimal, readable merchant text */
 function pretty(desc?: string) {
   const s = (desc || "").replace(/\s+/g, " ").trim();
   return s.replace(/^purchase authorized on\s*\d{1,2}[\/\-]\d{1,2}\s*/i, "");
 }
 
-/** Mandatory bill detector by category name (adjust as desired) */
+/** Heuristic for mandatory bills (tightened so Fuel/Gas stations don't match) */
 function isMandatoryCategory(catRaw: string, desc?: string) {
   const c = (catRaw || "").toLowerCase();
   const d = (desc || "").toLowerCase();
 
-  // 1) Obvious mandatory categories by name
   if (/(^|\s)(rent|mortgage)($|\s)/.test(c)) return true;
   if (/(^|\s)insurance($|\s)/.test(c)) return true;
   if (/(^|\s)(debt|loan|credit\s*card)($|\s)/.test(c)) return true;
   if (/subscription|subscriptions|stream/.test(c)) return true;
   if (/membership|memberships/.test(c)) return true;
 
-  // 2) Utilities — DO NOT match generic "gas" (fuel). Require utility context.
+  // Utilities (no bare "gas")
   if (/utilities|utility|power|water|internet/.test(c)) return true;
-  // Gas *utility* only if the category mentions it in a utility context
   if (/(natural\s*gas|gas\s*utility|utility:\s*gas|gas\s*\(utility\))/.test(c))
     return true;
 
-  // 3) Merchant allow-list (helps when category is generic but merchant is a utility)
-  // Expand as needed for your region/providers.
   const utilityVendors = [
     "dominion",
     "national grid",
@@ -106,11 +100,10 @@ function isMandatoryCategory(catRaw: string, desc?: string) {
   ];
   if (utilityVendors.some((v) => d.includes(v))) return true;
 
-  // Everything else (incl. Fuel/Gas station) is NOT a mandatory bill by default
   return false;
 }
 
-/** Persisted slider hook */
+/** slider persistence */
 function usePersistedNumber(key: string, initial: number) {
   const [val, setVal] = React.useState<number>(() => {
     try {
@@ -130,7 +123,6 @@ function usePersistedNumber(key: string, initial: number) {
   return [val, setVal] as const;
 }
 
-/** Ensure rows satisfy rules engine's required fields */
 function ensureTxLike(r: any): TxLike {
   return {
     id: r.id,
@@ -144,7 +136,7 @@ function ensureTxLike(r: any): TxLike {
   };
 }
 
-/* -------------------------- Categories Select --------------------------- */
+/* -------------------------- Category Select ---------------------------- */
 
 const CATEGORY_ADD_SENTINEL = "__ADD__";
 
@@ -158,6 +150,8 @@ function CategorySelect({
   disabled?: boolean;
 }) {
   const { categories } = useCategories() as any;
+  const CategoryManagerDialog =
+    require("@/components/CategoryManagerDialog").default;
   const [openMgr, setOpenMgr] = React.useState(false);
 
   const sorted = React.useMemo(() => {
@@ -165,10 +159,8 @@ function CategorySelect({
       (categories || []).map((c: string) => c.trim()).filter(Boolean)
     );
     if (value && !set.has(value)) set.add(value);
-
-    const list = Array.from(set) as string[]; // <-- cast as string[]
+    const list = Array.from(set) as string[];
     list.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-
     const i = list.findIndex((x) => x.toLowerCase() === "uncategorized");
     if (i >= 0) {
       const [u] = list.splice(i, 1);
@@ -192,7 +184,7 @@ function CategorySelect({
         }}
         className="bg-slate-900 text-slate-100 border border-slate-700 rounded-xl px-2 py-1"
       >
-        {sorted.map((opt: string) => (
+        {sorted.map((opt) => (
           <option key={opt} value={opt}>
             {opt}
           </option>
@@ -203,6 +195,38 @@ function CategorySelect({
       <CategoryManagerDialog open={openMgr} onClose={() => setOpenMgr(false)} />
     </>
   );
+}
+
+/* --------------------- Savings/Investing helpers ---------------------- */
+
+function isSavingsCategory(cat?: string) {
+  const c = (cat || "").toLowerCase();
+  return c === "transfer:savings" || /savings/.test(c);
+}
+function isInvestingCategory(cat?: string) {
+  const c = (cat || "").toLowerCase();
+  return (
+    c === "transfer:investing" ||
+    /invest(ing)?|broker(age)?|401k|roth|ira/.test(c)
+  );
+}
+const SAVINGS_HINTS = ["ally", "marcus", "discover savings", "capital one 360"];
+const INVEST_HINTS = [
+  "robinhood",
+  "fidelity",
+  "vanguard",
+  "schwab",
+  "m1 finance",
+  "etrade",
+  "webull",
+];
+function looksLikeSavings(desc?: string) {
+  const d = (desc || "").toLowerCase();
+  return SAVINGS_HINTS.some((h) => d.includes(h));
+}
+function looksLikeInvesting(desc?: string) {
+  const d = (desc || "").toLowerCase();
+  return INVEST_HINTS.some((h) => d.includes(h));
 }
 
 /* ------------------------------------------------------------------ */
@@ -224,36 +248,29 @@ function useLatestIssuedWithData(): {
       stmtMonth: number; // 1-12
       cachedTx?: any[];
     }>;
-
     if (!all.length) return { rows: [] };
 
-    // Start from last month, not current
+    // Prefer last *issued* month (previous month) then walk back until data found
     const now = new Date();
-    const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const lastY = lastMonth.getFullYear();
-    const lastM = lastMonth.getMonth() + 1; // 1-12
+    const last = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const lastY = last.getFullYear();
+    const lastM = last.getMonth() + 1;
 
-    // Sort DESC by (year, month)
     const sorted = all.sort(
       (a, b) => b.stmtYear - a.stmtYear || b.stmtMonth - a.stmtMonth
     );
+    const hasRows = (s: any) => Array.isArray(s.cachedTx) && s.cachedTx.length;
 
-    const hasRows = (s: any) =>
-      Array.isArray(s.cachedTx) && s.cachedTx.length > 0;
+    let picked =
+      sorted.find(
+        (s) =>
+          (s.stmtYear < lastY ||
+            (s.stmtYear === lastY && s.stmtMonth <= lastM)) &&
+          hasRows(s)
+      ) || sorted.find(hasRows);
 
-    // Prefer <= last month with rows
-    let picked = sorted.find(
-      (s) =>
-        (s.stmtYear < lastY ||
-          (s.stmtYear === lastY && s.stmtMonth <= lastM)) &&
-        hasRows(s)
-    );
-
-    // Fallback: any with rows
-    if (!picked) picked = sorted.find(hasRows);
     if (!picked) return { rows: [] };
 
-    // Apply rules
     const rules = readCatRules();
     const prepared: TxLike[] = Array.isArray(picked.cachedTx)
       ? picked.cachedTx.map(ensureTxLike)
@@ -285,13 +302,58 @@ function useLatestIssuedWithData(): {
 }
 
 /* ------------------------------------------------------------------ */
+/* Groceries  */
+/* ------------------------------------------------------------------ */
+
+function isGroceriesCategory(cat?: string) {
+  const c = (cat || "").toLowerCase();
+  return /grocer|supermarket/.test(c) || c === "groceries";
+}
+const GROCERY_HINTS = [
+  "kroger",
+  "heb",
+  "walmart",
+  "target",
+  "costco",
+  "sam's club",
+  "safeway",
+  "publix",
+  "meijer",
+  "wegmans",
+  "trader joe",
+  "trader joe's",
+  "aldi",
+  "whole foods",
+  "food lion",
+  "giant",
+  "stop & shop",
+  "vons",
+  "harris teeter",
+];
+function looksLikeGroceries(desc?: string) {
+  const d = (desc || "").toLowerCase();
+  return GROCERY_HINTS.some((h) => d.includes(h));
+}
+
+/* ------------------------------------------------------------------ */
 /* Page                                                                */
 /* ------------------------------------------------------------------ */
 
 export default function BudgetPage() {
   const { label: stmtLabel, rows } = useLatestIssuedWithData();
 
-  // Split income / expenses
+  // Make sure tracking cats exist (once)
+  const { categories = [], setCategories } = useCategories() as any;
+  React.useEffect(() => {
+    const need = ["Transfer:Savings", "Transfer:Investing"];
+    const lower = new Set(categories.map((c: string) => c.toLowerCase()));
+    const missing = need.filter((n) => !lower.has(n.toLowerCase()));
+    if (missing.length && typeof setCategories === "function") {
+      setCategories([...categories, ...missing]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const deposits = React.useMemo(
     () => rows.filter((r) => (r.amount ?? 0) > 0),
     [rows]
@@ -301,13 +363,12 @@ export default function BudgetPage() {
     [rows]
   );
 
-  // Income = total deposits
   const totalIncome = React.useMemo(
     () => +deposits.reduce((s, r) => s + (r.amount ?? 0), 0).toFixed(2),
     [deposits]
   );
 
-  // --- Bill include/exclude overrides (local, non-destructive) ---
+  /* ---------- Local include/exclude overrides for bill calendar ---------- */
   const BILL_OVR_KEY = "ui.budget.billOverrides";
   const [billOverrides, setBillOverrides] = React.useState<
     Record<string, boolean>
@@ -325,7 +386,7 @@ export default function BudgetPage() {
     } catch {}
   }, [billOverrides]);
 
-  // Mandatory bills from selected statement
+  /* -------------------- Bills (from withdrawals) -------------------- */
   const bills = React.useMemo(() => {
     const list = withdrawals
       .map((w) => {
@@ -335,15 +396,14 @@ export default function BudgetPage() {
           "Uncategorized"
         ).trim();
         const day = normalizeDateToDay(w.date);
-        const includeByCat = isMandatoryCategory(cat);
         const includeByOverride = billOverrides[w.id];
+        const inferred = isMandatoryCategory(cat, w.description);
         const include =
           includeByOverride === true
             ? true
             : includeByOverride === false
             ? false
-            : includeByCat;
-
+            : inferred;
         if (!include) return null;
         return {
           id: w.id,
@@ -363,12 +423,12 @@ export default function BudgetPage() {
       amountAbs: number;
     }>;
 
-    // Collapse duplicates for same day/merchant
-    const key = (x: (typeof list)[number]) =>
+    // Collapse duplicates (same day + label) to a single total
+    const keyFor = (x: (typeof list)[number]) =>
       `${x.day ?? "?"}::${x.category}::${x.description}`;
     const m = new Map<string, (typeof list)[number]>();
     for (const b of list) {
-      const k = key(b);
+      const k = keyFor(b);
       if (!m.has(k)) m.set(k, { ...b });
       else {
         const prev = m.get(k)!;
@@ -383,35 +443,85 @@ export default function BudgetPage() {
     [bills]
   );
 
-  // Sliders: Savings % and Investing %
+  /* ----------------- Sliders + monthly targets --------------------- */
   const [savePct, setSavePct] = usePersistedNumber("ui.budget.savePct", 10);
   const [investPct, setInvestPct] = usePersistedNumber(
     "ui.budget.investPct",
-    5
+    10
   );
+
+  const [groPct, setGroPct] = usePersistedNumber("ui.budget.groPct", 10);
+
+  const groceriesAmt = Math.max(0, Math.round((totalIncome * groPct) / 100));
 
   const savingsAmt = Math.max(0, Math.round((totalIncome * savePct) / 100));
   const investingAmt = Math.max(0, Math.round((totalIncome * investPct) / 100));
 
-  const availableToSpend = React.useMemo(() => {
-    const left = totalIncome - totalBills - savingsAmt - investingAmt;
-    return +left.toFixed(2);
-  }, [totalIncome, totalBills, savingsAmt, investingAmt]);
+  /* --------------- Actuals vs targets (tracking) ------------------- */
+  const actualSavings = React.useMemo(
+    () =>
+      +withdrawals
+        .filter(
+          (w) =>
+            isSavingsCategory(w.categoryOverride ?? w.category) ||
+            looksLikeSavings(w.description)
+        )
+        .reduce((s, w) => s + Math.abs(w.amount ?? 0), 0)
+        .toFixed(2),
+    [withdrawals]
+  );
 
-  /* ------------------------------------------------------------------ */
-  /* Per-paycheck/period breakdown                                      */
-  /* ------------------------------------------------------------------ */
+  const actualInvesting = React.useMemo(
+    () =>
+      +withdrawals
+        .filter(
+          (w) =>
+            isInvestingCategory(w.categoryOverride ?? w.category) ||
+            looksLikeInvesting(w.description)
+        )
+        .reduce((s, w) => s + Math.abs(w.amount ?? 0), 0)
+        .toFixed(2),
+    [withdrawals]
+  );
 
-  // Current calendar (for labels & calendar grid)
+  const actualGroceries = React.useMemo(
+    () =>
+      +withdrawals
+        .filter(
+          (w) =>
+            isGroceriesCategory(w.categoryOverride ?? w.category) ||
+            looksLikeGroceries(w.description)
+        )
+        .reduce((s, w) => s + Math.abs(w.amount ?? 0), 0)
+        .toFixed(2),
+    [withdrawals]
+  );
+
+  const groPctHit = groceriesAmt
+    ? Math.min(100, Math.round((actualGroceries / groceriesAmt) * 100))
+    : 0;
+  const groRemaining = Math.max(0, groceriesAmt - actualGroceries);
+
+  const savePctHit = savingsAmt
+    ? Math.min(100, Math.round((actualSavings / savingsAmt) * 100))
+    : 0;
+  const investPctHit = investingAmt
+    ? Math.min(100, Math.round((actualInvesting / investingAmt) * 100))
+    : 0;
+  const saveRemaining = Math.max(0, savingsAmt - actualSavings);
+  const investRemaining = Math.max(0, investingAmt - actualInvesting);
+
+  /* --------------- Per-paycheck / period split --------------------- */
+
+  // current calendar for display
   const today = new Date();
   const calYear = today.getFullYear();
-  const calMonth = today.getMonth(); // 0-index
+  const calMonth = today.getMonth();
   const first = new Date(calYear, calMonth, 1);
   const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
-  const startWeekday = first.getDay(); // 0=Sun
+  const startWeekday = first.getDay();
   const midDay = 15;
 
-  // Period splits
   const depositsP1 = React.useMemo(
     () => deposits.filter((d) => (normalizeDateToDay(d.date) ?? 99) <= midDay),
     [deposits]
@@ -448,31 +558,73 @@ export default function BudgetPage() {
     [billsP2]
   );
 
-  // Allocate savings/investing proportionally to income per period
-  const totalIncomeSafe = Math.max(0, totalIncome);
-  const shareP1 = totalIncomeSafe ? incomeP1 / totalIncomeSafe : 0.5;
-  const shareP2 = totalIncomeSafe ? incomeP2 / totalIncomeSafe : 0.5;
+  // Weighted allocation toward the period with more discretionary cash
+  const discretionaryP1 = Math.max(0, incomeP1 - totalBillsP1);
+  const discretionaryP2 = Math.max(0, incomeP2 - totalBillsP2);
+  const totalDiscretionary = discretionaryP1 + discretionaryP2;
 
-  const savingsP1 = Math.round(savingsAmt * shareP1);
-  const savingsP2 = Math.round(savingsAmt * shareP2);
-  const investP1 = Math.round(investingAmt * shareP1);
-  const investP2 = Math.round(investingAmt * shareP2);
+  // Allocate Groceries first (weighted by discretionary)
+  const [groP1, groP2] = proportionalAlloc(
+    groceriesAmt,
+    discretionaryP1,
+    discretionaryP2
+  );
+
+  // Recompute discretionary *after* groceries, to split savings/investing
+  const discretionaryAfterGroP1 = Math.max(0, discretionaryP1 - groP1);
+  const discretionaryAfterGroP2 = Math.max(0, discretionaryP2 - groP2);
+
+  // Allocate savings/investing using the post-groceries discretionary
+  const [saveP1, saveP2] = proportionalAlloc(
+    savingsAmt,
+    discretionaryAfterGroP1,
+    discretionaryAfterGroP2
+  );
+  const [investP1, investP2] = proportionalAlloc(
+    investingAmt,
+    discretionaryAfterGroP1,
+    discretionaryAfterGroP2
+  );
+
+  function proportionalAlloc(
+    target: number,
+    d1: number,
+    d2: number
+  ): [number, number] {
+    const total = d1 + d2;
+    if (total <= 0) return [0, 0];
+    const p1 = Math.round((target * d1) / total);
+    const p2 = target - p1;
+    return [p1, p2];
+  }
 
   const availableP1 = +(
     (incomeP1 || 0) -
     (totalBillsP1 || 0) -
-    (savingsP1 || 0) -
+    (groP1 || 0) -
+    (saveP1 || 0) -
     (investP1 || 0)
   ).toFixed(2);
 
   const availableP2 = +(
     (incomeP2 || 0) -
     (totalBillsP2 || 0) -
-    (savingsP2 || 0) -
+    (groP2 || 0) -
+    (saveP2 || 0) -
     (investP2 || 0)
   ).toFixed(2);
 
-  // Labeling based on deposit count
+  const availableToSpend = React.useMemo(() => {
+    const left =
+      totalIncome -
+      totalBills -
+      (groceriesAmt || 0) -
+      (savingsAmt || 0) -
+      (investingAmt || 0);
+    return +left.toFixed(2);
+  }, [totalIncome, totalBills, groceriesAmt, savingsAmt, investingAmt]);
+
+  // Labels for periods
   const depositDays = React.useMemo(
     () =>
       deposits
@@ -489,7 +641,8 @@ export default function BudgetPage() {
     ? `Paycheck 2 (day ${depositDays[1]})`
     : `Pay Period 2 (16–${daysInMonth})`;
 
-  // Calendar mapping for bill highlights
+  /* ----------------- Calendar maps: bills & deposits ---------------- */
+
   const billDays = React.useMemo(() => {
     const map = new Map<
       number,
@@ -513,30 +666,46 @@ export default function BudgetPage() {
     return map;
   }, [bills]);
 
+  const depositDaysMap = React.useMemo(() => {
+    const map = new Map<
+      number,
+      { total: number; items: Array<{ label: string; amount: number }> }
+    >();
+    for (const d of deposits) {
+      const day = normalizeDateToDay(d.date);
+      if (!day) continue;
+      const amt = Number(d.amount ?? 0);
+      const entry = map.get(day) || { total: 0, items: [] };
+      entry.total += amt;
+      entry.items.push({ label: pretty(d.description), amount: amt });
+      map.set(day, entry);
+    }
+    return map;
+  }, [deposits]);
+
   /* --------------------- Day Reconcile dialog state ---------------------- */
 
   const [openDay, setOpenDay] = React.useState<number | null>(null);
-  const [openCatMgr, setOpenCatMgr] = React.useState(false); // optional quick access
+  const CategoryManagerDialog =
+    require("@/components/CategoryManagerDialog").default;
 
-  // All transactions for the selected day (both deposits & withdrawals)
-  const dayTxs = React.useMemo(() => {
+  // Recompute applied rows for dialog after edits
+  const [rowsShadow, setRowsShadow] = React.useState<TxRow[] | null>(null);
+  const effectiveRows = rowsShadow ?? rows;
+
+  const dayTxsEffective = React.useMemo(() => {
     if (!openDay) return [];
-    return rows
+    return effectiveRows
       .filter((r) => normalizeDateToDay(r.date) === openDay)
       .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
-  }, [openDay, rows]);
+  }, [openDay, effectiveRows]);
 
-  // Re-apply rules + refresh everything after a change
   const refreshAfterChange = React.useCallback(() => {
-    // We can force a re-run by triggering a noop state update via overrides+rules read
-    // An easy pattern: rebuild 'rows' locally from current rows using latest rules
     const idx = readIndex();
-    // find the statement we already chose by label
     const picked = Object.values(idx).find(
       (s: any) => s?.label === stmtLabel
     ) as any;
     if (!picked || !Array.isArray(picked.cachedTx)) return;
-
     const rules = readCatRules();
     const prepared: TxLike[] = picked.cachedTx.map(ensureTxLike);
     const applied = applyCategoryRulesTo(
@@ -544,7 +713,6 @@ export default function BudgetPage() {
       prepared,
       applyAlias
     ) as TxLike[];
-
     const updated: TxRow[] = applied.map((r) => ({
       id: r.id,
       date: r.date,
@@ -555,23 +723,8 @@ export default function BudgetPage() {
       cardLast4: r.cardLast4,
       user: r.user,
     }));
-
-    // Replace local computed arrays by replacing the 'rows' reference.
-    // Using a local state wrapper avoids prop-drilling; simplest is a small state bump:
     setRowsShadow(updated);
   }, [stmtLabel]);
-
-  const [rowsShadow, setRowsShadow] = React.useState<TxRow[] | null>(null);
-  const effectiveRows = rowsShadow ?? rows;
-
-  // NOTE: below we keep using 'rows' derived arrays (deposits/withdrawals/bills...)
-  // but for the dialog listing we use 'effectiveRows' to reflect immediate changes.
-  const dayTxsEffective = React.useMemo(() => {
-    if (!openDay) return [];
-    return effectiveRows
-      .filter((r) => normalizeDateToDay(r.date) === openDay)
-      .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
-  }, [openDay, effectiveRows]);
 
   /* ------------------------------------------------------------------ */
   /* Render                                                              */
@@ -593,64 +746,119 @@ export default function BudgetPage() {
             </span>
           )}
           <div className="ml-auto text-sm text-slate-300">
-            Savings and investing are configurable targets for this budget.
+            Savings & investing are monthly targets; allocation across pay
+            periods is weighted by leftover cash after bills.
           </div>
         </div>
 
         {/* Key numbers */}
-        <div className="grid md:grid-cols-4 gap-3">
-          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
-            <div className="text-xs text-slate-400">Income (statement)</div>
-            <div className="mt-1 text-2xl font-semibold">
-              {money(totalIncome)}
-            </div>
-          </div>
-          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
-            <div className="text-xs text-slate-400">Mandatory Bills</div>
-            <div className="mt-1 text-2xl font-semibold text-rose-300">
-              -{money(totalBills)}
-            </div>
-          </div>
-          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
-            <div className="text-xs text-slate-400">Savings Target</div>
-            <div className="mt-1 text-2xl font-semibold text-emerald-300">
-              -{money(Math.max(0, Math.round((totalIncome * savePct) / 100)))}
-            </div>
-            <div className="mt-3">
-              <input
-                type="range"
-                min={0}
-                max={50}
-                value={savePct}
-                onChange={(e) => setSavePct(Number(e.target.value))}
-                className="w-full"
-              />
-              <div className="flex justify-between text-xs text-slate-400 mt-1">
-                <span>0%</span>
-                <span>{savePct}%</span>
-                <span>50%</span>
+        <div className="grid md:grid-cols-5 gap-3">
+          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4 flex flex-col">
+            <h3 className="font-semibold mb-2 text-left">Income</h3>
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-2xl font-semibold text-emerald-400">
+                {money(totalIncome)}
               </div>
             </div>
           </div>
-          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
-            <div className="text-xs text-slate-400">Investing Target</div>
-            <div className="mt-1 text-2xl font-semibold text-emerald-300">
-              -{money(Math.max(0, Math.round((totalIncome * investPct) / 100)))}
-            </div>
-            <div className="mt-3">
-              <input
-                type="range"
-                min={0}
-                max={50}
-                value={investPct}
-                onChange={(e) => setInvestPct(Number(e.target.value))}
-                className="w-full"
-              />
-              <div className="flex justify-between text-xs text-slate-400 mt-1">
-                <span>0%</span>
-                <span>{investPct}%</span>
-                <span>50%</span>
+
+          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4 flex flex-col">
+            <h3 className="font-semibold mb-2 text-left">Mandatory Bills</h3>
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-2xl font-semibold text-rose-400">
+                -{money(totalBills)}
               </div>
+            </div>
+          </div>
+
+          {/* Groceries Target */}
+          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="font-semibold">Groceries Target</h3>
+              <span className="text-sm">{groPct}%</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={30}
+              value={groPct}
+              onChange={(e) => setGroPct(Number(e.target.value))}
+              className="w-full accent-amber-500"
+            />
+            <div className="mt-1 text-sm text-slate-300">
+              {money(groceriesAmt)} (target from slider)
+            </div>
+
+            {/* Actuals vs Target */}
+            <div className="mt-3 text-xs text-slate-400">
+              Actual: {money(actualGroceries)} ({groPctHit}%)
+              {groRemaining > 0 && <> · Remaining: {money(groRemaining)}</>}
+            </div>
+            <div className="mt-2 h-2 w-full rounded bg-slate-800 overflow-hidden">
+              <div
+                className="h-full bg-amber-500 transition-all"
+                style={{ width: `${Math.min(100, groPctHit)}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Savings Target */}
+          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="font-semibold">Savings Target</h3>
+              <span className="text-sm">{savePct}%</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={50}
+              value={savePct}
+              onChange={(e) => setSavePct(Number(e.target.value))}
+              className="w-full accent-emerald-500"
+            />
+            <div className="mt-1 text-sm text-slate-300">
+              {money(savingsAmt)} (target from slider)
+            </div>
+            <div className="mt-3 text-xs text-slate-400">
+              Actual: {money(actualSavings)} ({savePctHit}%)
+              {saveRemaining > 0 && <> · Remaining: {money(saveRemaining)}</>}
+            </div>
+            <div className="mt-2 h-2 w-full rounded bg-slate-800 overflow-hidden">
+              <div
+                className="h-full bg-emerald-500 transition-all"
+                style={{ width: `${Math.min(100, savePctHit)}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Investing Target */}
+          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="font-semibold">Investing Target</h3>
+              <span className="text-sm">{investPct}%</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={50}
+              value={investPct}
+              onChange={(e) => setInvestPct(Number(e.target.value))}
+              className="w-full accent-indigo-500"
+            />
+            <div className="mt-1 text-sm text-slate-300">
+              {money(investingAmt)} (target from slider)
+            </div>
+            <div className="mt-3 text-xs text-slate-400">
+              Actual: {money(actualInvesting)} ({investPctHit}%)
+              {investRemaining > 0 && (
+                <> · Remaining: {money(investRemaining)}</>
+              )}
+            </div>
+            <div className="mt-2 h-2 w-full rounded bg-slate-800 overflow-hidden">
+              <div
+                className="h-full bg-indigo-500 transition-all"
+                style={{ width: `${Math.min(100, investPctHit)}%` }}
+              />
             </div>
           </div>
         </div>
@@ -658,23 +866,20 @@ export default function BudgetPage() {
         {/* Available to Spend — split view */}
         <div className="grid md:grid-cols-2 gap-3">
           {/* Left: Total */}
-          <div className="rounded-2xl border border-emerald-600/60 bg-emerald-900/10 p-5">
-            <div className="text-sm text-emerald-300">
-              Available to Spend (Month)
+          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4 flex flex-col">
+            <h3 className="font-semibold mb-2 text-left">Available to Spend</h3>
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-4xl font-semibold text-cyan-400">
+                {money(availableToSpend)}
+              </div>
             </div>
-            <div
-              className={`mt-1 text-3xl font-extrabold ${
-                availableToSpend >= 0 ? "text-emerald-300" : "text-rose-300"
-              }`}
-            >
-              {money(availableToSpend)}
-            </div>
+
             <div className="mt-2 text-xs text-slate-400">
               Income − Bills − Savings − Investing
             </div>
           </div>
 
-          {/* Right: Per Paycheck / Period */}
+          {/* Right: Per Paycheck / Period (weighted targets) */}
           <div className="rounded-2xl border border-violet-600/60 bg-violet-900/10 p-5">
             <div className="text-sm text-violet-200">
               Available to Spend (Per Paycheck)
@@ -683,11 +888,7 @@ export default function BudgetPage() {
             <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
               {/* Period 1 */}
               <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-3">
-                <div className="text-xs text-slate-400">
-                  {depositDays.length === 2
-                    ? `Paycheck 1 (day ${depositDays[0]})`
-                    : "Pay Period 1 (1–15)"}
-                </div>
+                <div className="text-xs text-slate-400">{labelP1}</div>
                 <div
                   className={`mt-1 text-xl font-bold ${
                     availableP1 >= 0 ? "text-emerald-300" : "text-rose-300"
@@ -698,18 +899,14 @@ export default function BudgetPage() {
                 <div className="mt-2 text-[11px] text-slate-400 space-y-0.5">
                   <div>Income: {money(incomeP1)}</div>
                   <div>Bills: -{money(totalBillsP1)}</div>
-                  <div>Savings: -{money(savingsP1)}</div>
+                  <div>Savings: -{money(saveP1)}</div>
                   <div>Investing: -{money(investP1)}</div>
                 </div>
               </div>
 
               {/* Period 2 */}
               <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-3">
-                <div className="text-xs text-slate-400">
-                  {depositDays.length === 2
-                    ? `Paycheck 2 (day ${depositDays[1]})`
-                    : `Pay Period 2 (16–${daysInMonth})`}
-                </div>
+                <div className="text-xs text-slate-400">{labelP2}</div>
                 <div
                   className={`mt-1 text-xl font-bold ${
                     availableP2 >= 0 ? "text-emerald-300" : "text-rose-300"
@@ -720,126 +917,16 @@ export default function BudgetPage() {
                 <div className="mt-2 text-[11px] text-slate-400 space-y-0.5">
                   <div>Income: {money(incomeP2)}</div>
                   <div>Bills: -{money(totalBillsP2)}</div>
-                  <div>Savings: -{money(savingsP2)}</div>
+                  <div>Savings: -{money(saveP2)}</div>
                   <div>Investing: -{money(investP2)}</div>
                 </div>
               </div>
             </div>
 
             <div className="mt-3 text-xs text-slate-400">
-              Periods are split by calendar days (1–15, 16–{daysInMonth}). If
-              exactly two deposits were found, they’re labeled as Paycheck 1/2.
+              Targets are weighted by each period’s discretionary share (income
+              − bills), keeping monthly goals intact while avoiding negatives.
             </div>
-          </div>
-        </div>
-
-        {/* Bill Calendar (current month) */}
-        <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
-          <div className="flex items-center justify-between">
-            <h3 className="font-semibold">
-              Bill Calendar —{" "}
-              {today.toLocaleString(undefined, {
-                month: "long",
-                year: "numeric",
-              })}
-            </h3>
-            <button
-              onClick={() => setOpenCatMgr(true)}
-              className="text-xs rounded-lg px-3 py-1 border border-slate-700 hover:bg-slate-800"
-              title="Edit Categories"
-            >
-              Edit Categories…
-            </button>
-          </div>
-
-          <div className="grid grid-cols-7 text-xs text-slate-400 mb-2">
-            {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
-              <div key={d} className="px-2 py-1">
-                {d}
-              </div>
-            ))}
-          </div>
-
-          <div className="grid grid-cols-7 gap-1">
-            {/* empty slots before 1st */}
-            {Array.from({ length: startWeekday }).map((_, i) => (
-              <div
-                key={`sp-${i}`}
-                className="h-20 rounded-lg border border-slate-800 bg-slate-950"
-              />
-            ))}
-            {/* days */}
-            {Array.from({ length: daysInMonth }).map((_, i) => {
-              const day = i + 1;
-              const hits = billDays.get(day) || [];
-              const hasBills = hits.length > 0;
-              const isP1 = day <= 15;
-              const dayTotal = hits.reduce((s, h) => s + (h.amount || 0), 0);
-
-              return (
-                <button
-                  key={day}
-                  onClick={() => setOpenDay(day)}
-                  className={`relative h-20 rounded-lg border p-2 overflow-hidden text-left ${
-                    hasBills
-                      ? isP1
-                        ? "border-violet-500/60 bg-violet-900/20"
-                        : "border-indigo-500/60 bg-indigo-900/20"
-                      : "border-slate-800 bg-slate-950"
-                  } hover:ring-2 hover:ring-cyan-500/50`}
-                  title={
-                    hasBills
-                      ? `Bills on ${day}: ${hits
-                          .map((h) => `${h.label} (${money(h.amount)})`)
-                          .join(", ")} • Total ${money(dayTotal)}`
-                      : `No bills on ${day}`
-                  }
-                >
-                  {/* Day number */}
-                  <div
-                    className={`text-[11px] ${
-                      hasBills ? "text-white" : "text-slate-400"
-                    }`}
-                  >
-                    {day.toString().padStart(2, "0")}
-                  </div>
-
-                  {/* List a couple of items */}
-                  {hasBills && (
-                    <div className="mt-1 space-y-0.5 pr-12">
-                      {hits.slice(0, 2).map((h, idx) => (
-                        <div key={idx} className="truncate text-[11px]">
-                          • {h.label}:{" "}
-                          <span className="text-rose-300">
-                            -{money(h.amount)}
-                          </span>
-                        </div>
-                      ))}
-                      {hits.length > 2 && (
-                        <div className="text-[11px] text-slate-300">
-                          +{hits.length - 2} more…
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Daily total badge (top-right) */}
-                  {hasBills && (
-                    <div
-                      className="absolute top-1 right-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium
-                        bg-rose-900/30 border border-rose-500/50 text-rose-200"
-                    >
-                      -{money(dayTotal)}
-                    </div>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="text-xs text-slate-400 mt-2">
-            Click any day to reconcile transactions (re-categorize or
-            include/exclude from the bill calendar).
           </div>
         </div>
 
@@ -878,150 +965,368 @@ export default function BudgetPage() {
             </ul>
           )}
         </div>
+
+        {/* Bill Calendar (current month) */}
+        <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
+          <div className="flex items-center justify-between">
+            <h3 className="font-semibold">
+              Bill Calendar —{" "}
+              {today.toLocaleString(undefined, {
+                month: "long",
+                year: "numeric",
+              })}
+            </h3>
+            <button
+              onClick={() =>
+                (
+                  document.getElementById("budget-cat-mgr-trigger") as any
+                )?.click?.()
+              }
+              className="text-xs rounded-lg px-3 py-1 border border-slate-700 hover:bg-slate-800"
+              title="Edit Categories"
+            >
+              Edit Categories…
+            </button>
+          </div>
+
+          <div className="grid grid-cols-7 text-xs text-slate-400 mb-2">
+            {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
+              <div key={d} className="px-2 py-1">
+                {d}
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-7 gap-1">
+            {Array.from({ length: startWeekday }).map((_, i) => (
+              <div
+                key={`sp-${i}`}
+                className="h-20 rounded-lg border border-slate-800 bg-slate-950"
+              />
+            ))}
+            {Array.from({ length: daysInMonth }).map((_, i) => {
+              const day = i + 1;
+              const hits = billDays.get(day) || [];
+              const hasBills = hits.length > 0;
+              const isP1 = day <= 15;
+              const dayBillsTotal = hits.reduce(
+                (s, h) => s + (h.amount || 0),
+                0
+              );
+
+              const dep = depositDaysMap.get(day);
+              const hasDeposit = !!dep;
+              const dayDepositTotal = dep?.total ?? 0;
+
+              const baseClass = hasBills
+                ? isP1
+                  ? "border-violet-500/60 bg-violet-900/20"
+                  : "border-indigo-500/60 bg-indigo-900/20"
+                : "border-slate-800 bg-slate-950";
+
+              return (
+                <button
+                  key={day}
+                  onClick={() => setOpenDay(day)}
+                  className={`relative h-20 rounded-lg border p-2 overflow-hidden text-left ${baseClass}
+                    ${
+                      hasDeposit ? "ring-1 ring-emerald-500/40" : ""
+                    } hover:ring-2 hover:ring-cyan-500/50`}
+                  title={[
+                    hasBills
+                      ? `Bills: ${hits
+                          .map((h) => `${h.label} (${money(h.amount)})`)
+                          .join(", ")} • Total ${money(dayBillsTotal)}`
+                      : "No bills",
+                    hasDeposit
+                      ? `Deposits: ${dep!.items
+                          .map((x) => `${x.label} (+${money(x.amount)})`)
+                          .join(", ")} • Total +${money(dayDepositTotal)}`
+                      : "No deposits",
+                  ].join(" | ")}
+                >
+                  {/* Day number */}
+                  <div
+                    className={`text-[11px] ${
+                      hasBills ? "text-white" : "text-slate-400"
+                    }`}
+                  >
+                    {day.toString().padStart(2, "0")}
+                  </div>
+
+                  {/* Bill items preview */}
+                  {hasBills && (
+                    <div className="mt-1 space-y-0.5 pr-14">
+                      {hits.slice(0, 2).map((h, idx) => (
+                        <div key={idx} className="truncate text-[11px]">
+                          • {h.label}:{" "}
+                          <span className="text-rose-300">
+                            -{money(h.amount)}
+                          </span>
+                        </div>
+                      ))}
+                      {hits.length > 2 && (
+                        <div className="text-[11px] text-slate-300">
+                          +{hits.length - 2} more…
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Bill total badge (top-right) */}
+                  {hasBills && (
+                    <div
+                      className="absolute top-1 right-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium
+                        bg-rose-900/30 border border-rose-500/50 text-rose-200"
+                    >
+                      -{money(dayBillsTotal)}
+                    </div>
+                  )}
+
+                  {/* Deposit (payday) total badge (bottom-right) */}
+                  {hasDeposit && (
+                    <div
+                      className="absolute bottom-1 right-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium
+                        bg-emerald-900/30 border border-emerald-500/50 text-emerald-200"
+                    >
+                      +{money(dayDepositTotal)}
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-block h-3 w-3 rounded border border-rose-500/50 bg-rose-900/30" />{" "}
+              Bill total
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-block h-3 w-3 rounded border border-emerald-500/50 bg-emerald-900/30" />{" "}
+              Deposit (payday) total
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-block h-3 w-3 rounded ring-1 ring-emerald-500/40" />{" "}
+              Payday highlight
+            </span>
+          </div>
+        </div>
       </div>
 
-      {/* Categories manager quick access */}
+      {/* Hidden trigger to open category manager from calendar button */}
+      <button
+        id="budget-cat-mgr-trigger"
+        onClick={() => {}}
+        className="hidden"
+      />
       <CategoryManagerDialog
-        open={openCatMgr}
-        onClose={() => setOpenCatMgr(false)}
+        open={false}
+        onClose={() => {}}
+        // The visible "Edit Categories…" button above uses the hidden trigger
       />
 
       {/* Day Reconcile Dialog */}
-      {openDay && (
-        <div className="fixed inset-0 z-50 grid place-items-center p-4">
-          <div
-            className="absolute inset-0 bg-black/70"
-            onClick={() => setOpenDay(null)}
-          />
-          <div className="relative w-full max-w-3xl rounded-2xl border border-slate-700 bg-slate-900 shadow-xl overflow-hidden">
-            {/* Header */}
-            <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
-              <h4 className="text-lg font-semibold">
-                Reconcile — Day {String(openDay).padStart(2, "0")}
-              </h4>
-              <button
+      {openDay &&
+        (() => {
+          const selectedHits = billDays.get(openDay) || [];
+          const selectedTotal = selectedHits.reduce(
+            (s, h) => s + (h.amount || 0),
+            0
+          );
+          return (
+            <div className="fixed inset-0 z-50 grid place-items-center p-4">
+              <div
+                className="absolute inset-0 bg-black/70"
                 onClick={() => setOpenDay(null)}
-                className="rounded-md border border-slate-700 px-3 py-1 text-sm hover:bg-slate-800"
-              >
-                Close
-              </button>
-            </div>
-
-            {/* Scrollable body */}
-            <div className="p-5 overflow-y-auto max-h-[70vh]">
-              {dayTxsEffective.length === 0 ? (
-                <div className="text-sm text-slate-400">
-                  No transactions on this day.
+              />
+              <div className="relative w-full max-w-3xl rounded-2xl border border-slate-700 bg-slate-900 shadow-xl overflow-hidden">
+                {/* Header */}
+                <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+                  <h4 className="text-lg font-semibold">
+                    Reconcile — Day {String(openDay).padStart(2, "0")}
+                    {selectedHits.length > 0 && (
+                      <span className="ml-3 text-sm font-medium text-rose-300">
+                        Total: -{money(selectedTotal)}
+                      </span>
+                    )}
+                  </h4>
+                  <button
+                    onClick={() => setOpenDay(null)}
+                    className="rounded-md border border-slate-700 px-3 py-1 text-sm hover:bg-slate-800"
+                  >
+                    Close
+                  </button>
                 </div>
-              ) : (
-                <table className="w-full text-sm">
-                  <thead className="bg-slate-800/60 sticky top-0 z-10">
-                    <tr>
-                      <th className="text-left p-2">Description</th>
-                      <th className="text-left p-2">Category</th>
-                      <th className="text-left p-2">Bill?</th>
-                      <th className="text-right p-2">Amount</th>
-                      <th className="text-right p-2">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {dayTxsEffective.map((t) => {
-                      const currentCat = (
-                        t.categoryOverride ??
-                        t.category ??
-                        "Uncategorized"
-                      ).trim();
-                      const k = keyForTx(
-                        t.date || "",
-                        t.description || "",
-                        t.amount ?? 0
-                      );
-                      const includeByOverride = billOverrides[t.id];
-                      const inferred = isMandatoryCategory(currentCat);
-                      const billChecked =
-                        includeByOverride === true
-                          ? true
-                          : includeByOverride === false
-                          ? false
-                          : inferred;
 
-                      return (
-                        <tr key={t.id} className="border-t border-slate-800">
-                          <td className="p-2">
-                            <div className="font-medium">
-                              {pretty(t.description)}
-                            </div>
-                            <div className="text-[11px] text-slate-400">
-                              {t.date}
-                            </div>
-                          </td>
-                          <td className="p-2">
-                            <CategorySelect
-                              value={currentCat}
-                              onChange={(val) => {
-                                writeOverride(k, val);
-                                const aliasLabel = applyAlias(
-                                  (t.description || "").trim()
-                                );
-                                const keys = candidateKeys(
-                                  t.description || "",
-                                  aliasLabel
-                                );
-                                upsertCategoryRules(keys, val);
-                                refreshAfterChange();
-                              }}
-                            />
-                          </td>
-                          <td className="p-2">
-                            <label className="inline-flex items-center gap-2 text-xs">
-                              <input
-                                type="checkbox"
-                                checked={!!billChecked}
-                                onChange={(e) => {
-                                  setBillOverrides((m) => ({
-                                    ...m,
-                                    [t.id]: e.target.checked,
-                                  }));
-                                }}
-                              />
-                              Include in bill calendar
-                            </label>
-                          </td>
-                          <td className="p-2 text-right">
-                            <span
-                              className={
-                                t.amount < 0
-                                  ? "text-rose-300"
-                                  : "text-emerald-300"
-                              }
-                            >
-                              {money(Math.abs(t.amount))}
-                            </span>
-                          </td>
-                          <td className="p-2 text-right">
-                            <button
-                              onClick={() => setOpenCatMgr(true)}
-                              className="text-xs rounded-lg px-2 py-1 border border-slate-700 hover:bg-slate-800"
-                            >
-                              Edit categories…
-                            </button>
-                          </td>
+                {/* Scrollable body */}
+                <div className="p-5 overflow-y-auto max-h-[70vh]">
+                  {dayTxsEffective.length === 0 ? (
+                    <div className="text-sm text-slate-400">
+                      No transactions on this day.
+                    </div>
+                  ) : (
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-800/60 sticky top-0 z-10">
+                        <tr>
+                          <th className="text-left p-2">Description</th>
+                          <th className="text-left p-2">Category</th>
+                          <th className="text-left p-2">Bill?</th>
+                          <th className="text-right p-2">Amount</th>
+                          <th className="text-right p-2">Actions</th>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              )}
-            </div>
+                      </thead>
+                      <tbody>
+                        {dayTxsEffective.map((t) => {
+                          const currentCat = (
+                            t.categoryOverride ??
+                            t.category ??
+                            "Uncategorized"
+                          ).trim();
+                          const k = keyForTx(
+                            t.date || "",
+                            t.description || "",
+                            t.amount ?? 0
+                          );
+                          const includeByOverride = billOverrides[t.id];
+                          const inferred = isMandatoryCategory(
+                            currentCat,
+                            t.description
+                          );
+                          const billChecked =
+                            includeByOverride === true
+                              ? true
+                              : includeByOverride === false
+                              ? false
+                              : inferred;
 
-            {/* Footer */}
-            <div className="px-5 py-3 border-t border-slate-800 text-xs text-slate-400">
-              Tip: Re-categorizing will also seed a simple rule so future
-              imports categorize automatically.
+                          return (
+                            <tr
+                              key={t.id}
+                              className="border-t border-slate-800"
+                            >
+                              <td className="p-2">
+                                <div className="font-medium">
+                                  {pretty(t.description)}
+                                </div>
+                                <div className="text-[11px] text-slate-400">
+                                  {t.date}
+                                </div>
+                              </td>
+                              <td className="p-2">
+                                <CategorySelect
+                                  value={currentCat}
+                                  onChange={(val) => {
+                                    writeOverride(k, val);
+                                    const aliasLabel = applyAlias(
+                                      (t.description || "").trim()
+                                    );
+                                    const keys = candidateKeys(
+                                      t.description || "",
+                                      aliasLabel
+                                    );
+                                    upsertCategoryRules(keys, val);
+                                    refreshAfterChange();
+                                  }}
+                                />
+                              </td>
+                              <td className="p-2">
+                                <label className="inline-flex items-center gap-2 text-xs">
+                                  <input
+                                    type="checkbox"
+                                    checked={!!billChecked}
+                                    onChange={(e) => {
+                                      setBillOverrides((m) => ({
+                                        ...m,
+                                        [t.id]: e.target.checked,
+                                      }));
+                                    }}
+                                  />
+                                  Include in bill calendar
+                                </label>
+                              </td>
+                              <td className="p-2 text-right">
+                                <span
+                                  className={
+                                    t.amount < 0
+                                      ? "text-rose-300"
+                                      : "text-emerald-300"
+                                  }
+                                >
+                                  {money(Math.abs(t.amount))}
+                                </span>
+                              </td>
+                              <td className="p-2 text-right space-x-2">
+                                <button
+                                  onClick={() => {
+                                    const newCat = "Transfer:Savings";
+                                    writeOverride(k, newCat);
+                                    const aliasLabel = applyAlias(
+                                      (t.description || "").trim()
+                                    );
+                                    const keys = candidateKeys(
+                                      t.description || "",
+                                      aliasLabel
+                                    );
+                                    upsertCategoryRules(keys, newCat);
+                                    refreshAfterChange();
+                                  }}
+                                  className="text-xs rounded-lg px-2 py-1 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-900/20"
+                                  title="Count this toward your Savings target"
+                                >
+                                  Mark Savings
+                                </button>
+
+                                <button
+                                  onClick={() => {
+                                    const newCat = "Transfer:Investing";
+                                    writeOverride(k, newCat);
+                                    const aliasLabel = applyAlias(
+                                      (t.description || "").trim()
+                                    );
+                                    const keys = candidateKeys(
+                                      t.description || "",
+                                      aliasLabel
+                                    );
+                                    upsertCategoryRules(keys, newCat);
+                                    refreshAfterChange();
+                                  }}
+                                  className="text-xs rounded-lg px-2 py-1 border border-indigo-500/50 text-indigo-300 hover:bg-indigo-900/20"
+                                  title="Count this toward your Investing target"
+                                >
+                                  Mark Investing
+                                </button>
+
+                                <button
+                                  onClick={() =>
+                                    (
+                                      document.getElementById(
+                                        "budget-cat-mgr-trigger"
+                                      ) as any
+                                    )?.click?.()
+                                  }
+                                  className="text-xs rounded-lg px-2 py-1 border border-slate-700 hover:bg-slate-800"
+                                >
+                                  Edit categories…
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+
+                {/* Footer */}
+                <div className="px-5 py-3 border-t border-slate-800 text-xs text-slate-400">
+                  Tip: Re-categorizing will also seed a simple rule so future
+                  imports categorize automatically.
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          );
+        })()}
     </ProtectedRoute>
   );
 }
