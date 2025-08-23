@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { LogOut, LineChart, Menu, X, User as UserIcon } from "lucide-react";
 import { useAuth } from "@/app/providers/AuthProvider";
-// <- adjust if different
+import { NAV_LINKS } from "@/lib/nav";
 
 // Helper: active link style
 function NavLink({
@@ -44,7 +44,7 @@ export default function Navbar() {
     let lastY = window.scrollY;
     const onScroll = () => {
       const y = window.scrollY;
-      setHidden(y > lastY && y > 8); // downwards after a tiny threshold
+      setHidden(y > lastY && y > 8);
       lastY = y;
     };
     window.addEventListener("scroll", onScroll, { passive: true });
@@ -56,23 +56,24 @@ export default function Navbar() {
     setOpen(false);
   }, [pathname]);
 
-  const protectedLinks = [
-    { href: "/dashboard", label: "Dashboard" },
-    { href: "/reconciler", label: "Reconciler" },
-    { href: "/dashboard/category", label: "Categories" },
-  ];
-  const publicLinks = [{ href: "/demo", label: "Demo" }];
+  // Resolve which links to show based on auth
+  const visibleLinks = React.useMemo(
+    () => NAV_LINKS.filter((l) => (l.requiresAuth ? !!user : true)),
+    [user]
+  );
+
+  const isActive = (href: string) =>
+    href === "/" ? pathname === "/" : pathname?.startsWith(href);
 
   return (
     <>
       {/* Top bar */}
       <nav
-        className={`fixed top-0 left-0 right-0 z-40 transition-transform duration-200
-          ${hidden ? "-translate-y-full" : "translate-y-0"}`}
+        className={`fixed top-0 left-0 right-0 z-40 transition-transform duration-200 ${
+          hidden ? "-translate-y-full" : "translate-y-0"
+        }`}
       >
-        {/* full-width background */}
         <div className="w-full bg-gray-950/80 backdrop-blur border-b border-gray-800">
-          {/* content container */}
           <div className="mx-auto max-w-6xl h-14 px-4 flex items-center justify-between">
             {/* Brand */}
             <Link href="/" className="flex items-center gap-2 group">
@@ -89,18 +90,8 @@ export default function Navbar() {
 
             {/* Desktop nav */}
             <div className="hidden md:flex items-center gap-1">
-              {user &&
-                protectedLinks.map(({ href, label }) => (
-                  <NavLink
-                    key={href}
-                    href={href}
-                    active={pathname?.startsWith(href)}
-                  >
-                    {label}
-                  </NavLink>
-                ))}
-              {publicLinks.map(({ href, label }) => (
-                <NavLink key={href} href={href} active={pathname === href}>
+              {visibleLinks.map(({ href, label }) => (
+                <NavLink key={href} href={href} active={isActive(href)}>
                   {label}
                 </NavLink>
               ))}
@@ -150,16 +141,12 @@ export default function Navbar() {
       {/* Mobile sheet + overlay */}
       {open && (
         <>
-          {/* Dark overlay */}
           <div
             className="fixed inset-0 z-40 bg-black/70"
             onClick={() => setOpen(false)}
           />
-          {/* Full-height panel */}
           <div className="fixed top-0 left-0 right-0 z-50 h-screen w-full bg-gray-950/95 border-b border-gray-800 px-6 py-6">
-            {/* Close row */}
             <div className="flex items-center justify-between">
-              {/* Brand (again, per your request) */}
               <Link
                 href="/"
                 className="flex items-center gap-2"
@@ -181,25 +168,12 @@ export default function Navbar() {
               </button>
             </div>
 
-            {/* Links (right-aligned, comfy tap targets) */}
             <nav className="mt-8 flex flex-col items-end gap-4">
-              {user &&
-                protectedLinks.map(({ href, label }) => (
-                  <NavLink
-                    key={href}
-                    href={href}
-                    active={pathname?.startsWith(href)}
-                    onClick={() => setOpen(false)}
-                    className="text-lg px-4 py-2"
-                  >
-                    {label}
-                  </NavLink>
-                ))}
-              {publicLinks.map(({ href, label }) => (
+              {visibleLinks.map(({ href, label }) => (
                 <NavLink
                   key={href}
                   href={href}
-                  active={pathname === href}
+                  active={isActive(href)}
                   onClick={() => setOpen(false)}
                   className="text-lg px-4 py-2"
                 >
@@ -236,7 +210,7 @@ export default function Navbar() {
         </>
       )}
 
-      {/* Spacer so content isn't hidden under the fixed bar */}
+      {/* Spacer under fixed bar */}
       <div className="h-14" />
     </>
   );
