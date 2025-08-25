@@ -3,6 +3,7 @@ import ClientCategoryPage from "@/app/dashboard/category/[slug]/ClientCategoryPa
 import { DEMO_MONTHS } from "@/app/demo/data";
 import { catToSlug } from "@/lib/slug";
 import { groupLabelForCategory } from "@/lib/categoryGroups";
+import { Suspense } from "react";
 
 export const dynamicParams = false;
 
@@ -31,5 +32,13 @@ export function generateStaticParams() {
 }
 
 export default function Page() {
-  return <ClientCategoryPage />;
+  <Suspense
+    fallback={
+      <div className="mx-auto max-w-6xl p-6 text-sm text-slate-400">
+        Loading demo category slug
+      </div>
+    }
+  >
+    <ClientCategoryPage />
+  </Suspense>;
 }

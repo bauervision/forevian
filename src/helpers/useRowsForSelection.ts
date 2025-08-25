@@ -1,4 +1,4 @@
-// helpers/useRowsForSelection.ts (or inline in each page)
+// helpers/useRowsForSelection.ts
 import { readIndex, readCurrentId } from "@/lib/statements";
 import { readCatRules, applyCategoryRulesTo } from "@/lib/categoryRules";
 import { applyAlias } from "@/lib/aliases";
@@ -10,6 +10,21 @@ export function useRowsForSelection(
   selectedId: string,
   liveRows: any[]
 ) {
+  // 🔁 Recompute if storage changes (demo reseed, statement switch in another tab)
+  const [storageBump, setStorageBump] = React.useState(0);
+  React.useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (
+        e.key === "reconciler.statements.index.v2" ||
+        e.key === "reconciler.statements.current.v2"
+      ) {
+        setStorageBump((x) => x + 1);
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
   return React.useMemo(() => {
     const idx = readIndex();
     const selected = idx[selectedId];
@@ -17,7 +32,14 @@ export function useRowsForSelection(
 
     // CURRENT = only the chosen statement
     if (period === "CURRENT") {
-      if (selectedId === readCurrentId()) return liveRows; // currently edited month
+      const currentId = readCurrentId();
+      // If we’re looking at the "current" statement, prefer liveRows,
+      // but fall back to cachedTx when liveRows are empty (e.g., on dashboard/category pages).
+      if (selectedId === currentId) {
+        if (Array.isArray(liveRows) && liveRows.length > 0) return liveRows;
+        return Array.isArray(selected.cachedTx) ? selected.cachedTx : [];
+      }
+      // Viewing a non-current statement → use its cached snapshot
       return Array.isArray(selected.cachedTx) ? selected.cachedTx : [];
     }
 
@@ -28,10 +50,12 @@ export function useRowsForSelection(
       if (!s) continue;
       if (s.stmtYear !== selected.stmtYear) continue;
       if (s.stmtMonth > selected.stmtMonth) continue;
-      if (Array.isArray(s.cachedTx)) all.push(...s.cachedTx);
-      else if (selectedId === readCurrentId() && s.id === selectedId)
+      if (Array.isArray(s.cachedTx)) {
+        all.push(...s.cachedTx);
+      } else if (selectedId === readCurrentId() && s.id === selectedId) {
         all.push(...liveRows);
+      }
     }
     return applyCategoryRulesTo(rules, all, applyAlias) as typeof liveRows;
-  }, [period, selectedId, liveRows]);
+  }, [period, selectedId, liveRows, storageBump]);
 }

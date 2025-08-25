@@ -177,6 +177,18 @@ export default function ClientSpenderPage() {
 
   const selectedId: string = urlId ?? (mounted ? readCurrentId() : "") ?? "";
 
+  const { setInputs } = useReconcilerSelectors();
+  React.useEffect(() => {
+    if (!selectedId) return;
+    const s = readIndex()[selectedId];
+    if (!s) return;
+    setInputs({
+      beginningBalance: s.inputs?.beginningBalance ?? 0,
+      totalDeposits: s.inputs?.totalDeposits ?? 0,
+      totalWithdrawals: s.inputs?.totalWithdrawals ?? 0,
+    });
+  }, [selectedId, setInputs]);
+
   const [period, setPeriod] = React.useState<Period>("CURRENT");
 
   // Determine spender for each row using explicit user OR last4 mapping

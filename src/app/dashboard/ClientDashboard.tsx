@@ -161,6 +161,20 @@ export default function ClientDashboard() {
 
   const selectedId = urlStatement ?? readCurrentId() ?? options[0]?.id ?? "";
 
+  // make sure data is synced
+
+  const { setInputs } = useReconcilerSelectors();
+  React.useEffect(() => {
+    if (!selectedId) return;
+    const s = readIndex()[selectedId];
+    if (!s) return;
+    setInputs({
+      beginningBalance: s.inputs?.beginningBalance ?? 0,
+      totalDeposits: s.inputs?.totalDeposits ?? 0,
+      totalWithdrawals: s.inputs?.totalWithdrawals ?? 0,
+    });
+  }, [selectedId, setInputs]);
+
   const viewMeta = React.useMemo(() => {
     if (!selectedId) return undefined;
     const idx = readIndex();
@@ -372,7 +386,7 @@ export default function ClientDashboard() {
             <ul className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
               {topCats.map(([cat, amt]) => {
                 const accent = accentFor(cat);
-                const href = `/dashboard/category/${encodeURIComponent(
+                const href = `${base}/dashboard/category/${encodeURIComponent(
                   toSlug(cat)
                 )}${selectedId ? `?statement=${selectedId}` : ""}`;
                 return (

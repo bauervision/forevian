@@ -6,6 +6,7 @@ import React, {
   useEffect,
   useMemo,
   useState,
+  useCallback,
 } from "react";
 
 export type ReconcilerInputs = {
@@ -29,11 +30,16 @@ export type Transaction = {
   parseWarnings?: string[];
 };
 
+type SetInputs =
+  | ReconcilerInputs
+  | ((prev: ReconcilerInputs) => ReconcilerInputs);
+type SetTransactions = Transaction[] | ((prev: Transaction[]) => Transaction[]);
+
 type ReconcilerCtx = {
   transactions: Transaction[];
-  setTransactions: (rows: Transaction[]) => void;
+  setTransactions: (rows: SetTransactions) => void;
   inputs: ReconcilerInputs;
-  setInputs: (i: ReconcilerInputs) => void;
+  setInputs: (i: SetInputs) => void;
   clearAll: () => void;
 };
 
@@ -42,13 +48,42 @@ const Ctx = createContext<ReconcilerCtx | null>(null);
 const LS_TX = "reconciler.tx.v1";
 const LS_IN = "reconciler.inputs.v1";
 
+/* ------------ small equality helpers to avoid no-op updates ------------- */
+
+function shallowEqualInputs(a: ReconcilerInputs, b: ReconcilerInputs) {
+  const an = {
+    bb: a.beginningBalance ?? 0,
+    td: a.totalDeposits ?? 0,
+    tw: a.totalWithdrawals ?? 0,
+  };
+  const bn = {
+    bb: b.beginningBalance ?? 0,
+    td: b.totalDeposits ?? 0,
+    tw: b.totalWithdrawals ?? 0,
+  };
+  return an.bb === bn.bb && an.td === bn.td && an.tw === bn.tw;
+}
+
+function equalTxArrays(a: Transaction[], b: Transaction[]) {
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  // cheap pass: compare ids in order (works for our flows)
+  for (let i = 0; i < a.length; i++) {
+    if (a[i]?.id !== b[i]?.id) return false;
+  }
+  return true;
+}
+
+/* -------------------------------- provider ------------------------------- */
+
 export function ReconcilerProvider({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const [transactions, setTransactionsState] = useState<Transaction[]>([]);
-  const [inputs, setInputsState] = useState<ReconcilerInputs>({
+  const [transactions, _setTransactions] = useState<Transaction[]>([]);
+  const [inputs, _setInputs] = useState<ReconcilerInputs>({
     beginningBalance: 0,
     totalDeposits: 0,
     totalWithdrawals: 0,
@@ -60,8 +95,7 @@ export function ReconcilerProvider({
       const rawTx = localStorage.getItem(LS_TX);
       if (rawTx) {
         const parsed = JSON.parse(rawTx);
-        if (Array.isArray(parsed))
-          setTransactionsState(parsed as Transaction[]);
+        if (Array.isArray(parsed)) _setTransactions(parsed as Transaction[]);
       }
     } catch {}
     try {
@@ -69,12 +103,12 @@ export function ReconcilerProvider({
       if (rawIn) {
         const parsed = JSON.parse(rawIn);
         if (parsed && typeof parsed === "object")
-          setInputsState(parsed as ReconcilerInputs);
+          _setInputs(parsed as ReconcilerInputs);
       }
     } catch {}
   }, []);
 
-  // persist to localStorage
+  // persist to localStorage (only when primitives actually change)
   useEffect(() => {
     try {
       localStorage.setItem(LS_TX, JSON.stringify(transactions));
@@ -87,26 +121,46 @@ export function ReconcilerProvider({
     } catch {}
   }, [inputs]);
 
+  // stable, idempotent setters
+  const setInputs = useCallback((next: SetInputs) => {
+    _setInputs((prev) => {
+      const value = typeof next === "function" ? (next as any)(prev) : next;
+      return shallowEqualInputs(prev, value) ? prev : value;
+    });
+  }, []);
+
+  const setTransactions = useCallback((next: SetTransactions) => {
+    _setTransactions((prev) => {
+      const value = typeof next === "function" ? (next as any)(prev) : next;
+      return equalTxArrays(prev, value as Transaction[])
+        ? prev
+        : (value as Transaction[]);
+    });
+  }, []);
+
+  const clearAll = useCallback(() => {
+    _setTransactions([]);
+    _setInputs({
+      beginningBalance: 0,
+      totalDeposits: 0,
+      totalWithdrawals: 0,
+    });
+    try {
+      localStorage.removeItem(LS_TX);
+      localStorage.removeItem(LS_IN);
+    } catch {}
+  }, []);
+
+  // memoize context with stable function refs
   const api = useMemo<ReconcilerCtx>(
     () => ({
       transactions,
-      setTransactions: (rows) => setTransactionsState(rows),
+      setTransactions,
       inputs,
-      setInputs: (i) => setInputsState(i),
-      clearAll: () => {
-        setTransactionsState([]);
-        setInputsState({
-          beginningBalance: 0,
-          totalDeposits: 0,
-          totalWithdrawals: 0,
-        });
-        try {
-          localStorage.removeItem(LS_TX);
-          localStorage.removeItem(LS_IN);
-        } catch {}
-      },
+      setInputs,
+      clearAll,
     }),
-    [transactions, inputs]
+    [transactions, inputs, setTransactions, setInputs, clearAll]
   );
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;

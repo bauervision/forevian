@@ -42,8 +42,8 @@ function NavLink({
 
 /* Demo quick links shown only on /demo */
 const DEMO_LINKS = [
-  { href: "/demo/dashboard", label: "Dashboard" },
   { href: "/demo/reconciler", label: "Reconciler" },
+  { href: "/demo/dashboard", label: "Dashboard" },
   { href: "/demo/dashboard/category", label: "Categories" },
   { href: "/demo/budget", label: "Budget" },
   { href: "/demo/trend", label: "Trends" },
@@ -96,7 +96,7 @@ export default function Navbar() {
           <div className="mx-auto max-w-6xl h-14 px-4 flex items-center justify-between">
             {/* Brand */}
             <Link
-              href={isDemo ? "/demo/dashboard" : "/"}
+              href={isDemo ? "/demo" : "/"}
               className="flex items-center gap-2 group"
             >
               <div className="h-7 w-7 rounded-lg border border-cyan-500/40 bg-gradient-to-br from-cyan-600/20 to-cyan-400/5 grid place-items-center">
@@ -122,10 +122,13 @@ export default function Navbar() {
               {isDemo && (
                 <div className="flex items-center gap-1">
                   {/* Demo badge */}
-                  <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-500/20 text-amber-200 border border-amber-500/30 text-xs mr-1">
+                  <NavLink
+                    href="/demo"
+                    className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-500/20 text-amber-200 border border-amber-500/30 text-xs mr-1"
+                  >
                     <FlaskConical className="h-3.5 w-3.5" />
                     Demo
-                  </span>
+                  </NavLink>
                   {/* Demo quick links */}
                   {DEMO_LINKS.map(({ href, label }) => (
                     <NavLink key={href} href={href} active={isActive(href)}>
@@ -195,7 +198,7 @@ export default function Navbar() {
           <div className="fixed top-0 left-0 right-0 z-50 h-screen w-full bg-gray-950/95 border-b border-gray-800 px-6 py-6">
             <div className="flex items-center justify-between">
               <Link
-                href={isDemo ? "/demo/dashboard" : "/"}
+                href={isDemo ? "/demo" : "/"}
                 className="flex items-center gap-2"
                 onClick={() => setOpen(false)}
               >

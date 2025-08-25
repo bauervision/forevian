@@ -30,6 +30,9 @@ import { groupLabelForCategory } from "@/lib/categoryGroups";
 import { catToSlug } from "@/lib/slug";
 import ProtectedRoute from "@/components/ProtectedRoute";
 
+// NEW: pull in categories provider setters
+import { useCategories } from "@/app/providers/CategoriesProvider";
+
 /* ---------------------------- helpers & hooks ---------------------------- */
 
 function useIsDemo() {
@@ -213,7 +216,8 @@ export default function ClientCategories() {
   const isDemo = useIsDemo();
   const base = isDemo ? "/demo" : "";
 
-  const { transactions } = useReconcilerSelectors();
+  const { transactions, setInputs } = useReconcilerSelectors();
+  const { setAll, setCategories } = useCategories() as any; // NEW setters
   const options = useStatementOptions();
   const [openMgr, setOpenMgr] = React.useState(false);
 
@@ -229,9 +233,46 @@ export default function ClientCategories() {
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => setMounted(true), []);
 
+  // NEW: while in demo, derive categories from demo statements and push to provider
+  React.useEffect(() => {
+    if (!isDemo) return;
+
+    const idx = readIndex();
+    const names = new Set<string>();
+    for (const s of Object.values(idx) as any[]) {
+      const rows = Array.isArray(s?.cachedTx) ? s.cachedTx : [];
+      for (const r of rows) {
+        const c = (r.categoryOverride ?? r.category ?? "").trim();
+        if (c) names.add(c);
+      }
+    }
+    const list = Array.from(names)
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+    const i = list.findIndex((x) => x.toLowerCase() === "uncategorized");
+    if (i >= 0) {
+      const [u] = list.splice(i, 1);
+      list.push(u === "Uncategorized" ? u : "Uncategorized");
+    }
+    if (typeof setAll === "function") setAll(list);
+    else if (typeof setCategories === "function") setCategories(list);
+  }, [isDemo, options.length, setAll, setCategories]);
+
   const meta = currentStatementMeta();
   const savedId = mounted ? readCurrentId() : undefined;
   const selectedId: string = urlStatement ?? savedId ?? "";
+
+  React.useEffect(() => {
+    if (!selectedId) return;
+    const s = readIndex()[selectedId];
+    if (!s) return;
+    setInputs({
+      beginningBalance: s.inputs?.beginningBalance ?? 0,
+      totalDeposits: s.inputs?.totalDeposits ?? 0,
+      totalWithdrawals: s.inputs?.totalWithdrawals ?? 0,
+    });
+  }, [selectedId, setInputs]);
+
   const [period, setPeriod] = React.useState<Period>("CURRENT");
 
   const viewRows = useRowsForSelection(period, selectedId, transactions);
