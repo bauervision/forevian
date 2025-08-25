@@ -23,9 +23,24 @@ const LEGACY_CACHE = "reconciler.cache.v1";
 const LEGACY_TX = "reconciler.tx.v1";
 const LEGACY_IN = "reconciler.inputs.v1";
 
+const MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
 export function monthLabel(m: number) {
-  return new Date(2000, m - 1, 1).toLocaleString(undefined, { month: "long" });
+  return MONTHS[m - 1] ?? "";
 }
+
 export function makeId(y: number, m: number) {
   return `${y}-${String(m).padStart(2, "0")}`;
 }

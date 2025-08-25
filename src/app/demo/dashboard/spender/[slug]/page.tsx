@@ -1,6 +1,6 @@
 // app/dashboard/spender/[slug]/page.tsx
+import ClientSpenderPage from "@/app/dashboard/spender/[slug]/ClientSpenderPage";
 import { Suspense } from "react";
-import ClientSpenderPage from "./ClientSpenderPage";
 
 // Prevent unexpected params at runtime for static export
 export const dynamicParams = false;
@@ -15,18 +15,18 @@ export function generateStaticParams() {
     "primary",
     "secondary",
     // If you use named profiles, include them here:
-    "mike",
-    "beth",
+    "husband",
+    "wife",
   ];
   return SPENDERS.map((slug) => ({ slug }));
 }
 
-export default function Page() {
+export default function DempSpenderPage() {
   return (
     <Suspense
       fallback={
         <div className="mx-auto max-w-6xl p-6 text-sm text-slate-400">
-          Loading spender…
+          Loading demo spender…
         </div>
       }
     >

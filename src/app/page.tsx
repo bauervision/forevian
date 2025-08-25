@@ -132,21 +132,21 @@ export default function Home() {
         <ul className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
           {/* Row 1 */}
           <Feature
-            href="/reconciler"
+            href="/demo/reconciler"
             title="Paste or upload statements"
             desc="Our parser recognizes dates, amounts, cash back splits, transfers, and deposits."
             Icon={FileDown}
             accent="from-emerald-600/20 to-emerald-500/5 border-emerald-500"
           />
           <Feature
-            href="/reconciler"
+            href="/demo/reconciler"
             title="Aliases & smart rules"
             desc="Normalize messy merchant text and auto-apply categories using your rules."
             Icon={Wand2}
             accent="from-violet-600/20 to-violet-500/5 border-violet-500"
           />
           <Feature
-            href="/dashboard/category"
+            href="/demo/dashboard/category"
             title="Categories you control"
             desc="Manage categories (including groups like Amazon) and drill into details."
             Icon={Tags}
@@ -155,21 +155,21 @@ export default function Home() {
 
           {/* Row 2 */}
           <Feature
-            href="/reconciler"
+            href="/demo/reconciler"
             title="Fast reconciliation"
             desc="See parsed totals, adjust inputs, and lock your monthly statement."
             Icon={Receipt}
             accent="from-amber-600/20 to-amber-500/5 border-amber-500"
           />
           <Feature
-            href="/dashboard"
+            href="/demo/dashboard"
             title="Visual dashboard"
             desc="Top categories, spend by spender, and quick links into deep-dives."
             Icon={LayoutDashboard}
             accent="from-cyan-600/20 to-cyan-500/5 border-cyan-500"
           />
           <Feature
-            href="/dashboard/category"
+            href="/demo/dashboard/category"
             title="Brand logos & icons"
             desc="Auto-infer logos, or choose a custom icon per merchant with one click."
             Icon={Images}
@@ -178,21 +178,21 @@ export default function Home() {
 
           {/* Row 3 */}
           <Feature
-            href="/reconciler"
+            href="/demo/reconciler"
             title="Rule engine"
             desc="Create keyword/regex rules that match merchants and set categories."
             Icon={Network}
             accent="from-slate-600/20 to-slate-500/5 border-slate-500"
           />
           <Feature
-            href="/dashboard"
+            href="/demo/dashboard"
             title="Trends & insights"
             desc="See spending patterns, category shifts, and monthly comparisons at a glance."
             Icon={TrendingUp}
             accent="from-blue-600/20 to-blue-500/5 border-blue-500"
           />
           <Feature
-            href="/dashboard"
+            href="/demo/dashboard"
             title="Cloud sync"
             desc="Signed in? Your categories and brand rules persist via Firestore."
             Icon={Cloud}
@@ -233,7 +233,7 @@ export default function Home() {
         <div className="mt-6 text-center">
           {uid ? (
             <Link
-              href="/reconciler"
+              href="/demo/reconciler"
               className="inline-flex items-center gap-2 rounded-xl px-5 py-3 bg-cyan-500 text-slate-900 font-semibold hover:bg-cyan-400"
             >
               Start reconciling <ArrowRight className="h-5 w-5" />

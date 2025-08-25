@@ -4,6 +4,7 @@ import React from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import { useRouter, usePathname } from "next/navigation";
 import { auth } from "@/lib/firebase";
+import { useDemoMode } from "@/app/demo/providers/DemoModeContext";
 
 export default function ProtectedRoute({
   children,
@@ -12,6 +13,13 @@ export default function ProtectedRoute({
 }) {
   const router = useRouter();
   const pathname = usePathname();
+  const { isDemo } = useDemoMode?.() ?? { isDemo: false };
+
+  // ✅ If in demo or under /demo path, bypass auth
+  if (isDemo || pathname.startsWith("/demo")) {
+    return <>{children}</>;
+  }
+
   const [status, setStatus] = React.useState<"loading" | "authed" | "guest">(
     "loading"
   );

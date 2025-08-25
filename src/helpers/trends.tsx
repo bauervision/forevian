@@ -1,3 +1,5 @@
+import { readIndex } from "@/lib/statements";
+
 /** Find the previous statement id for a given "YYYY-MM" that actually exists. */
 function prevStatementId(currentId?: string | null) {
   if (!currentId) return null;

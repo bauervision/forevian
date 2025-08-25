@@ -1,17 +1,18 @@
-// app/dashboard/category/page.tsx
+// app/reconciler/page.tsx
 import { Suspense } from "react";
-import ClientCategories from "./ClientCategories";
 
-export default function Page() {
+import ClientTrendsPage from "@/app/trends/ClientTrends";
+
+export default function DemoTrendsPage() {
   return (
     <Suspense
       fallback={
         <div className="mx-auto max-w-6xl p-6 text-sm text-slate-400">
-          Loading categories…
+          Loading demo trends
         </div>
       }
     >
-      <ClientCategories />
+      <ClientTrendsPage />
     </Suspense>
   );
 }

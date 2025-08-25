@@ -1,8 +1,9 @@
 @import "tailwindcss";
 
+/* Always Dark */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0a0a0a;
+  --foreground: #ededed;
 }
 
 @theme inline {
@@ -10,13 +11,6 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 /* Prevent horizontal scroll everywhere, even with subpixel transforms */
@@ -32,8 +26,14 @@ body,
   scrollbar-gutter: stable;
 }
 
+html,
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Tell browsers that this page is dark */
+html {
+  color-scheme: dark;
 }

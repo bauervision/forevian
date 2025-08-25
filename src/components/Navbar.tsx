@@ -2,11 +2,18 @@
 import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LogOut, LineChart, Menu, X, User as UserIcon } from "lucide-react";
+import {
+  LogOut,
+  LineChart,
+  Menu,
+  X,
+  User as UserIcon,
+  FlaskConical,
+} from "lucide-react";
 import { useAuth } from "@/app/providers/AuthProvider";
 import { NAV_LINKS } from "@/lib/nav";
 
-// Helper: active link style
+/* Helper: active link style */
 function NavLink({
   href,
   children,
@@ -33,8 +40,19 @@ function NavLink({
   );
 }
 
+/* Demo quick links shown only on /demo */
+const DEMO_LINKS = [
+  { href: "/demo/dashboard", label: "Dashboard" },
+  { href: "/demo/reconciler", label: "Reconciler" },
+  { href: "/demo/dashboard/category", label: "Categories" },
+  { href: "/demo/budget", label: "Budget" },
+  { href: "/demo/trend", label: "Trends" },
+];
+
 export default function Navbar() {
   const pathname = usePathname();
+  const isDemo = pathname?.startsWith("/demo") ?? false;
+
   const { user, loading, signOut } = useAuth();
   const [open, setOpen] = React.useState(false);
   const [hidden, setHidden] = React.useState(false);
@@ -56,10 +74,11 @@ export default function Navbar() {
     setOpen(false);
   }, [pathname]);
 
-  // Resolve which links to show based on auth
+  // Resolve which links to show based on auth (non-demo)
   const visibleLinks = React.useMemo(
-    () => NAV_LINKS.filter((l) => (l.requiresAuth ? !!user : true)),
-    [user]
+    () =>
+      isDemo ? [] : NAV_LINKS.filter((l) => (l.requiresAuth ? !!user : true)),
+    [isDemo, user]
   );
 
   const isActive = (href: string) =>
@@ -76,7 +95,10 @@ export default function Navbar() {
         <div className="w-full bg-gray-950/80 backdrop-blur border-b border-gray-800">
           <div className="mx-auto max-w-6xl h-14 px-4 flex items-center justify-between">
             {/* Brand */}
-            <Link href="/" className="flex items-center gap-2 group">
+            <Link
+              href={isDemo ? "/demo/dashboard" : "/"}
+              className="flex items-center gap-2 group"
+            >
               <div className="h-7 w-7 rounded-lg border border-cyan-500/40 bg-gradient-to-br from-cyan-600/20 to-cyan-400/5 grid place-items-center">
                 <LineChart
                   className="h-4 w-4 text-cyan-300"
@@ -90,15 +112,40 @@ export default function Navbar() {
 
             {/* Desktop nav */}
             <div className="hidden md:flex items-center gap-1">
-              {visibleLinks.map(({ href, label }) => (
-                <NavLink key={href} href={href} active={isActive(href)}>
-                  {label}
-                </NavLink>
-              ))}
+              {!isDemo &&
+                visibleLinks.map(({ href, label }) => (
+                  <NavLink key={href} href={href} active={isActive(href)}>
+                    {label}
+                  </NavLink>
+                ))}
 
-              {/* Right side auth */}
+              {isDemo && (
+                <div className="flex items-center gap-1">
+                  {/* Demo badge */}
+                  <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-500/20 text-amber-200 border border-amber-500/30 text-xs mr-1">
+                    <FlaskConical className="h-3.5 w-3.5" />
+                    Demo
+                  </span>
+                  {/* Demo quick links */}
+                  {DEMO_LINKS.map(({ href, label }) => (
+                    <NavLink key={href} href={href} active={isActive(href)}>
+                      {label}
+                    </NavLink>
+                  ))}
+                </div>
+              )}
+
+              {/* Right side auth / exit */}
               <div className="ml-2">
-                {loading ? null : user ? (
+                {loading ? null : isDemo ? (
+                  <Link
+                    href="/"
+                    className="px-3 py-1.5 rounded-md border border-amber-500/40 text-amber-200 hover:bg-amber-500/10"
+                    title="Exit demo"
+                  >
+                    Exit demo
+                  </Link>
+                ) : user ? (
                   <div className="flex items-center gap-2">
                     <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-white/5">
                       <UserIcon className="h-4 w-4 text-cyan-300" />
@@ -148,7 +195,7 @@ export default function Navbar() {
           <div className="fixed top-0 left-0 right-0 z-50 h-screen w-full bg-gray-950/95 border-b border-gray-800 px-6 py-6">
             <div className="flex items-center justify-between">
               <Link
-                href="/"
+                href={isDemo ? "/demo/dashboard" : "/"}
                 className="flex items-center gap-2"
                 onClick={() => setOpen(false)}
               >
@@ -169,42 +216,71 @@ export default function Navbar() {
             </div>
 
             <nav className="mt-8 flex flex-col items-end gap-4">
-              {visibleLinks.map(({ href, label }) => (
-                <NavLink
-                  key={href}
-                  href={href}
-                  active={isActive(href)}
-                  onClick={() => setOpen(false)}
-                  className="text-lg px-4 py-2"
-                >
-                  {label}
-                </NavLink>
-              ))}
-
-              {/* Auth area */}
-              <div className="pt-4">
-                {loading ? null : user ? (
-                  <button
-                    onClick={() => {
-                      setOpen(false);
-                      signOut();
-                    }}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-md border border-red-500/40 text-red-300 hover:bg-red-900/20"
-                  >
-                    <LogOut className="h-5 w-5" />
-                    <span className="text-lg">Sign out</span>
-                  </button>
-                ) : (
+              {isDemo ? (
+                <>
+                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-amber-500/20 text-amber-200 border border-amber-500/30 text-sm">
+                    <FlaskConical className="h-4 w-4" />
+                    Demo
+                  </div>
+                  {DEMO_LINKS.map(({ href, label }) => (
+                    <NavLink
+                      key={href}
+                      href={href}
+                      active={isActive(href)}
+                      onClick={() => setOpen(false)}
+                      className="text-lg px-4 py-2"
+                    >
+                      {label}
+                    </NavLink>
+                  ))}
                   <Link
-                    href="/login"
+                    href="/"
                     onClick={() => setOpen(false)}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-cyan-500 text-gray-900 font-semibold hover:bg-cyan-400"
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-md border border-amber-500/40 text-amber-200 hover:bg-amber-500/10"
                   >
-                    <UserIcon className="h-5 w-5" />
-                    <span className="text-lg">Sign in / Join</span>
+                    Exit demo
                   </Link>
-                )}
-              </div>
+                </>
+              ) : (
+                <>
+                  {visibleLinks.map(({ href, label }) => (
+                    <NavLink
+                      key={href}
+                      href={href}
+                      active={isActive(href)}
+                      onClick={() => setOpen(false)}
+                      className="text-lg px-4 py-2"
+                    >
+                      {label}
+                    </NavLink>
+                  ))}
+
+                  {/* Auth area */}
+                  <div className="pt-4">
+                    {loading ? null : user ? (
+                      <button
+                        onClick={() => {
+                          setOpen(false);
+                          signOut();
+                        }}
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-md border border-red-500/40 text-red-300 hover:bg-red-900/20"
+                      >
+                        <LogOut className="h-5 w-5" />
+                        <span className="text-lg">Sign out</span>
+                      </button>
+                    ) : (
+                      <Link
+                        href="/login"
+                        onClick={() => setOpen(false)}
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-cyan-500 text-gray-900 font-semibold hover:bg-cyan-400"
+                      >
+                        <UserIcon className="h-5 w-5" />
+                        <span className="text-lg">Sign in / Join</span>
+                      </Link>
+                    )}
+                  </div>
+                </>
+              )}
             </nav>
           </div>
         </>
