@@ -1,7 +1,11 @@
 // app/demo/data.ts
 import type { StatementSnapshot } from "@/lib/statements";
+import type {
+  Transaction,
+  ReconcilerInputs,
+} from "@/app/providers/ReconcilerProvider";
 
-export const DEMO_VERSION = 3; // bump this when you change names/data
+export const DEMO_VERSION = 7; // bump this when you change names/data
 
 export type DemoMonth = Pick<
   StatementSnapshot,
@@ -79,6 +83,15 @@ export const DEMO_MONTHS: DemoMonth[] = [
         amount: -210.49,
         category: "Utilities",
         user: "Joint",
+      },
+      {
+        id: "tx-wm1-2025-06-05",
+        date: "06/05",
+        description: "Walmart Supercenter",
+        amount: -176.9,
+        category: "Shopping",
+        user: "Husband",
+        cardLast4: "5280",
       },
       {
         id: "tx-uti-tmo-2025-06-18",
@@ -523,6 +536,15 @@ export const DEMO_MONTHS: DemoMonth[] = [
         user: "Joint",
       },
       {
+        id: "tx-wm1-2025-08-05",
+        date: "08/05",
+        description: "Walmart Supercenter",
+        amount: -204.23,
+        category: "Shopping",
+        user: "Husband",
+        cardLast4: "5280",
+      },
+      {
         id: "tx-uti-tmo-2025-08-16",
         date: "08/16",
         description: "T-Mobile",
@@ -689,3 +711,52 @@ export const DEMO_BUDGETS = {
     Investments: 300, // will be "spend" toward investment contributions
   },
 };
+
+// ... your existing DEMO_VERSION, DEMO_MONTHS, DEMO_BUDGETS ...
+
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+/** Narrow type used for seeding into the Reconciler (structurally matches your Transaction). */
+export type DemoTx = {
+  id: string;
+  date: string;
+  description: string;
+  amount: number;
+  category?: string;
+  categoryOverride?: string;
+  cardLast4?: string;
+  user?: string;
+};
+
+/** Inputs shape used by the Reconciler. */
+export type DemoInputs = {
+  beginningBalance?: number;
+  totalDeposits?: number;
+  totalWithdrawals?: number;
+};
+
+/** Always return a real DemoMonth (no "" sentinels). */
+export function resolveDemoMonth(monthId?: string): DemoMonth {
+  const hit = monthId ? DEMO_MONTHS.find((m) => m.id === monthId) : undefined;
+  return hit ?? DEMO_MONTHS[0]; // <- never returns ""
+}
+
+// add to your exports
+export function getDemoSeed(monthId?: string): {
+  id: string;
+  transactions: DemoTx[]; // structurally assignable to your Transaction
+  inputs: DemoInputs; // structurally assignable to your ReconcilerInputs
+} {
+  const pick = resolveDemoMonth(monthId); // type is DemoMonth
+  const transactions: DemoTx[] = Array.isArray(pick.cachedTx)
+    ? (pick.cachedTx as DemoTx[])
+    : [];
+  const inputs: DemoInputs = {
+    beginningBalance: pick.inputs?.beginningBalance ?? 0,
+    totalDeposits: pick.inputs?.totalDeposits ?? 0,
+    totalWithdrawals: pick.inputs?.totalWithdrawals ?? 0,
+  };
+  return { id: pick.id, transactions, inputs };
+}

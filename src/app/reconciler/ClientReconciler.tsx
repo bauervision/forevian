@@ -40,8 +40,16 @@ import {
   readStarterRules,
   startersAlreadyApplied,
 } from "@/lib/starters";
+import DemoReconcilerTips from "../../components/DemoReconcilerTips";
+import { DEMO_MONTHS, DEMO_VERSION } from "@/app/demo/data";
 
 /* --- tiny UI bits --- */
+
+const inputsFromStmt = (s?: StatementSnapshot) => ({
+  beginningBalance: s?.inputs?.beginningBalance ?? 0,
+  totalDeposits: s?.inputs?.totalDeposits ?? 0,
+  totalWithdrawals: s?.inputs?.totalWithdrawals ?? 0,
+});
 
 function Panel(props: React.HTMLAttributes<HTMLDivElement>) {
   const { className = "", ...rest } = props;
@@ -136,6 +144,131 @@ function CategorySelect({
       <CategoryManagerDialog open={openMgr} onClose={() => setOpenMgr(false)} />
     </>
   );
+}
+
+// -------------- Demo Seeder ------------------
+
+// ---- Demo seeding helpers (page-local) ----
+const LS_IDX = "reconciler.statements.index.v2";
+const LS_CUR = "reconciler.statements.current.v2";
+const LS_TX = "reconciler.tx.v1";
+const LS_IN = "reconciler.inputs.v1";
+const LS_DEMO_HASH = "reconciler.demoPayloadHash.v1";
+
+type Snap = {
+  id: string;
+  label: string;
+  stmtYear: number;
+  stmtMonth: number;
+  inputs: {
+    beginningBalance?: number;
+    totalDeposits?: number;
+    totalWithdrawals?: number;
+  };
+  cachedTx: any[];
+};
+
+function buildDemoIndex(): Record<string, Snap> {
+  const map: Record<string, Snap> = {};
+  for (const m of DEMO_MONTHS) {
+    map[m.id] = {
+      id: m.id,
+      label: m.label,
+      stmtYear: m.stmtYear,
+      stmtMonth: m.stmtMonth,
+      inputs: {
+        beginningBalance: m.inputs?.beginningBalance ?? 0,
+        totalDeposits: m.inputs?.totalDeposits ?? 0,
+        totalWithdrawals: m.inputs?.totalWithdrawals ?? 0,
+      },
+      cachedTx: Array.isArray(m.cachedTx) ? m.cachedTx : [],
+    };
+  }
+  return map;
+}
+
+function payloadHash(): string {
+  const s = JSON.stringify(DEMO_MONTHS);
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return `v${DEMO_VERSION}:${h}`;
+}
+
+/** Seeds LS and the provider on /demo routes before other effects run. */
+function DemoSeeder() {
+  const pathname = usePathname();
+  const search = useSearchParams();
+  const { setTransactions, setInputs } = useReconcilerSelectors();
+
+  React.useLayoutEffect(() => {
+    if (!pathname?.startsWith("/demo")) return;
+
+    const current = payloadHash();
+    const stored = localStorage.getItem(LS_DEMO_HASH);
+    const needSeed =
+      stored !== current ||
+      !localStorage.getItem(LS_IDX) ||
+      !localStorage.getItem(LS_CUR) ||
+      !localStorage.getItem(LS_TX) ||
+      !localStorage.getItem(LS_IN);
+
+    // Always (re)seed on payload change or missing keys
+    if (needSeed) {
+      const idx = buildDemoIndex();
+      localStorage.setItem(LS_IDX, JSON.stringify(idx));
+
+      // Select statement: ?statement -> env -> latest -> first
+      const qp = search.get("statement") || undefined;
+      const envId =
+        (process.env.NEXT_PUBLIC_DEMO_MONTH as string | undefined) || undefined;
+      const latest = DEMO_MONTHS.at(-1)?.id;
+      const first = DEMO_MONTHS[0]?.id;
+      const sel =
+        (qp && idx[qp] ? qp : undefined) ??
+        (envId && idx[envId] ? envId : undefined) ??
+        latest ??
+        first ??
+        "";
+
+      if (sel) {
+        localStorage.setItem(LS_CUR, sel);
+        const s = idx[sel];
+
+        // Push into provider
+        setTransactions(s.cachedTx as any);
+        setInputs({
+          beginningBalance: s.inputs.beginningBalance ?? 0,
+          totalDeposits: s.inputs.totalDeposits ?? 0,
+          totalWithdrawals: s.inputs.totalWithdrawals ?? 0,
+        });
+
+        // Mirror caches for any other readers
+        localStorage.setItem(LS_TX, JSON.stringify(s.cachedTx));
+        localStorage.setItem(
+          LS_IN,
+          JSON.stringify({
+            beginningBalance: s.inputs.beginningBalance ?? 0,
+            totalDeposits: s.inputs.totalDeposits ?? 0,
+            totalWithdrawals: s.inputs.totalWithdrawals ?? 0,
+          })
+        );
+      }
+
+      localStorage.setItem(LS_DEMO_HASH, current);
+    } else {
+      // If already seeded, ensure provider has same data as LS
+      try {
+        const tx = JSON.parse(localStorage.getItem(LS_TX) || "[]");
+        const inputs = JSON.parse(localStorage.getItem(LS_IN) || "{}");
+        if (Array.isArray(tx)) setTransactions(tx);
+        if (inputs && typeof inputs === "object") setInputs(inputs);
+      } catch {}
+    }
+    // only on route entry
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+
+  return null;
 }
 
 /* --- page --- */
@@ -248,11 +381,13 @@ export default function ReconcilerPage() {
 
   React.useEffect(() => {
     // migrate / bootstrap
-    migrateLegacyIfNeeded();
+    if (!isDemo) migrateLegacyIfNeeded();
 
     let idx = readIndex();
+
     if (!Object.keys(idx).length) {
       if (!isDemo) {
+        // Non-demo: create an empty shell so the importer opens
         const now = new Date();
         const y = now.getFullYear();
         const m = now.getMonth() + 1;
@@ -261,25 +396,41 @@ export default function ReconcilerPage() {
         upsertStatement(emptyStatement(id, label, y, m));
         idx = readIndex();
       } else {
-        // demo stays empty until bridge writes data; do not create empty statement
+        // DEMO: materialize demo statements so readIndex()/readCurrentId() work
+        for (const m of DEMO_MONTHS) {
+          upsertStatement({
+            ...emptyStatement(m.id, m.label, m.stmtYear, m.stmtMonth),
+            inputs: m.inputs,
+            cachedTx: m.cachedTx,
+            normalizerVersion: NORMALIZER_VERSION,
+          });
+        }
+        idx = readIndex();
       }
     }
 
     setStatements(idx);
+
+    // Pick initial statement id
     const initialUrlStatement = searchParams.get("statement");
-    const cid = initialUrlStatement || readCurrentId() || Object.keys(idx)[0];
+    const fallbackDemoId =
+      DEMO_MONTHS.at(-1)?.id ?? DEMO_MONTHS[0]?.id ?? Object.keys(idx)[0] ?? "";
+
+    const cid =
+      initialUrlStatement ||
+      readCurrentId() ||
+      Object.keys(idx)[0] ||
+      (isDemo ? fallbackDemoId : "");
+
     setCurrentId(cid);
     if (!isDemo) setStatementInUrl(cid);
 
     const cur = idx[cid];
-    setInputs({
-      beginningBalance: cur?.inputs?.beginningBalance ?? 0,
-      totalDeposits: cur?.inputs?.totalDeposits ?? 0,
-      totalWithdrawals: cur?.inputs?.totalWithdrawals ?? 0,
-    });
+
+    setInputs(inputsFromStmt(cur));
 
     if (cur?.cachedTx?.length) {
-      // ✅ Demo (or previously parsed) path
+      // ✅ Use demo/parsed snapshot when present
       setTransactions(cur.cachedTx);
     } else if (cur?.pagesRaw?.length) {
       const pagesSanitized = (cur.pagesRaw || []).map(normalizePageText);
@@ -287,10 +438,13 @@ export default function ReconcilerPage() {
       const rules = readCatRules();
       const txWithRules = applyCategoryRulesTo(rules, res.txs, applyAlias);
       setTransactions(txWithRules);
-      ensureUpToDateParse(cur);
+      if (!isDemo) ensureUpToDateParse(cur);
     } else {
-      setTransactions([]);
-      if (!isDemo) setOpenWizard(true); // 🚫 no importer in demo
+      // Only open importer in non-demo; on demo, leave provider’s seeded rows alone
+      if (!isDemo) {
+        setTransactions([]);
+        setOpenWizard(true);
+      }
     }
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -312,11 +466,7 @@ export default function ReconcilerPage() {
     const s = readIndex()[id];
     if (!s) return;
 
-    setInputs({
-      beginningBalance: s.inputs?.beginningBalance ?? 0,
-      totalDeposits: s.inputs?.totalDeposits ?? 0,
-      totalWithdrawals: s.inputs?.totalWithdrawals ?? 0,
-    });
+    setInputs(inputsFromStmt(s));
 
     if (s?.cachedTx?.length) {
       setTransactions(s.cachedTx);
@@ -342,11 +492,7 @@ export default function ReconcilerPage() {
     const s = idx[newId];
     if (!s) return;
 
-    setInputs({
-      beginningBalance: s.inputs?.beginningBalance ?? 0,
-      totalDeposits: s.inputs?.totalDeposits ?? 0,
-      totalWithdrawals: s.inputs?.totalWithdrawals ?? 0,
-    });
+    setInputs(inputsFromStmt(s));
 
     if (s?.cachedTx?.length) {
       setTransactions(s.cachedTx);
@@ -390,6 +536,7 @@ export default function ReconcilerPage() {
 
   return (
     <ProtectedRoute>
+      <DemoSeeder />
       <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-bold">Reconciler</h1>
@@ -551,6 +698,8 @@ export default function ReconcilerPage() {
         onClose={() => setOpenWizard(false)}
         onDone={afterWizardSaved}
       />
+
+      <DemoReconcilerTips />
     </ProtectedRoute>
   );
 }

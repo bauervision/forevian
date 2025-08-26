@@ -32,13 +32,16 @@ export function generateStaticParams() {
 }
 
 export default function Page() {
-  <Suspense
-    fallback={
-      <div className="mx-auto max-w-6xl p-6 text-sm text-slate-400">
-        Loading demo category slug
-      </div>
-    }
-  >
-    <ClientCategoryPage />
-  </Suspense>;
+  return (
+    // <-- ✅ return!
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-6xl p-6 text-sm text-slate-400">
+          Loading demo category slug…
+        </div>
+      }
+    >
+      <ClientCategoryPage />
+    </Suspense>
+  );
 }

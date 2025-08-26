@@ -16,6 +16,7 @@ import {
   ArrowRight,
   CheckCircle2,
   TrendingUp,
+  User,
 } from "lucide-react";
 
 export default function Home() {
@@ -132,41 +133,34 @@ export default function Home() {
         <ul className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
           {/* Row 1 */}
           <Feature
-            href="/demo/reconciler"
-            title="Paste or upload statements"
-            desc="Our parser recognizes dates, amounts, cash back splits, transfers, and deposits."
-            Icon={FileDown}
+            href="/demo/dashboard"
+            title="Visual dashboard"
+            desc="Top categories, spend by spender, and quick links into deep-dives."
+            Icon={LayoutDashboard}
+            accent="from-cyan-600/20 to-cyan-500/5 border-cyan-500"
+          />
+          <Feature
+            href="/demo/budget"
+            title="Budgets you can tune"
+            desc="Set monthly targets and see where you stand instantly."
+            Icon={Receipt}
             accent="from-emerald-600/20 to-emerald-500/5 border-emerald-500"
           />
           <Feature
-            href="/demo/reconciler"
-            title="Aliases & smart rules"
-            desc="Normalize messy merchant text and auto-apply categories using your rules."
-            Icon={Wand2}
-            accent="from-violet-600/20 to-violet-500/5 border-violet-500"
+            href="/demo/trend"
+            title="Trends & insights"
+            desc="See spending patterns and month-over-month changes at a glance."
+            Icon={TrendingUp}
+            accent="from-blue-600/20 to-blue-500/5 border-blue-500"
           />
+
+          {/* Row 2: the what */}
           <Feature
             href="/demo/dashboard/category"
             title="Categories you control"
             desc="Manage categories (including groups like Amazon) and drill into details."
             Icon={Tags}
             accent="from-pink-600/20 to-pink-500/5 border-pink-500"
-          />
-
-          {/* Row 2 */}
-          <Feature
-            href="/demo/reconciler"
-            title="Fast reconciliation"
-            desc="See parsed totals, adjust inputs, and lock your monthly statement."
-            Icon={Receipt}
-            accent="from-amber-600/20 to-amber-500/5 border-amber-500"
-          />
-          <Feature
-            href="/demo/dashboard"
-            title="Visual dashboard"
-            desc="Top categories, spend by spender, and quick links into deep-dives."
-            Icon={LayoutDashboard}
-            accent="from-cyan-600/20 to-cyan-500/5 border-cyan-500"
           />
           <Feature
             href="/demo/dashboard/category"
@@ -175,26 +169,33 @@ export default function Home() {
             Icon={Images}
             accent="from-fuchsia-600/20 to-fuchsia-500/5 border-fuchsia-500"
           />
-
-          {/* Row 3 */}
           <Feature
             href="/demo/reconciler"
-            title="Rule engine"
-            desc="Create keyword/regex rules that match merchants and set categories."
+            title="Rules & aliases"
+            desc="Normalize messy merchant text and auto-apply categories using your rules."
             Icon={Network}
             accent="from-slate-600/20 to-slate-500/5 border-slate-500"
           />
+
+          {/* Row 3: the how */}
           <Feature
-            href="/demo/dashboard"
-            title="Trends & insights"
-            desc="See spending patterns, category shifts, and monthly comparisons at a glance."
-            Icon={TrendingUp}
-            accent="from-blue-600/20 to-blue-500/5 border-blue-500"
+            href="/demo/reconciler"
+            title="Fast imports & reconciliation"
+            desc="Paste or upload statements, adjust inputs, and lock your monthly statement."
+            Icon={FileDown}
+            accent="from-amber-600/20 to-amber-500/5 border-amber-500"
           />
           <Feature
             href="/demo/dashboard"
-            title="Cloud sync"
-            desc="Signed in? Your categories and brand rules persist via Firestore."
+            title="Spender breakdown"
+            desc="See spend split across Husband, Wife, and Joint purchases."
+            Icon={User}
+            accent="from-violet-600/20 to-violet-500/5 border-violet-500"
+          />
+          <Feature
+            href="/demo/dashboard"
+            title="Local-first & private"
+            desc="Runs entirely in your browser; no login, no cloud writes."
             Icon={Cloud}
             accent="from-teal-600/20 to-teal-500/5 border-teal-500"
           />

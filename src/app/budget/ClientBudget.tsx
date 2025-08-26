@@ -2,6 +2,7 @@
 
 import React from "react";
 import ProtectedRoute from "@/components/ProtectedRoute";
+import { DEMO_MONTHS } from "@/app/demo/data";
 import { readIndex } from "@/lib/statements";
 import {
   readCatRules,
@@ -12,6 +13,7 @@ import {
 import { applyAlias } from "@/lib/aliases";
 import { writeOverride, keyForTx } from "@/lib/overrides";
 import { useCategories } from "@/app/providers/CategoriesProvider";
+import { usePathname } from "next/navigation";
 
 /* ------------------------------------------------------------------ */
 /* Types & utils                                                      */
@@ -239,29 +241,48 @@ function useLatestIssuedWithData(): {
   year?: number;
   rows: TxRow[];
 } {
+  const pathname = usePathname();
+  const isDemo = pathname?.startsWith("/demo") ?? false;
+
   return React.useMemo(() => {
+    // 1) Load statements index (real data)
     const idx = readIndex();
-    const all = Object.values(idx) as Array<{
+    let source = Object.values(idx) as Array<{
       id: string;
       label: string;
       stmtYear: number;
       stmtMonth: number; // 1-12
       cachedTx?: any[];
     }>;
-    if (!all.length) return { rows: [] };
 
-    // Prefer last *issued* month (previous month) then walk back until data found
+    // 2) Demo fallback — if no statements exist yet on /demo, use DEMO_MONTHS
+    if ((!source || source.length === 0) && isDemo) {
+      source = DEMO_MONTHS.map((m) => ({
+        id: m.id,
+        label: m.label,
+        stmtYear: m.stmtYear,
+        stmtMonth: m.stmtMonth,
+        cachedTx: m.cachedTx ?? [],
+      }));
+    }
+
+    if (!source || source.length === 0) {
+      return { rows: [] };
+    }
+
+    // 3) Pick the most recent *issued* month (previous month), else most recent with rows
     const now = new Date();
     const last = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const lastY = last.getFullYear();
     const lastM = last.getMonth() + 1;
 
-    const sorted = all.sort(
+    const sorted = [...source].sort(
       (a, b) => b.stmtYear - a.stmtYear || b.stmtMonth - a.stmtMonth
     );
-    const hasRows = (s: any) => Array.isArray(s.cachedTx) && s.cachedTx.length;
+    const hasRows = (s: any) =>
+      Array.isArray(s?.cachedTx) && s.cachedTx.length > 0;
 
-    let picked =
+    const picked =
       sorted.find(
         (s) =>
           (s.stmtYear < lastY ||
@@ -271,6 +292,7 @@ function useLatestIssuedWithData(): {
 
     if (!picked) return { rows: [] };
 
+    // 4) Apply category rules/aliases to normalize rows
     const rules = readCatRules();
     const prepared: TxLike[] = Array.isArray(picked.cachedTx)
       ? picked.cachedTx.map(ensureTxLike)
@@ -298,7 +320,7 @@ function useLatestIssuedWithData(): {
       year: picked.stmtYear,
       rows,
     };
-  }, []);
+  }, [isDemo, pathname]);
 }
 
 /* ------------------------------------------------------------------ */
