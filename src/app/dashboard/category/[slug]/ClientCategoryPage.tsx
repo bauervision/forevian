@@ -353,6 +353,7 @@ export default function ClientCategoryPage() {
 
   // URL-driven selection
   const sp = useSearchParams();
+
   const urlId = sp.get("statement"); // string | null
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => setMounted(true), []);
@@ -375,7 +376,7 @@ export default function ClientCategoryPage() {
   }, [selectedId]);
 
   // --- read slug and detect if it's a group
-  const slug = (params.slug || "").toLowerCase();
+  const slug = (params?.slug ?? sp.get("slug") ?? "").toLowerCase();
   const groupMembers = groupMembersForSlug(slug); // null if not a group
   const catDisplay = labelForSlug(slug); // prettified
   const headerLabel = slugToCat(slug, categories);

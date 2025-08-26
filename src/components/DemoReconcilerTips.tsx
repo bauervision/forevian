@@ -1,3 +1,4 @@
+// app/components/DemoReconcilerTips.tsx
 "use client";
 
 import React from "react";
@@ -12,13 +13,25 @@ export default function DemoReconcilerTips() {
 
   const { transactions } = useReconcilerSelectors();
 
-  // Only auto-open if there’s a Walmart row still under Shopping.
+  // Auto-open if a Walmart row is still “Shopping”, *or* if Starbucks is still in Dining.
   const hasWalmartShopping = React.useMemo(
     () =>
       transactions.some(
         (t) =>
           /walmart/i.test(t.description || "") &&
           /(shopping)/i.test(t.categoryOverride ?? t.category ?? "")
+      ),
+    [transactions]
+  );
+
+  const hasStarbucksDining = React.useMemo(
+    () =>
+      transactions.some(
+        (t) =>
+          /starbucks/i.test(t.description || "") &&
+          /(dining|restaurant|coffee)/i.test(
+            t.categoryOverride ?? t.category ?? ""
+          )
       ),
     [transactions]
   );
@@ -46,6 +59,17 @@ export default function DemoReconcilerTips() {
       ),
     },
     {
+      title: "Create a brand-specific category",
+      body: (
+        <>
+          Scroll to the <b>Starbucks</b> transaction. Open the category menu,
+          choose <b>＋ Add Category…</b>, create a new category named{" "}
+          <b>Starbucks</b>, then select it for that transaction. This is handy
+          when you want to track specific merchants or sub-budgets precisely.
+        </>
+      ),
+    },
+    {
       title: "What else can you do here?",
       body: (
         <>
@@ -61,7 +85,7 @@ export default function DemoReconcilerTips() {
     <BottomCoach
       id="demo-reconciler-v1"
       steps={steps}
-      startOpen={hasWalmartShopping}
+      startOpen={hasWalmartShopping || hasStarbucksDining}
     />
   );
 }

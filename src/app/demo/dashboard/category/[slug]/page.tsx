@@ -13,17 +13,11 @@ export function generateStaticParams() {
   for (const m of DEMO_MONTHS) {
     for (const t of m.cachedTx ?? []) {
       const raw = (t.categoryOverride ?? t.category ?? "Uncategorized").trim();
-
-      // raw category slug (e.g., "amazon-marketplace")
       slugs.add(catToSlug(raw));
-
-      // top-level group slug (e.g., "amazon")
-      const group = groupLabelForCategory(raw);
-      slugs.add(catToSlug(group));
+      slugs.add(catToSlug(groupLabelForCategory(raw)));
     }
   }
 
-  // Ensure a few common buckets exist even if no tx hit them in demo data
   ["Uncategorized", "Transfers", "Debt", "Cash Back"].forEach((c) =>
     slugs.add(catToSlug(c))
   );
@@ -33,11 +27,10 @@ export function generateStaticParams() {
 
 export default function Page() {
   return (
-    // <-- ✅ return!
     <Suspense
       fallback={
         <div className="mx-auto max-w-6xl p-6 text-sm text-slate-400">
-          Loading demo category slug…
+          Loading demo category…
         </div>
       }
     >

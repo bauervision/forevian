@@ -32,6 +32,7 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 
 // NEW: pull in categories provider setters
 import { useCategories } from "@/app/providers/CategoriesProvider";
+import { demoCategoryHref } from "@/app/demo/slug-helpers";
 
 /* ---------------------------- helpers & hooks ---------------------------- */
 
@@ -218,6 +219,15 @@ export default function ClientCategories() {
 
   const { transactions, setInputs } = useReconcilerSelectors();
   const { setAll, setCategories } = useCategories() as any; // NEW setters
+
+  // pull from provider (fallback to empty array just in case)
+  const { categories = [] } = useCategories() as { categories: string[] };
+
+  const mgrKey = React.useMemo(
+    () => `mgr-${categories.length}-${categories.join("|")}`,
+    [categories]
+  );
+
   const options = useStatementOptions();
   const [openMgr, setOpenMgr] = React.useState(false);
 
@@ -234,29 +244,6 @@ export default function ClientCategories() {
   React.useEffect(() => setMounted(true), []);
 
   // NEW: while in demo, derive categories from demo statements and push to provider
-  React.useEffect(() => {
-    if (!isDemo) return;
-
-    const idx = readIndex();
-    const names = new Set<string>();
-    for (const s of Object.values(idx) as any[]) {
-      const rows = Array.isArray(s?.cachedTx) ? s.cachedTx : [];
-      for (const r of rows) {
-        const c = (r.categoryOverride ?? r.category ?? "").trim();
-        if (c) names.add(c);
-      }
-    }
-    const list = Array.from(names)
-      .filter(Boolean)
-      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-    const i = list.findIndex((x) => x.toLowerCase() === "uncategorized");
-    if (i >= 0) {
-      const [u] = list.splice(i, 1);
-      list.push(u === "Uncategorized" ? u : "Uncategorized");
-    }
-    if (typeof setAll === "function") setAll(list);
-    else if (typeof setCategories === "function") setCategories(list);
-  }, [isDemo, options.length, setAll, setCategories]);
 
   const meta = currentStatementMeta();
   const savedId = mounted ? readCurrentId() : undefined;
@@ -430,9 +417,18 @@ export default function ClientCategories() {
                 ? Math.round((value / grandTotal) * 100)
                 : 0;
               const accent = accentFor(name);
-              const href = `${base}/dashboard/category/${encodeURIComponent(
-                catToSlug(name)
-              )}${urlStatement && !isDemo ? `?statement=${urlStatement}` : ""}`;
+
+              const slug = catToSlug(name); // <-- pass *unencoded* slug to the helper
+
+              const href = isDemo
+                ? // Demo: use helper (routes known slugs to /demo/.../[slug] and new ones to ?slug=...)
+                  demoCategoryHref(slug)
+                : // Non-demo: keep your existing behavior, including ?statement
+                  `/dashboard/category/${encodeURIComponent(slug)}${
+                    urlStatement
+                      ? `?statement=${encodeURIComponent(urlStatement)}`
+                      : ""
+                  }`;
 
               return (
                 <li key={name} className="group">
@@ -478,7 +474,13 @@ export default function ClientCategories() {
           </ul>
         )}
       </div>
-      <CategoryManagerDialog open={openMgr} onClose={() => setOpenMgr(false)} />
+      {openMgr && (
+        <CategoryManagerDialog
+          key={mgrKey}
+          open
+          onClose={() => setOpenMgr(false)}
+        />
+      )}
     </ProtectedRoute>
   );
 }

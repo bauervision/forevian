@@ -44,6 +44,26 @@ import DemoReconcilerTips from "../../components/DemoReconcilerTips";
 import { DEMO_MONTHS, DEMO_VERSION } from "@/app/demo/data";
 
 /* --- tiny UI bits --- */
+function useEnsureCategoryExists() {
+  const { categories = [], setAll, setCategories } = useCategories() as any;
+
+  return React.useCallback(
+    (name: string) => {
+      const label = (name || "").trim();
+      if (!label) return;
+
+      const lower = new Set(
+        (categories || []).map((c: string) => c.toLowerCase())
+      );
+      if (lower.has(label.toLowerCase())) return;
+
+      const next = [...categories, label];
+      if (typeof setAll === "function") setAll(next);
+      else if (typeof setCategories === "function") setCategories(next);
+    },
+    [categories, setAll, setCategories]
+  );
+}
 
 const inputsFromStmt = (s?: StatementSnapshot) => ({
   beginningBalance: s?.inputs?.beginningBalance ?? 0,
@@ -91,7 +111,7 @@ const CATEGORY_ADD_SENTINEL = "__ADD__";
 function CategorySelect({
   value,
   onChange,
-  disabled = false, // optional - default false
+  disabled = false,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -102,7 +122,7 @@ function CategorySelect({
 
   const sorted = React.useMemo(() => {
     const set = new Set(categories.map((c) => c.trim()).filter(Boolean));
-    if (value && !set.has(value)) set.add(value); // ensure current shows up
+    if (value && !set.has(value)) set.add(value); // ensure current shows
     const list = Array.from(set).sort((a, b) =>
       a.localeCompare(b, undefined, { sensitivity: "base" })
     );
@@ -122,8 +142,7 @@ function CategorySelect({
           disabled={disabled}
           onChange={(e) => {
             const v = e.target.value;
-            if (v === CATEGORY_ADD_SENTINEL) {
-              // open manager but keep the current value selected
+            if (v === "__ADD__") {
               setOpenMgr(true);
               return;
             }
@@ -136,12 +155,18 @@ function CategorySelect({
               {opt}
             </option>
           ))}
-          {/* keep this enabled; some browsers ignore clicks if <select> disabled */}
-          <option value={CATEGORY_ADD_SENTINEL}>＋ Add Category…</option>
+          <option value="__ADD__">＋ Add Category…</option>
         </select>
       </div>
 
-      <CategoryManagerDialog open={openMgr} onClose={() => setOpenMgr(false)} />
+      {/* Mount the manager only when open, and re-mount when categories change */}
+      {openMgr && (
+        <CategoryManagerDialog
+          key={`mgr-${categories.length}-${categories.join("|")}`}
+          open
+          onClose={() => setOpenMgr(false)}
+        />
+      )}
     </>
   );
 }
@@ -319,6 +344,8 @@ export default function ReconcilerPage() {
     markStartersApplied(uid);
   }, [uid, categories, setAll, setCategories]);
 
+  const ensureCategoryExists = useEnsureCategoryExists();
+
   const router = useRouter();
   const pathname = usePathname();
   const isDemo = pathname.startsWith("/demo");
@@ -431,7 +458,9 @@ export default function ReconcilerPage() {
 
     if (cur?.cachedTx?.length) {
       // ✅ Use demo/parsed snapshot when present
-      setTransactions(cur.cachedTx);
+      const rules = readCatRules();
+      const txWithRules = applyCategoryRulesTo(rules, cur.cachedTx, applyAlias);
+      setTransactions(txWithRules);
     } else if (cur?.pagesRaw?.length) {
       const pagesSanitized = (cur.pagesRaw || []).map(normalizePageText);
       const res = rebuildFromPages(pagesSanitized, cur.stmtYear, applyAlias);
@@ -469,7 +498,9 @@ export default function ReconcilerPage() {
     setInputs(inputsFromStmt(s));
 
     if (s?.cachedTx?.length) {
-      setTransactions(s.cachedTx);
+      const rules = readCatRules();
+      const txWithRules = applyCategoryRulesTo(rules, s.cachedTx, applyAlias);
+      setTransactions(txWithRules);
     } else if (s?.pagesRaw?.length) {
       const pagesSanitized = (s.pagesRaw || []).map(normalizePageText);
       const res = rebuildFromPages(pagesSanitized, s.stmtYear, applyAlias);
@@ -495,7 +526,9 @@ export default function ReconcilerPage() {
     setInputs(inputsFromStmt(s));
 
     if (s?.cachedTx?.length) {
-      setTransactions(s.cachedTx);
+      const rules = readCatRules();
+      const txWithRules = applyCategoryRulesTo(rules, s.cachedTx, applyAlias);
+      setTransactions(txWithRules);
     } else if (s?.pagesRaw?.length) {
       const pagesSanitized = (s.pagesRaw || []).map(normalizePageText);
       const res = rebuildFromPages(
@@ -602,6 +635,7 @@ export default function ReconcilerPage() {
                             t.categoryOverride ?? t.category ?? "Uncategorized"
                           }
                           onChange={(val) => {
+                            ensureCategoryExists(val); // ✅ add to global list if missing
                             const aliasLabel = applyAlias(
                               stripAuthAndCard(t.description || "")
                             );

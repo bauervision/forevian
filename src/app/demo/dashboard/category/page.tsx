@@ -1,3 +1,4 @@
+import ClientCategoryPage from "@/app/dashboard/category/[slug]/ClientCategoryPage";
 import ClientCategories from "@/app/dashboard/category/ClientCategories";
 import { Suspense } from "react";
 
@@ -13,4 +14,9 @@ export default function DemoCategory() {
       <ClientCategories />
     </Suspense>
   );
+}
+
+export function DemoCategoryShim() {
+  // ClientCategoryPage will read slug from search params when there's no route param.
+  return <ClientCategoryPage />;
 }

@@ -7,6 +7,7 @@ import ClientProviders from "@/app/ClientProviders";
 import Script from "next/script";
 import { DEMO_MONTHS, DEMO_VERSION } from "./data";
 import DemoStatementsBootstrap from "@/components/DemoStatementBootstrap";
+import DemoCategoriesBootstrap from "@/components/DemoCategoriesBootstrap";
 
 export const metadata: Metadata = {
   title: "Forevian — Demo",
@@ -172,6 +173,7 @@ export default function DemoLayout({
 
       {/* children render after storage was swapped */}
       <DemoStatementsBootstrap />
+      <DemoCategoriesBootstrap />
       <div className="flex-grow pt-4">{children}</div>
     </>
   );
