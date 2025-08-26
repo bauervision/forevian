@@ -11,7 +11,6 @@ import { prettyDesc } from "@/lib/txEnrich";
 import StatementSwitcher from "@/components/StatementSwitcher";
 import { useRowsForSelection } from "@/helpers/useRowsForSelection";
 import { Pencil, ArrowLeft } from "lucide-react";
-import { groupMembersForSlug, labelForSlug } from "@/lib/categoryGroups";
 import { useBrandMap } from "@/app/providers/BrandMapProvider";
 import BrandLogoDialog from "@/components/BrandLogoDialog";
 import { catToSlug, slugToCat } from "@/lib/slug";
@@ -354,6 +353,15 @@ export default function ClientCategoryPage() {
   // URL-driven selection
   const sp = useSearchParams();
 
+  // Statement id (kept in storage but prefer URL when present)
+  const selectedId = React.useMemo(
+    () => sp.get("statement") ?? readCurrentId() ?? "",
+    [sp]
+  );
+  React.useEffect(() => {
+    const sid = sp.get("statement");
+    if (sid && readCurrentId() !== sid) writeCurrentId(sid);
+  }, [sp]);
   const urlId = sp.get("statement"); // string | null
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => setMounted(true), []);
@@ -362,7 +370,6 @@ export default function ClientCategoryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlId]);
 
-  const selectedId: string = (urlId ?? (mounted ? readCurrentId() : "")) || "";
   const [period, setPeriod] = React.useState<PeriodEx>("CURRENT");
 
   // Rows for the selected statement / scope
@@ -376,23 +383,37 @@ export default function ClientCategoryPage() {
   }, [selectedId]);
 
   // --- read slug and detect if it's a group
-  const slug = (params?.slug ?? sp.get("slug") ?? "").toLowerCase();
-  const groupMembers = groupMembersForSlug(slug); // null if not a group
-  const catDisplay = labelForSlug(slug); // prettified
+  const slug = ((params?.slug as string) || sp.get("slug") || "")
+    .toString()
+    .toLowerCase();
+
   const headerLabel = slugToCat(slug, categories);
 
   // --- filter current rows (slug compare)
+  // Filter viewRows by leaf category (no grouping)
   const rows = React.useMemo(() => {
-    const rowSlug = (r: any) =>
+    const bySlug = (r: any) =>
       catToSlug((r.categoryOverride ?? r.category ?? "Uncategorized").trim());
 
-    if (groupMembers?.length) {
-      const targetSlugs = new Set(groupMembers.map((c) => catToSlug(c.trim())));
-      targetSlugs.add(slug);
-      return viewRows.filter((r) => targetSlugs.has(rowSlug(r)));
+    // primary: use hydrated rows from the provider scope
+    let filtered = viewRows.filter((r) => bySlug(r) === slug);
+
+    if (filtered.length === 0 && selectedId) {
+      // fallback: read the statement snapshot directly
+      const idx = readIndex();
+      const s = idx[selectedId];
+      if (s && Array.isArray(s.cachedTx)) {
+        const rules = readCatRules();
+        const scoped = applyCategoryRulesTo(
+          rules,
+          s.cachedTx,
+          applyAlias
+        ) as typeof viewRows;
+        filtered = scoped.filter((r) => bySlug(r) === slug);
+      }
     }
-    return viewRows.filter((r) => rowSlug(r) === slug);
-  }, [viewRows, groupMembers, slug]);
+    return filtered;
+  }, [viewRows, slug, selectedId]);
 
   // --- previous month rows for the SAME scope (for MoM)
   const prevScopedRows = React.useMemo(() => {
@@ -415,14 +436,8 @@ export default function ClientCategoryPage() {
 
     const rowSlug = (r: any) =>
       catToSlug((r.categoryOverride ?? r.category ?? "Uncategorized").trim());
-
-    if (groupMembers?.length) {
-      const targetSlugs = new Set(groupMembers.map((c) => catToSlug(c.trim())));
-      targetSlugs.add(slug);
-      return allPrev.filter((r) => targetSlugs.has(rowSlug(r)));
-    }
     return allPrev.filter((r) => rowSlug(r) === slug);
-  }, [period, selectedId, groupMembers, slug]);
+  }, [period, selectedId, slug]);
 
   // Previous statement rows (for MoM trend)
   const prevRows = React.useMemo(() => {
@@ -533,6 +548,26 @@ export default function ClientCategoryPage() {
       .sort((a, b) => b.amt - a.amt);
   }, [rows, prevRows, detect, logoFor, rules, brandVersion]);
 
+  // Resolve a display name for the *leaf* category
+  const catDisplay = React.useMemo(() => {
+    const fromProvider = slugToCat(slug, categories);
+    if (fromProvider && fromProvider !== slug) return fromProvider;
+
+    const any = viewRows.find(
+      (r) =>
+        catToSlug(
+          (r.categoryOverride ?? r.category ?? "Uncategorized").trim()
+        ) === slug
+    );
+    if (any)
+      return (any.categoryOverride ?? any.category ?? "Uncategorized").trim();
+
+    return slug
+      .split("-")
+      .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+      .join(" ");
+  }, [slug, categories, viewRows]);
+
   const catAccent = accentForCategory(catDisplay);
   const total = React.useMemo(
     () => rows.reduce((s, r) => s + Math.abs(r.amount < 0 ? r.amount : 0), 0),
@@ -557,7 +592,7 @@ export default function ClientCategoryPage() {
             <span className="inline-flex items-center justify-center rounded-xl bg-slate-900 border border-slate-700 p-2">
               {iconForCategory(catDisplay)}
             </span>
-            <span>{headerLabel}</span>
+            <span>{catDisplay}</span>
           </h1>
 
           {mounted && viewMeta && (
@@ -614,7 +649,7 @@ export default function ClientCategoryPage() {
           <div className="flex flex-wrap items-center gap-3 justify-between">
             <Link
               href={`${base}/dashboard/category${
-                !isDemo && selectedId ? `?statement=${selectedId}` : ""
+                selectedId ? `?statement=${encodeURIComponent(selectedId)}` : ""
               }`}
               aria-label="Back to Categories"
               title="Back to Categories"

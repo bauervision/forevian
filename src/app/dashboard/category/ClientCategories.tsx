@@ -26,7 +26,7 @@ import {
 } from "lucide-react";
 import CategoryManagerDialog from "@/components/CategoryManagerDialog";
 import { useRowsForSelection } from "@/helpers/useRowsForSelection";
-import { groupLabelForCategory } from "@/lib/categoryGroups";
+
 import { catToSlug } from "@/lib/slug";
 import ProtectedRoute from "@/components/ProtectedRoute";
 
@@ -286,24 +286,25 @@ export default function ClientCategories() {
   }, [selectedId]);
 
   // Build current + previous totals keyed by top-level category (group label)
+  // build totals by *leaf* category (categoryOverride ?? category)
   const catCards = React.useMemo(() => {
-    const sumByTop = (rows: any[]) => {
+    const sumByLeaf = (rows: any[]) => {
       const m: Record<string, number> = {};
       for (const r of rows) {
-        const amt = r.amount < 0 ? Math.abs(r.amount) : 0;
-        if (!amt) continue;
-        const rawCat = (
+        const name = (
           r.categoryOverride ??
           r.category ??
           "Uncategorized"
         ).trim();
-        const top = groupLabelForCategory(rawCat);
-        m[top] = (m[top] ?? 0) + amt;
+        const amt = r.amount < 0 ? Math.abs(r.amount) : 0;
+        if (!amt || !name) continue;
+        m[name] = (m[name] ?? 0) + amt;
       }
       return m;
     };
-    const curr = sumByTop(viewRows);
-    const prev = sumByTop(prevRows);
+
+    const curr = sumByLeaf(viewRows);
+    const prev = sumByLeaf(prevRows);
 
     return Object.entries(curr)
       .sort((a, b) => b[1] - a[1])
@@ -421,10 +422,8 @@ export default function ClientCategories() {
               const slug = catToSlug(name); // <-- pass *unencoded* slug to the helper
 
               const href = isDemo
-                ? // Demo: use helper (routes known slugs to /demo/.../[slug] and new ones to ?slug=...)
-                  demoCategoryHref(slug)
-                : // Non-demo: keep your existing behavior, including ?statement
-                  `/dashboard/category/${encodeURIComponent(slug)}${
+                ? demoCategoryHref(slug, selectedId) // ✅ works for known + new slugs
+                : `/dashboard/category/${encodeURIComponent(slug)}${
                     urlStatement
                       ? `?statement=${encodeURIComponent(urlStatement)}`
                       : ""

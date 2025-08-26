@@ -1,23 +1,30 @@
 // app/demo/slug-helpers.ts
+"use client";
+
 import { DEMO_MONTHS } from "@/app/demo/data";
 import { catToSlug } from "@/lib/slug";
-import { groupLabelForCategory } from "@/lib/categoryGroups";
 
-const PRE_DEMO_SLUGS = new Set<string>();
+/**
+ * Known slugs are those present in the static demo data.
+ * New, user-created slugs (e.g. "starbucks") won't be in this set,
+ * so we route them via query param (?slug=...) to avoid 404 on SSG.
+ */
+const KNOWN = new Set<string>();
 for (const m of DEMO_MONTHS) {
   for (const t of m.cachedTx ?? []) {
-    const raw = (t.categoryOverride ?? t.category ?? "Uncategorized").trim();
-    PRE_DEMO_SLUGS.add(catToSlug(raw));
-    PRE_DEMO_SLUGS.add(catToSlug(groupLabelForCategory(raw)));
+    const leaf = (t.categoryOverride ?? t.category ?? "Uncategorized").trim();
+    KNOWN.add(catToSlug(leaf));
   }
 }
-["Uncategorized", "Transfers", "Debt", "Cash Back"].forEach((c) =>
-  PRE_DEMO_SLUGS.add(catToSlug(c))
-);
 
-export function demoCategoryHref(slug: string) {
-  const s = slug.toLowerCase();
-  return PRE_DEMO_SLUGS.has(s)
-    ? `/demo/dashboard/category/${s}`
-    : `/demo/dashboard/category?slug=${encodeURIComponent(s)}`;
+export function demoCategoryHref(slug: string, statement?: string) {
+  const path = KNOWN.has(slug)
+    ? `/demo/dashboard/category/${encodeURIComponent(slug)}`
+    : `/demo/dashboard/category?slug=${encodeURIComponent(slug)}`;
+
+  return statement
+    ? `${path}${path.includes("?") ? "&" : "?"}statement=${encodeURIComponent(
+        statement
+      )}`
+    : path;
 }

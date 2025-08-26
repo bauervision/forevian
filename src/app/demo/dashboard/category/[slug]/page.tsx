@@ -9,19 +9,14 @@ export const dynamicParams = false;
 
 export function generateStaticParams() {
   const slugs = new Set<string>();
-
   for (const m of DEMO_MONTHS) {
     for (const t of m.cachedTx ?? []) {
-      const raw = (t.categoryOverride ?? t.category ?? "Uncategorized").trim();
-      slugs.add(catToSlug(raw));
-      slugs.add(catToSlug(groupLabelForCategory(raw)));
+      const leaf = (t.categoryOverride ?? t.category ?? "Uncategorized").trim();
+      slugs.add(catToSlug(leaf));
     }
   }
-
-  ["Uncategorized", "Transfers", "Debt", "Cash Back"].forEach((c) =>
-    slugs.add(catToSlug(c))
-  );
-
+  // a couple of anchors if you want them
+  ["Uncategorized"].forEach((c) => slugs.add(catToSlug(c)));
   return Array.from(slugs).map((slug) => ({ slug }));
 }
 
