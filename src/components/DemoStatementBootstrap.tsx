@@ -5,6 +5,9 @@ import { usePathname, useSearchParams } from "next/navigation";
 import { DEMO_MONTHS } from "@/app/demo/data";
 import { NORMALIZER_VERSION } from "@/lib/textNormalizer";
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
+import { readCurrentId, readIndex } from "@/lib/statements";
+import { applyCategoryRulesTo, readCatRules } from "@/lib/categoryRules";
+import { applyAlias } from "@/lib/aliases";
 
 type Snap = {
   id: string;
@@ -51,54 +54,44 @@ function buildDemoIndex(): Record<string, Snap> {
 export default function DemoStatementsBootstrap() {
   const pathname = usePathname();
   const search = useSearchParams();
-  const { setTransactions, setInputs } = useReconcilerSelectors();
+  const isDemo = pathname?.startsWith("/demo") ?? false;
+  const { setTransactions } = useReconcilerSelectors();
 
-  // Run BEFORE children effects, so pages that call readIndex() see fresh data.
-  React.useLayoutEffect(() => {
-    if (!pathname?.startsWith("/demo")) return;
+  const hydrate = React.useCallback(() => {
+    if (!isDemo) return;
+    const sid = search.get("statement") ?? readCurrentId();
+    const idx = readIndex();
+    const s = sid ? idx[sid] : undefined;
+    const raw = Array.isArray(s?.cachedTx) ? s!.cachedTx : [];
+    const rules = readCatRules();
+    const withRules = applyCategoryRulesTo(rules, raw, applyAlias);
+    setTransactions(withRules);
+    try {
+      localStorage.setItem(LS_TX, JSON.stringify(withRules));
+    } catch {}
+  }, [isDemo, search, setTransactions]);
 
-    // 1) Hard-write the entire demo index on every /demo mount.
-    const idxMap = buildDemoIndex();
-    localStorage.setItem(LS_IDX, JSON.stringify(idxMap));
+  // on mount & whenever the URL statement changes
+  React.useEffect(() => {
+    hydrate();
+  }, [hydrate]);
 
-    // 2) Choose selected id: ?statement -> env -> latest demo -> first
-    const qp = search.get("statement") || undefined;
-    const envId =
-      (process.env.NEXT_PUBLIC_DEMO_MONTH as string | undefined) || undefined;
-    const latest = DEMO_MONTHS.at(-1)?.id;
-    const first = DEMO_MONTHS[0]?.id;
-    const selectedId =
-      (qp && idxMap[qp] ? qp : undefined) ??
-      (envId && idxMap[envId] ? envId : undefined) ??
-      latest ??
-      first ??
-      "";
-
-    if (selectedId) {
-      localStorage.setItem(LS_CUR, selectedId);
-    }
-
-    // 3) Push snapshot into provider + persist tx/inputs caches
-    const snap = selectedId ? idxMap[selectedId] : undefined;
-    if (snap && snap.cachedTx?.length) {
-      setTransactions(snap.cachedTx as any);
-      setInputs({
-        beginningBalance: snap.inputs.beginningBalance ?? 0,
-        totalDeposits: snap.inputs.totalDeposits ?? 0,
-        totalWithdrawals: snap.inputs.totalWithdrawals ?? 0,
-      });
-
-      localStorage.setItem(LS_TX, JSON.stringify(snap.cachedTx));
-      localStorage.setItem(
-        LS_IN,
-        JSON.stringify({
-          beginningBalance: snap.inputs.beginningBalance ?? 0,
-          totalDeposits: snap.inputs.totalDeposits ?? 0,
-          totalWithdrawals: snap.inputs.totalWithdrawals ?? 0,
-        })
-      );
-    }
-  }, [pathname]); // only rerun when route changes
+  // keep in sync if rules/overrides/statement change in another tab or locally
+  React.useEffect(() => {
+    if (!isDemo) return;
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key) return;
+      if (
+        e.key === "categoryRules.v1" ||
+        e.key === "overrides.v1" ||
+        e.key === "reconciler.statements.current.v2"
+      ) {
+        hydrate();
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [isDemo, hydrate]);
 
   return null;
 }

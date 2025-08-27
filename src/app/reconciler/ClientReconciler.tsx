@@ -42,6 +42,8 @@ import {
 } from "@/lib/starters";
 import DemoReconcilerTips from "../../components/DemoReconcilerTips";
 import { DEMO_MONTHS, DEMO_VERSION } from "@/app/demo/data";
+import { applyAlias } from "@/lib/aliases";
+import BottomCoach from "@/components/BottomCoach";
 
 /* --- tiny UI bits --- */
 function useEnsureCategoryExists() {
@@ -260,7 +262,14 @@ function DemoSeeder() {
         const s = idx[sel];
 
         // Push into provider
-        setTransactions(s.cachedTx as any);
+        const rules = readCatRules();
+        const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
+        const withRules = applyCategoryRulesTo(rules, raw, applyAlias);
+        setTransactions(withRules);
+        try {
+          localStorage.setItem("reconciler.tx.v1", JSON.stringify(withRules));
+        } catch {}
+
         setInputs({
           beginningBalance: s.inputs.beginningBalance ?? 0,
           totalDeposits: s.inputs.totalDeposits ?? 0,
@@ -284,8 +293,13 @@ function DemoSeeder() {
       // If already seeded, ensure provider has same data as LS
       try {
         const tx = JSON.parse(localStorage.getItem(LS_TX) || "[]");
+        const rules2 = readCatRules();
+        const withRules2 = Array.isArray(tx)
+          ? applyCategoryRulesTo(rules2, tx, applyAlias)
+          : [];
+        setTransactions(withRules2);
         const inputs = JSON.parse(localStorage.getItem(LS_IN) || "{}");
-        if (Array.isArray(tx)) setTransactions(tx);
+
         if (inputs && typeof inputs === "object") setInputs(inputs);
       } catch {}
     }
