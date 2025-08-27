@@ -28,6 +28,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { usePathname } from "next/navigation";
+import DemoTrendsTips from "@/components/DemoTrendsTips";
 
 /* ------------------------ types & utils ------------------------ */
 
@@ -322,7 +323,7 @@ export default function ClientTrendsPage() {
         <section className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
           <div className="flex items-center justify-between gap-3 mb-3">
             <h3 className="font-semibold">Categories</h3>
-            <div className="text-xs text-slate-400">Select up to ~6</div>
+            <div className="text-xs text-slate-400">Select up to ~8</div>
           </div>
           {allCatsUnion.length === 0 ? (
             <div className="text-sm text-slate-400">
@@ -345,7 +346,7 @@ export default function ClientTrendsPage() {
                       setCats((prev) =>
                         active
                           ? prev.filter((x) => x !== c)
-                          : prev.length >= 6
+                          : prev.length >= 8
                           ? prev
                           : [...prev, c]
                       )
@@ -450,6 +451,8 @@ export default function ClientTrendsPage() {
           )}
         </section>
       </div>
+
+      <DemoTrendsTips />
     </ProtectedRoute>
   );
 }

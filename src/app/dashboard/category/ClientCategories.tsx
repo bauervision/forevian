@@ -33,6 +33,7 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 // NEW: pull in categories provider setters
 import { useCategories } from "@/app/providers/CategoriesProvider";
 import { demoCategoryHref } from "@/app/demo/slug-helpers";
+import DemoCategoriesTips from "@/components/DemoCategoriesTips";
 
 /* ---------------------------- helpers & hooks ---------------------------- */
 
@@ -480,6 +481,7 @@ export default function ClientCategories() {
           onClose={() => setOpenMgr(false)}
         />
       )}
+      <DemoCategoriesTips />
     </ProtectedRoute>
   );
 }

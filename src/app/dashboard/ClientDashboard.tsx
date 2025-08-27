@@ -13,6 +13,7 @@ import { iconForCategory } from "@/lib/icons"; // uses your shared icon util
 import { useRowsForSelection } from "@/helpers/useRowsForSelection";
 
 import ProtectedRoute from "@/components/ProtectedRoute";
+import DemoDashboardTips from "@/components/DemoDashboardTips";
 /* ---------------------------- helpers & hooks ---------------------------- */
 
 function useIsDemo() {
@@ -185,8 +186,12 @@ export default function ClientDashboard() {
 
   const viewRows = useRowsForSelection(period, selectedId, transactions);
   const totals = React.useMemo(
-    () => computeTotals(viewRows, inputs.beginningBalance ?? 0),
-    [viewRows, inputs]
+    () =>
+      computeTotals(
+        viewRows,
+        period === "YTD" ? 0 : inputs.beginningBalance ?? 0
+      ),
+    [viewRows, inputs, period]
   );
 
   // True Spend excludes Transfers, Debt, Cash Back
@@ -420,6 +425,7 @@ export default function ClientDashboard() {
           )}
         </section>
       </div>
+      <DemoDashboardTips />
     </ProtectedRoute>
   );
 }

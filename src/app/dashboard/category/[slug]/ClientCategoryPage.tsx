@@ -17,6 +17,7 @@ import { catToSlug, slugToCat } from "@/lib/slug";
 import { useCategories } from "@/app/providers/CategoriesProvider";
 import { iconForCategory, IconFromKey, IconKey, isIconKey } from "@/lib/icons";
 import ProtectedRoute from "@/components/ProtectedRoute";
+import DemoCategorySlugTips from "@/components/DemoCategorySlugTips";
 
 /* ----------------------------- trends helpers ---------------------------- */
 
@@ -849,6 +850,8 @@ export default function ClientCategoryPage() {
           seedLabel={editSeed}
         />
       </div>
+
+      <DemoCategorySlugTips />
     </ProtectedRoute>
   );
 }

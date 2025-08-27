@@ -14,6 +14,7 @@ import { applyAlias } from "@/lib/aliases";
 import { writeOverride, keyForTx } from "@/lib/overrides";
 import { useCategories } from "@/app/providers/CategoriesProvider";
 import { usePathname } from "next/navigation";
+import DemoBudgetTips from "@/components/DemoBudgetTips";
 
 /* ------------------------------------------------------------------ */
 /* Types & utils                                                      */
@@ -1349,6 +1350,8 @@ export default function ClientBudgetPage() {
             </div>
           );
         })()}
+
+      <DemoBudgetTips />
     </ProtectedRoute>
   );
 }
