@@ -55,6 +55,19 @@ export default function BottomCoach({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, steps.length, onClose]);
 
+  // If startOpen flips to true after data loads, open unless user dismissed/completed before.
+  React.useEffect(() => {
+    if (!startOpen) return;
+    setOpen((was) => {
+      if (was) return was;
+      try {
+        if (localStorage.getItem(LS_DISMISSED) === "1") return false;
+        if (localStorage.getItem(LS_COMPLETED) === "1") return false;
+      } catch {}
+      return true;
+    });
+  }, [startOpen]);
+
   if (!open || steps.length === 0) return null;
   const step = steps[idx];
   const pct = Math.round(((idx + 1) / steps.length) * 100);

@@ -47,7 +47,7 @@ export default function CategoryManagerDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 grid place-items-center"
+      className="fixed inset-0 z-[80] grid place-items-center "
       role="dialog"
       aria-modal="true"
     >

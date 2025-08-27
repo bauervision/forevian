@@ -40,30 +40,10 @@ export const DEMO_MONTHS: DemoMonth[] = [
         id: "tx-ht-2025-06-02",
         date: "06/02",
         description: "HARRIS TEETER #123",
-        amount: -145.67,
+        amount: -445.67,
         category: "Groceries",
         user: "Wife",
         cardLast4: "0161",
-      },
-      {
-        id: "tx-wm1-2025-06-02",
-        date: "06/02",
-        description: "Walmart Supercenter",
-        amount: -54.26,
-        category: "Shopping",
-        user: "Wife",
-        cardLast4: "0161",
-      },
-
-      // Amazon + same-day Walmart.com
-      {
-        id: "tx-amzn-2025-06-03",
-        date: "06/03",
-        description: "AMZN Mktp US*G4T92",
-        amount: -72.34,
-        category: "Amazon Marketplace",
-        user: "Husband",
-        cardLast4: "5280",
       },
       {
         id: "tx-wm2-2025-06-03",
@@ -182,6 +162,32 @@ export const DEMO_MONTHS: DemoMonth[] = [
         description: "McDonald's",
         amount: -9.5,
         category: "Fast Food",
+        user: "Joint",
+      },
+      {
+        id: "tx-imp-fivebelow-2025-06-11",
+        date: "06/11",
+        description: "Five Below #442",
+        amount: -24.18,
+        category: "Impulse/Misc",
+        user: "Wife",
+        cardLast4: "0161",
+      },
+      {
+        id: "tx-imp-dollartree-2025-06-14",
+        date: "06/14",
+        description: "Dollar Tree #1193",
+        amount: -13.48,
+        category: "Impulse/Misc",
+        user: "Husband",
+        cardLast4: "5280",
+      },
+      {
+        id: "tx-imp-appstore-2025-06-27",
+        date: "06/27",
+        description: "App Store Purchase",
+        amount: -4.99,
+        category: "Impulse/Misc",
         user: "Joint",
       },
 
@@ -409,6 +415,23 @@ export const DEMO_MONTHS: DemoMonth[] = [
         user: "Husband",
         cardLast4: "5280",
       },
+      {
+        id: "tx-imp-fivebelow-2025-07-07",
+        date: "07/07",
+        description: "Five Below #442",
+        amount: -21.77,
+        category: "Impulse/Misc",
+        user: "Husband",
+        cardLast4: "5280",
+      },
+      {
+        id: "tx-imp-giftshop-2025-07-22",
+        date: "07/22",
+        description: "Boardwalk Gift Shop",
+        amount: -32.7,
+        category: "Impulse/Misc",
+        user: "Joint",
+      },
 
       // Insurance
       {
@@ -635,6 +658,24 @@ export const DEMO_MONTHS: DemoMonth[] = [
         user: "Husband",
         cardLast4: "5280",
       },
+      {
+        id: "tx-imp-dollartree-2025-08-07",
+        date: "08/07",
+        description: "Dollar Tree #1193",
+        amount: -14.36,
+        category: "Impulse/Misc",
+        user: "Wife",
+        cardLast4: "0161",
+      },
+      {
+        id: "tx-imp-homegoods-2025-08-26",
+        date: "08/26",
+        description: "HomeGoods",
+        amount: -54.12,
+        category: "Impulse/Misc",
+        user: "Wife",
+        cardLast4: "0161",
+      },
 
       // Insurance
       {
@@ -709,6 +750,7 @@ export const DEMO_BUDGETS = {
     Insurance: 150,
     Savings: 400, // will be "spend" toward savings transfers
     Investments: 300, // will be "spend" toward investment contributions
+    "Impulse/Misc": 150,
   },
 };
 

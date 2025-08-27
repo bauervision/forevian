@@ -73,9 +73,9 @@ export default function DemoReconcilerTips() {
       title: "What else can you do here?",
       body: (
         <>
-          You can change any category, add notes, and filter by statement. Head
-          to the Categories view for rules, or the Budget page to see how
-          savings, investing, and groceries targets line up with your income.
+          Try switching between the other demo statements (June–August) to see
+          how patterns change. When you’re done reconciling, head to the{" "}
+          <b>Dashboard</b> to explore your categories and merchant breakdowns.
         </>
       ),
     },

@@ -121,6 +121,10 @@ function CategorySelect({
 }) {
   const { categories } = useCategories();
   const [openMgr, setOpenMgr] = React.useState(false);
+  const selectRef = React.useRef<HTMLSelectElement>(null);
+  // track pre-open list so we can detect what was added
+  const beforeCatsRef = React.useRef<string[] | null>(null);
+  const [awaitingNew, setAwaitingNew] = React.useState(false);
 
   const sorted = React.useMemo(() => {
     const set = new Set(categories.map((c) => c.trim()).filter(Boolean));
@@ -136,15 +140,40 @@ function CategorySelect({
     return list;
   }, [categories, value]);
 
+  // after the manager closes, detect newly-added label & apply it
+  React.useEffect(() => {
+    if (openMgr) return; // wait until dialog is closed
+    if (!awaitingNew) return; // only if we opened via ＋ Add
+
+    setAwaitingNew(false);
+
+    const before = beforeCatsRef.current ?? [];
+    beforeCatsRef.current = null;
+
+    const lower = new Set(before.map((c) => c.toLowerCase()));
+    const added = (categories || []).filter((c) => !lower.has(c.toLowerCase()));
+
+    if (added.length > 0) {
+      // Heuristic: pick the first non-"Uncategorized" new label, else the first
+      const pick =
+        added.find((c) => c.toLowerCase() !== "uncategorized") ?? added[0];
+      onChange(pick); // ✅ auto-assign the new category
+    }
+  }, [openMgr, awaitingNew, categories, onChange]);
+
   return (
     <>
       <div className="flex items-center gap-2">
         <select
+          ref={selectRef}
           value={value}
           disabled={disabled}
           onChange={(e) => {
             const v = e.target.value;
             if (v === "__ADD__") {
+              // snapshot the list so we can diff later
+              beforeCatsRef.current = [...(categories || [])];
+              setAwaitingNew(true);
               setOpenMgr(true);
               return;
             }
@@ -167,6 +196,10 @@ function CategorySelect({
           key={`mgr-${categories.length}-${categories.join("|")}`}
           open
           onClose={() => setOpenMgr(false)}
+          // onAdded={(newName) => {
+          //   onChange(newName);
+          //   selectRef.current?.focus(); // NEW
+          // }}
         />
       )}
     </>
@@ -368,6 +401,13 @@ export default function ReconcilerPage() {
   const showUserCol = setupComplete && singleUser === false;
 
   const [headerBusy, setHeaderBusy] = React.useState(false);
+
+  const [flashIds, setFlashIds] = React.useState<Set<string>>(new Set());
+  const [liveMsg, setLiveMsg] = React.useState<string>("");
+  const effectiveCat = React.useCallback(
+    (r: TxRow) => (r.categoryOverride ?? r.category ?? "Uncategorized").trim(),
+    []
+  );
 
   async function ensureUpToDateParse(s: StatementSnapshot) {
     if ((s.normalizerVersion ?? 0) >= NORMALIZER_VERSION) return s;
@@ -641,7 +681,12 @@ export default function ReconcilerPage() {
                 </thead>
                 <tbody>
                   {g.rows.map((t) => (
-                    <tr key={t.id} className="border-t border-slate-800">
+                    <tr
+                      key={t.id}
+                      className={`border-t border-slate-800 transition-colors ${
+                        flashIds.has(t.id) ? "bg-emerald-900/30" : ""
+                      }`}
+                    >
                       <td className="p-2">{prettyDesc(t.description)}</td>
                       <td className="p-2">
                         <CategorySelect
@@ -649,7 +694,8 @@ export default function ReconcilerPage() {
                             t.categoryOverride ?? t.category ?? "Uncategorized"
                           }
                           onChange={(val) => {
-                            ensureCategoryExists(val); // ✅ add to global list if missing
+                            ensureCategoryExists(val); // keep
+
                             const aliasLabel = applyAlias(
                               stripAuthAndCard(t.description || "")
                             );
@@ -662,11 +708,22 @@ export default function ReconcilerPage() {
                               t.description || "",
                               t.amount ?? 0
                             );
+
+                            // Persist override & rule
                             writeOverride(k, val);
                             upsertCategoryRules(keys, val);
 
+                            // BEFORE snapshot
+                            const beforeById = new Map(
+                              transactions.map((r) => [
+                                r.id,
+                                effectiveCat(r as any),
+                              ])
+                            );
+
+                            // Recompute with rules and apply the explicit override to this row
                             const rules = readCatRules();
-                            const withRules = applyCategoryRulesTo(
+                            const updated = applyCategoryRulesTo(
                               rules,
                               transactions,
                               applyAlias
@@ -675,7 +732,32 @@ export default function ReconcilerPage() {
                                 ? { ...r, categoryOverride: val }
                                 : r
                             );
-                            setTransactions(withRules);
+
+                            // CHANGED ids
+                            const changed = updated.filter(
+                              (r) =>
+                                beforeById.get(r.id) !== effectiveCat(r as any)
+                            );
+                            const changedIds = new Set(
+                              changed.map((r) => r.id)
+                            );
+
+                            setTransactions(updated);
+
+                            // Flash + aria-live toast
+                            if (changedIds.size) {
+                              setFlashIds(changedIds);
+                              setLiveMsg(
+                                `Applied “${val}” to ${
+                                  changedIds.size
+                                } transaction${changedIds.size > 1 ? "s" : ""}.`
+                              );
+                              window.setTimeout(
+                                () => setFlashIds(new Set()),
+                                1200
+                              ); // remove highlight
+                              window.setTimeout(() => setLiveMsg(""), 2500); // fade toast text
+                            }
                           }}
                         />
                       </td>
@@ -748,6 +830,22 @@ export default function ReconcilerPage() {
       />
 
       <DemoReconcilerTips />
+
+      {/* a11y: announce bulk changes */}
+      <div className="sr-only" aria-live="polite">
+        {liveMsg}
+      </div>
+
+      {/* optional lightweight toast */}
+      {liveMsg && (
+        <div
+          className="fixed bottom-4 left-1/2 -translate-x-1/2
+                  px-3 py-1.5 rounded-lg border border-emerald-500/40
+                  bg-emerald-900/40 text-emerald-100 text-sm shadow-lg"
+        >
+          {liveMsg}
+        </div>
+      )}
     </ProtectedRoute>
   );
 }

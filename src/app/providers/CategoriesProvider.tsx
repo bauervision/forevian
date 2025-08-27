@@ -78,6 +78,7 @@ function deriveDemoBaseline(): string[] {
       }
     }
     set.add("Uncategorized");
+    set.add("Impulse/Misc");
     return normalizeList(Array.from(set));
   } catch {
     return ["Uncategorized"];

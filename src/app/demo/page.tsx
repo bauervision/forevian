@@ -176,50 +176,22 @@ export default function DemoHome() {
     <main className="min-h-[70vh] max-w-6xl mx-auto px-4 py-10">
       <h1 className="text-2xl font-bold">Live Demo</h1>
       <p className="mt-2 text-slate-300">
-        Preview Forevian with two months of sample data. No sign-in required.
+        Preview Forevian with three months of sample data. No sign-in required.
         Everything runs locally in your browser.
       </p>
-
-      <div className="mt-6 flex flex-wrap gap-3">
-        {hasData ? (
-          <>
-            <Link
-              href="/demo/dashboard"
-              className="rounded-xl px-4 py-2 bg-cyan-500 text-gray-900 font-semibold hover:bg-cyan-400"
-            >
-              Open Dashboard
-            </Link>
-            <button
-              onClick={resetAndReseed}
-              className="rounded-xl px-4 py-2 border border-slate-700 hover:bg-slate-900"
-              title="Reset the sample data then reopen the dashboard"
-            >
-              Reset sample data
-            </button>
-          </>
-        ) : (
-          <>
-            <button
-              onClick={seed}
-              className="rounded-xl px-4 py-2 bg-cyan-500 text-gray-900 font-semibold hover:bg-cyan-400"
-            >
-              Start the demo
-            </button>
-            <Link
-              href="/"
-              className="rounded-xl px-4 py-2 border border-slate-700 hover:bg-slate-900"
-            >
-              Back
-            </Link>
-          </>
-        )}
-      </div>
 
       {/* Quick links preview */}
       <section className="mt-8">
         <h2 className="text-lg font-semibold">Quick links</h2>
         <ul className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
           {/* Row 1: the why */}
+          <Feature
+            href="/demo/reconciler"
+            title="Rules & aliases"
+            desc="Normalize messy merchant text and auto-apply categories using your rules."
+            Icon={Network}
+            accent="from-slate-600/20 to-slate-500/5 border-slate-500"
+          />
           <Feature
             href="/demo/dashboard"
             title="Visual dashboard"
@@ -234,6 +206,8 @@ export default function DemoHome() {
             Icon={Receipt}
             accent="from-emerald-600/20 to-emerald-500/5 border-emerald-500"
           />
+
+          {/* Row 2: the what */}
           <Feature
             href="/demo/trend"
             title="Trends & insights"
@@ -241,8 +215,6 @@ export default function DemoHome() {
             Icon={TrendingUp}
             accent="from-blue-600/20 to-blue-500/5 border-blue-500"
           />
-
-          {/* Row 2: the what */}
           <Feature
             href="/demo/dashboard/category"
             title="Categories you control"
@@ -256,13 +228,6 @@ export default function DemoHome() {
             desc="Auto-infer logos, or choose a custom icon per merchant with one click."
             Icon={Images}
             accent="from-fuchsia-600/20 to-fuchsia-500/5 border-fuchsia-500"
-          />
-          <Feature
-            href="/demo/reconciler"
-            title="Rules & aliases"
-            desc="Normalize messy merchant text and auto-apply categories using your rules."
-            Icon={Network}
-            accent="from-slate-600/20 to-slate-500/5 border-slate-500"
           />
 
           {/* Row 3: the how */}
