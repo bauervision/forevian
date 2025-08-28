@@ -1163,19 +1163,35 @@ export default function ClientBudgetPage() {
             (s, h) => s + (h.amount || 0),
             0
           );
+
           return (
             <div className="fixed inset-0 z-50 grid place-items-center p-4">
-              <div
-                className="absolute inset-0 bg-black/70"
+              {/* BACKDROP */}
+              <button
+                aria-label="Close overlay"
                 onClick={() => setOpenDay(null)}
+                className="absolute inset-0 bg-black/70"
               />
-              <div className="relative w-full max-w-3xl rounded-2xl border border-slate-700 bg-slate-900 shadow-xl overflow-hidden">
-                {/* Header */}
-                <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
-                  <h4 className="text-lg font-semibold">
+              {/* PANEL */}
+              <div
+                className={[
+                  "relative w-screen h-dvh rounded-none overflow-hidden border border-slate-700 bg-slate-900 shadow-xl",
+                  "sm:h-auto sm:w-full sm:max-w-3xl sm:rounded-2xl",
+                  "grid grid-rows-[auto,1fr,auto]",
+                ].join(" ")}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="reconcile-title"
+              >
+                {/* HEADER (sticky) */}
+                <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between sticky top-0 bg-slate-900/95 backdrop-blur">
+                  <h4
+                    id="reconcile-title"
+                    className="text-base sm:text-lg font-semibold"
+                  >
                     Reconcile — Day {String(openDay).padStart(2, "0")}
                     {selectedHits.length > 0 && (
-                      <span className="ml-3 text-sm font-medium text-rose-300">
+                      <span className="ml-3 text-xs sm:text-sm font-medium text-rose-300">
                         Total: -{money(selectedTotal)}
                       </span>
                     )}
@@ -1188,24 +1204,16 @@ export default function ClientBudgetPage() {
                   </button>
                 </div>
 
-                {/* Scrollable body */}
-                <div className="p-5 overflow-y-auto max-h-[70vh]">
+                {/* BODY (scrollable) */}
+                <div className="min-h-0 overflow-y-auto px-4 sm:px-5 py-4">
                   {dayTxsEffective.length === 0 ? (
                     <div className="text-sm text-slate-400">
                       No transactions on this day.
                     </div>
                   ) : (
-                    <table className="w-full text-sm">
-                      <thead className="bg-slate-800/60 sticky top-0 z-10">
-                        <tr>
-                          <th className="text-left p-2">Description</th>
-                          <th className="text-left p-2">Category</th>
-                          <th className="text-left p-2">Bill?</th>
-                          <th className="text-right p-2">Amount</th>
-                          <th className="text-right p-2">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
+                    <>
+                      {/* Mobile: stacked cards */}
+                      <div className="sm:hidden space-y-3">
                         {dayTxsEffective.map((t) => {
                           const currentCat = (
                             t.categoryOverride ??
@@ -1230,19 +1238,32 @@ export default function ClientBudgetPage() {
                               : inferred;
 
                           return (
-                            <tr
+                            <div
                               key={t.id}
-                              className="border-t border-slate-800"
+                              className="rounded-xl border border-slate-800 p-3 bg-slate-900/60"
                             >
-                              <td className="p-2">
-                                <div className="font-medium">
-                                  {pretty(t.description)}
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <div className="font-medium text-sm">
+                                    {pretty(t.description)}
+                                  </div>
+                                  <div className="text-[11px] text-slate-400">
+                                    {t.date}
+                                  </div>
                                 </div>
-                                <div className="text-[11px] text-slate-400">
-                                  {t.date}
+                                <div
+                                  className={
+                                    "text-right text-sm " +
+                                    (t.amount < 0
+                                      ? "text-rose-300"
+                                      : "text-emerald-300")
+                                  }
+                                >
+                                  {money(Math.abs(t.amount))}
                                 </div>
-                              </td>
-                              <td className="p-2">
+                              </div>
+
+                              <div className="mt-3 grid grid-cols-1 gap-2">
                                 <CategorySelect
                                   value={currentCat}
                                   onChange={(val) => {
@@ -1258,97 +1279,238 @@ export default function ClientBudgetPage() {
                                     refreshAfterChange();
                                   }}
                                 />
-                              </td>
-                              <td className="p-2">
                                 <label className="inline-flex items-center gap-2 text-xs">
                                   <input
                                     type="checkbox"
                                     checked={!!billChecked}
-                                    onChange={(e) => {
+                                    onChange={(e) =>
                                       setBillOverrides((m) => ({
                                         ...m,
                                         [t.id]: e.target.checked,
-                                      }));
-                                    }}
+                                      }))
+                                    }
                                   />
                                   Include in bill calendar
                                 </label>
-                              </td>
-                              <td className="p-2 text-right">
-                                <span
-                                  className={
-                                    t.amount < 0
-                                      ? "text-rose-300"
-                                      : "text-emerald-300"
-                                  }
-                                >
-                                  {money(Math.abs(t.amount))}
-                                </span>
-                              </td>
-                              <td className="p-2 text-right space-x-2">
-                                <button
-                                  onClick={() => {
-                                    const newCat = "Transfer:Savings";
-                                    writeOverride(k, newCat);
-                                    const aliasLabel = applyAlias(
-                                      (t.description || "").trim()
-                                    );
-                                    const keys = candidateKeys(
-                                      t.description || "",
-                                      aliasLabel
-                                    );
-                                    upsertCategoryRules(keys, newCat);
-                                    refreshAfterChange();
-                                  }}
-                                  className="text-xs rounded-lg px-2 py-1 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-900/20"
-                                  title="Count this toward your Savings target"
-                                >
-                                  Mark Savings
-                                </button>
 
-                                <button
-                                  onClick={() => {
-                                    const newCat = "Transfer:Investing";
-                                    writeOverride(k, newCat);
-                                    const aliasLabel = applyAlias(
-                                      (t.description || "").trim()
-                                    );
-                                    const keys = candidateKeys(
-                                      t.description || "",
-                                      aliasLabel
-                                    );
-                                    upsertCategoryRules(keys, newCat);
-                                    refreshAfterChange();
-                                  }}
-                                  className="text-xs rounded-lg px-2 py-1 border border-indigo-500/50 text-indigo-300 hover:bg-indigo-900/20"
-                                  title="Count this toward your Investing target"
-                                >
-                                  Mark Investing
-                                </button>
+                                <div className="flex flex-wrap gap-2 pt-1">
+                                  <button
+                                    onClick={() => {
+                                      const newCat = "Transfer:Savings";
+                                      writeOverride(k, newCat);
+                                      const aliasLabel = applyAlias(
+                                        (t.description || "").trim()
+                                      );
+                                      const keys = candidateKeys(
+                                        t.description || "",
+                                        aliasLabel
+                                      );
+                                      upsertCategoryRules(keys, newCat);
+                                      refreshAfterChange();
+                                    }}
+                                    className="text-xs rounded-lg px-2 py-1 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-900/20"
+                                    title="Count this toward your Savings target"
+                                  >
+                                    Mark Savings
+                                  </button>
 
-                                <button
-                                  onClick={() =>
-                                    (
-                                      document.getElementById(
-                                        "budget-cat-mgr-trigger"
-                                      ) as any
-                                    )?.click?.()
-                                  }
-                                  className="text-xs rounded-lg px-2 py-1 border border-slate-700 hover:bg-slate-800"
-                                >
-                                  Edit categories…
-                                </button>
-                              </td>
-                            </tr>
+                                  <button
+                                    onClick={() => {
+                                      const newCat = "Transfer:Investing";
+                                      writeOverride(k, newCat);
+                                      const aliasLabel = applyAlias(
+                                        (t.description || "").trim()
+                                      );
+                                      const keys = candidateKeys(
+                                        t.description || "",
+                                        aliasLabel
+                                      );
+                                      upsertCategoryRules(keys, newCat);
+                                      refreshAfterChange();
+                                    }}
+                                    className="text-xs rounded-lg px-2 py-1 border border-indigo-500/50 text-indigo-300 hover:bg-indigo-900/20"
+                                    title="Count this toward your Investing target"
+                                  >
+                                    Mark Investing
+                                  </button>
+
+                                  <button
+                                    onClick={() =>
+                                      (
+                                        document.getElementById(
+                                          "budget-cat-mgr-trigger"
+                                        ) as any
+                                      )?.click?.()
+                                    }
+                                    className="text-xs rounded-lg px-2 py-1 border border-slate-700 hover:bg-slate-800"
+                                  >
+                                    Edit categories…
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
                           );
                         })}
-                      </tbody>
-                    </table>
+                      </div>
+
+                      {/* Desktop: table */}
+                      <div className="hidden sm:block overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead className="bg-slate-800/60 sticky top-0 z-10">
+                            <tr>
+                              <th className="text-left p-2">Description</th>
+                              <th className="text-left p-2">Category</th>
+                              <th className="text-left p-2">Bill?</th>
+                              <th className="text-right p-2">Amount</th>
+                              <th className="text-right p-2">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {dayTxsEffective.map((t) => {
+                              const currentCat = (
+                                t.categoryOverride ??
+                                t.category ??
+                                "Uncategorized"
+                              ).trim();
+                              const k = keyForTx(
+                                t.date || "",
+                                t.description || "",
+                                t.amount ?? 0
+                              );
+                              const includeByOverride = billOverrides[t.id];
+                              const inferred = isMandatoryCategory(
+                                currentCat,
+                                t.description
+                              );
+                              const billChecked =
+                                includeByOverride === true
+                                  ? true
+                                  : includeByOverride === false
+                                  ? false
+                                  : inferred;
+
+                              return (
+                                <tr
+                                  key={t.id}
+                                  className="border-t border-slate-800"
+                                >
+                                  <td className="p-2">
+                                    <div className="font-medium">
+                                      {pretty(t.description)}
+                                    </div>
+                                    <div className="text-[11px] text-slate-400">
+                                      {t.date}
+                                    </div>
+                                  </td>
+                                  <td className="p-2">
+                                    <CategorySelect
+                                      value={currentCat}
+                                      onChange={(val) => {
+                                        writeOverride(k, val);
+                                        const aliasLabel = applyAlias(
+                                          (t.description || "").trim()
+                                        );
+                                        const keys = candidateKeys(
+                                          t.description || "",
+                                          aliasLabel
+                                        );
+                                        upsertCategoryRules(keys, val);
+                                        refreshAfterChange();
+                                      }}
+                                    />
+                                  </td>
+                                  <td className="p-2">
+                                    <label className="inline-flex items-center gap-2 text-xs">
+                                      <input
+                                        type="checkbox"
+                                        checked={!!billChecked}
+                                        onChange={(e) =>
+                                          setBillOverrides((m) => ({
+                                            ...m,
+                                            [t.id]: e.target.checked,
+                                          }))
+                                        }
+                                      />
+                                      Include in bill calendar
+                                    </label>
+                                  </td>
+                                  <td className="p-2 text-right">
+                                    <span
+                                      className={
+                                        t.amount < 0
+                                          ? "text-rose-300"
+                                          : "text-emerald-300"
+                                      }
+                                    >
+                                      {money(Math.abs(t.amount))}
+                                    </span>
+                                  </td>
+                                  <td className="p-2 text-right space-x-2">
+                                    <button
+                                      onClick={() => {
+                                        const newCat = "Transfer:Savings";
+                                        writeOverride(k, newCat);
+                                        const aliasLabel = applyAlias(
+                                          (t.description || "").trim()
+                                        );
+                                        const keys = candidateKeys(
+                                          t.description || "",
+                                          aliasLabel
+                                        );
+                                        upsertCategoryRules(keys, newCat);
+                                        refreshAfterChange();
+                                      }}
+                                      className="text-xs rounded-lg px-2 py-1 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-900/20"
+                                      title="Count this toward your Savings target"
+                                    >
+                                      Mark Savings
+                                    </button>
+
+                                    <button
+                                      onClick={() => {
+                                        const newCat = "Transfer:Investing";
+                                        writeOverride(k, newCat);
+                                        const aliasLabel = applyAlias(
+                                          (t.description || "").trim()
+                                        );
+                                        const keys = candidateKeys(
+                                          t.description || "",
+                                          aliasLabel
+                                        );
+                                        upsertCategoryRules(keys, newCat);
+                                        refreshAfterChange();
+                                      }}
+                                      className="text-xs rounded-lg px-2 py-1 border border-indigo-500/50 text-indigo-300 hover:bg-indigo-900/20"
+                                      title="Count this toward your Investing target"
+                                    >
+                                      Mark Investing
+                                    </button>
+
+                                    <button
+                                      onClick={() =>
+                                        (
+                                          document.getElementById(
+                                            "budget-cat-mgr-trigger"
+                                          ) as any
+                                        )?.click?.()
+                                      }
+                                      className="text-xs rounded-lg px-2 py-1 border border-slate-700 hover:bg-slate-800"
+                                    >
+                                      Edit categories…
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
                   )}
                 </div>
 
-                {/* Footer */}
-                <div className="px-5 py-3 border-t border-slate-800 text-xs text-slate-400">
+                {/* FOOTER (sticky) */}
+                <div className="px-5 py-3 border-t border-slate-800 text-xs text-slate-400 sticky bottom-0 bg-slate-900/95 backdrop-blur">
                   Tip: Re-categorizing will also seed a simple rule so future
                   imports categorize automatically.
                 </div>

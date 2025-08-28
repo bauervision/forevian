@@ -261,14 +261,6 @@ export default function ClientDashboard() {
                 size="sm"
                 className="w-44 sm:w-56"
               />
-              {/* <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
-              Viewing:{" "}
-              {period === "CURRENT"
-                ? viewMeta.label
-                : `YTD ${viewMeta.stmtYear} (Jan–${
-                    viewMeta.label.split(" ")[0]
-                  })`}
-            </span> */}
             </>
           )}
 
