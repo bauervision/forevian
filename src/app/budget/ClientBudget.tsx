@@ -42,6 +42,44 @@ type TxLike = {
   user?: string;
 };
 
+function weeksOfMonth(year: number, month0: number, weekStartsOn: 0 | 1 = 0) {
+  // month0 is 0-based. Returns array of { start: Date, end: Date, inMonthDays: number }
+  const first = new Date(year, month0, 1);
+  const last = new Date(year, month0 + 1, 0);
+  // find the start of the first week (back to Sun/Mon)
+  const shift = (first.getDay() - weekStartsOn + 7) % 7;
+  const firstWeekStart = new Date(first);
+  firstWeekStart.setDate(first.getDate() - shift);
+
+  const weeks: { start: Date; end: Date; inMonthDays: number }[] = [];
+  let curStart = new Date(firstWeekStart);
+  while (curStart <= last || weeks.length === 0) {
+    const curEnd = new Date(curStart);
+    curEnd.setDate(curStart.getDate() + 6);
+
+    // Count how many days of this week are inside the target month
+    let inMonthDays = 0;
+    for (let d = 0; d < 7; d++) {
+      const probe = new Date(curStart);
+      probe.setDate(curStart.getDate() + d);
+      if (probe.getMonth() === month0 && probe.getFullYear() === year)
+        inMonthDays++;
+    }
+
+    weeks.push({
+      start: new Date(curStart),
+      end: new Date(curEnd),
+      inMonthDays,
+    });
+    curStart = new Date(curStart);
+    curStart.setDate(curStart.getDate() + 7);
+
+    // stop once we passed the last-of-month and we started after it
+    if (curStart > last && curStart.getMonth() !== month0) break;
+  }
+  return weeks;
+}
+
 const fmtUSD = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -365,6 +403,18 @@ function looksLikeGroceries(desc?: string) {
 export default function ClientBudgetPage() {
   const { label: stmtLabel, rows } = useLatestIssuedWithData();
 
+  // Which month are we showing? 0 = this month, 1 = next month
+  const [viewOffset, setViewOffset] = React.useState<0 | 1>(0);
+
+  // Utility: get first day of the "view" month
+  const viewFirst = React.useMemo(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth() + viewOffset, 1);
+  }, [viewOffset]);
+
+  // Convenience flags
+  const isForecast = viewOffset === 1;
+
   // Make sure tracking cats exist (once)
   const { categories = [], setCategories } = useCategories() as any;
   React.useEffect(() => {
@@ -537,13 +587,30 @@ export default function ClientBudgetPage() {
   /* --------------- Per-paycheck / period split --------------------- */
 
   // current calendar for display
-  const today = new Date();
-  const calYear = today.getFullYear();
-  const calMonth = today.getMonth();
+  const calYear = viewFirst.getFullYear();
+  const calMonth = viewFirst.getMonth();
   const first = new Date(calYear, calMonth, 1);
   const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
   const startWeekday = first.getDay();
   const midDay = 15;
+
+  // Groceries weekly breakdown for the selected month (proportional to days in week that fall in-month)
+  const groWeeks = React.useMemo(() => {
+    const weeks = weeksOfMonth(calYear, calMonth, 0); // Sunday-start
+    if (groceriesAmt <= 0 || weeks.length === 0) return [];
+    const perDay = groceriesAmt / daysInMonth;
+    return weeks.map((w, i) => {
+      const amt = Math.round(perDay * w.inMonthDays);
+      const label = `${w.start.toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+      })} – ${w.end.toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+      })}`;
+      return { i, label, amount: amt };
+    });
+  }, [groceriesAmt, calYear, calMonth, daysInMonth]);
 
   const depositsP1 = React.useMemo(
     () => deposits.filter((d) => (normalizeDateToDay(d.date) ?? 99) <= midDay),
@@ -693,6 +760,18 @@ export default function ClientBudgetPage() {
     return map;
   }, [bills]);
 
+  const billDaysForView = React.useMemo(() => {
+    const map = new Map(billDays);
+    if (map.has(31) && daysInMonth < 31) {
+      const moved = map.get(31)!;
+      const last = daysInMonth;
+      const existing = map.get(last) || [];
+      map.set(last, existing.concat(moved));
+      map.delete(31);
+    }
+    return map;
+  }, [billDays, daysInMonth]);
+
   const depositDaysMap = React.useMemo(() => {
     const map = new Map<
       number,
@@ -763,6 +842,33 @@ export default function ClientBudgetPage() {
         {/* Header / Summary */}
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-bold">Budget</h1>
+
+          {/* View toggle */}
+          <div className="ml-2 inline-flex rounded-xl overflow-hidden border border-slate-700">
+            <button
+              onClick={() => setViewOffset(0)}
+              className={`px-3 py-1 text-xs ${
+                viewOffset === 0
+                  ? "bg-slate-800 text-white"
+                  : "text-slate-300 hover:bg-slate-800/50"
+              }`}
+              aria-pressed={viewOffset === 0}
+            >
+              This Month
+            </button>
+            <button
+              onClick={() => setViewOffset(1)}
+              className={`px-3 py-1 text-xs ${
+                viewOffset === 1
+                  ? "bg-slate-800 text-white"
+                  : "text-slate-300 hover:bg-slate-800/50"
+              }`}
+              aria-pressed={viewOffset === 1}
+            >
+              Next Month
+            </button>
+          </div>
+
           {rows.length > 0 ? (
             <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
               Based on statement: {stmtLabel}
@@ -959,12 +1065,59 @@ export default function ClientBudgetPage() {
           </div>
         </div>
 
+        {/* Groceries by Week (for selected month) */}
+        <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
+          <div className="flex items-center justify-between">
+            <h3 className="font-semibold">
+              Groceries by Week —{" "}
+              {viewFirst.toLocaleString(undefined, {
+                month: "long",
+                year: "numeric",
+              })}
+            </h3>
+            {isForecast && (
+              <span className="text-[11px] px-2 py-0.5 rounded-full border border-amber-500/40 bg-amber-900/20 text-amber-200">
+                Forecast
+              </span>
+            )}
+          </div>
+
+          {groWeeks.length === 0 ? (
+            <div className="text-sm text-slate-400 mt-2">
+              No groceries target set.
+            </div>
+          ) : (
+            <ul className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {groWeeks.map((w) => (
+                <li
+                  key={w.i}
+                  className="rounded-xl border border-slate-700 bg-slate-900/60 p-3"
+                >
+                  <div className="text-xs text-slate-400">{w.label}</div>
+                  <div className="mt-1 text-xl font-semibold text-amber-400">
+                    {fmtUSD.format(w.amount)}
+                  </div>
+                  <div className="mt-1 text-[11px] text-slate-400">
+                    Target grocery spend
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="mt-3 text-xs text-slate-400">
+            Weekly targets are proportional to how many days of each week fall
+            in this month, keeping your monthly groceries target (
+            {money(groceriesAmt)}) intact.
+          </div>
+        </div>
+
         {/* Bill Calendar (current month) */}
         <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
           <div className="flex items-center justify-between">
             <h3 className="font-semibold">
               Bill Calendar —{" "}
-              {today.toLocaleString(undefined, {
+              {viewFirst.toLocaleString(undefined, {
                 month: "long",
                 year: "numeric",
               })}
@@ -990,7 +1143,10 @@ export default function ClientBudgetPage() {
             ))}
           </div>
 
-          <div className="grid grid-cols-7 gap-1">
+          <div
+            key={`cal-${calYear}-${calMonth}`}
+            className="grid grid-cols-7 gap-1"
+          >
             {Array.from({ length: startWeekday }).map((_, i) => (
               <div
                 key={`sp-${i}`}
@@ -999,7 +1155,7 @@ export default function ClientBudgetPage() {
             ))}
             {Array.from({ length: daysInMonth }).map((_, i) => {
               const day = i + 1;
-              const hits = billDays.get(day) || [];
+              const hits = billDaysForView.get(day) || [];
               const hasBills = hits.length > 0;
               const isP1 = day <= 15;
               const dayBillsTotal = hits.reduce(
