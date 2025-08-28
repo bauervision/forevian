@@ -2,12 +2,12 @@
 "use client";
 
 import React from "react";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 import BottomCoach from "@/components/BottomCoach";
+import { useClientSearchParam } from "@/lib/useClientSearchParams";
 
 export default function DemoCategoriesTips() {
   const pathname = usePathname();
-  const sp = useSearchParams();
 
   // Only on demo Categories index (NOT the slug page and NOT the slug=? fallback)
   const parts = (pathname || "").split("/").filter(Boolean); // e.g. ["demo","dashboard","category"]
@@ -16,7 +16,7 @@ export default function DemoCategoriesTips() {
     parts[1] === "dashboard" &&
     parts[2] === "category" &&
     parts.length === 3 &&
-    !sp.get("slug");
+    !useClientSearchParam("slug");
 
   if (!onDemoCategoriesIndex) return null;
 

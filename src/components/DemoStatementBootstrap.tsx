@@ -1,13 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { DEMO_MONTHS } from "@/app/demo/data";
 import { NORMALIZER_VERSION } from "@/lib/textNormalizer";
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 import { readCurrentId, readIndex } from "@/lib/statements";
 import { applyCategoryRulesTo, readCatRules } from "@/lib/categoryRules";
 import { applyAlias } from "@/lib/aliases";
+import { useSelectedStatementId } from "@/lib/useClientSearchParams";
 
 type Snap = {
   id: string;
@@ -53,13 +54,14 @@ function buildDemoIndex(): Record<string, Snap> {
 
 export default function DemoStatementsBootstrap() {
   const pathname = usePathname();
-  const search = useSearchParams();
+
   const isDemo = pathname?.startsWith("/demo") ?? false;
   const { setTransactions } = useReconcilerSelectors();
+  const sid = useSelectedStatementId();
 
   const hydrate = React.useCallback(() => {
     if (!isDemo) return;
-    const sid = search.get("statement") ?? readCurrentId();
+
     const idx = readIndex();
     const s = sid ? idx[sid] : undefined;
     const raw = Array.isArray(s?.cachedTx) ? s!.cachedTx : [];
@@ -69,7 +71,7 @@ export default function DemoStatementsBootstrap() {
     try {
       localStorage.setItem(LS_TX, JSON.stringify(withRules));
     } catch {}
-  }, [isDemo, search, setTransactions]);
+  }, [isDemo, setTransactions]);
 
   // on mount & whenever the URL statement changes
   React.useEffect(() => {

@@ -1,4 +1,4 @@
-// app/reconciler/page.tsx
+// app/demo/trend/page.tsx
 import { Suspense } from "react";
 
 import ClientTrendsPage from "@/app/trends/ClientTrends";

@@ -1,7 +1,7 @@
 "use client";
 import React from "react";
 import Link from "next/link";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 import { currentStatementMeta, type Period } from "@/lib/period";
 import { readIndex, readCurrentId, writeCurrentId } from "@/lib/statements";
@@ -34,6 +34,11 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 import { useCategories } from "@/app/providers/CategoriesProvider";
 import { demoCategoryHref } from "@/app/demo/slug-helpers";
 import DemoCategoriesTips from "@/components/DemoCategoriesTips";
+import {
+  useClientSearchParam,
+  useSelectedStatementId,
+} from "@/lib/useClientSearchParams";
+import { useSyncSelectedStatement } from "@/lib/useSyncSelectedStatement";
 
 /* ---------------------------- helpers & hooks ---------------------------- */
 
@@ -215,6 +220,9 @@ function accentFor(cat: string) {
 /* --------------------------------- page ---------------------------------- */
 
 export default function ClientCategories() {
+  useSyncSelectedStatement(); // <- keep provider in sync for this page
+
+  const selectedId = useSelectedStatementId() ?? "";
   const isDemo = useIsDemo();
   const base = isDemo ? "/demo" : "";
 
@@ -233,8 +241,8 @@ export default function ClientCategories() {
   const [openMgr, setOpenMgr] = React.useState(false);
 
   // URL-driven statement sync (only sync storage; keep demo URL clean)
-  const searchParams = useSearchParams();
-  const urlStatement = searchParams.get("statement");
+
+  const urlStatement = useClientSearchParam("statement");
   React.useEffect(() => {
     if (!urlStatement) return;
     if (readCurrentId() !== urlStatement) writeCurrentId(urlStatement);
@@ -245,10 +253,6 @@ export default function ClientCategories() {
   React.useEffect(() => setMounted(true), []);
 
   // NEW: while in demo, derive categories from demo statements and push to provider
-
-  const meta = currentStatementMeta();
-  const savedId = mounted ? readCurrentId() : undefined;
-  const selectedId: string = urlStatement ?? savedId ?? "";
 
   React.useEffect(() => {
     if (!selectedId) return;
@@ -269,7 +273,7 @@ export default function ClientCategories() {
   const prevRows = React.useMemo(() => {
     if (period !== "CURRENT") return [] as typeof viewRows;
     const idx = readIndex();
-    const selected = (searchParams.get("statement") ?? readCurrentId()) || "";
+    const selected = (urlStatement ?? readCurrentId()) || "";
     const prevId = prevStatementId(selected);
     if (!prevId) return [];
     const s = idx[prevId];
@@ -277,7 +281,7 @@ export default function ClientCategories() {
     const rules = readCatRules();
     const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
     return applyCategoryRulesTo(rules, raw, applyAlias) as typeof viewRows;
-  }, [period, searchParams]);
+  }, [period, urlStatement]);
 
   // Viewing chip should reflect the selected statement
   const viewMeta = React.useMemo(() => {

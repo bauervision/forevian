@@ -2,8 +2,9 @@
 "use client";
 
 import React from "react";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 import BottomCoach from "@/components/BottomCoach";
+import { useClientSearchParam } from "@/lib/useClientSearchParams";
 
 function prettify(slug: string) {
   return slug
@@ -16,14 +17,14 @@ function prettify(slug: string) {
 export default function DemoCategorySlugTips() {
   // Only show on demo category pages (SSG path or query fallback)
   const pathname = usePathname();
-  const sp = useSearchParams();
+
   const onDemoCategory =
     pathname?.startsWith("/demo/dashboard/category") ?? false;
 
   if (!onDemoCategory) return null;
 
   const slug = (
-    sp.get("slug") ||
+    useClientSearchParam("slug") ||
     pathname?.split("/").pop() ||
     "category"
   ) /* e.g. "utilities" */
@@ -37,8 +38,8 @@ export default function DemoCategorySlugTips() {
       body: (
         <>
           This view shows spend and transactions for the <b>{nice}</b> category.
-          Each merchant card has a small <b>✏️ pencil</b> button—click it to
-          open the <b>Brand Manager</b> for that merchant.
+          Each merchant card has a small <b>✏️ pencil</b> button ( Hover on
+          Desktop )—click it to open the <b>Brand Manager</b> for that merchant.
         </>
       ),
     },

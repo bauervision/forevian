@@ -584,14 +584,13 @@ export default function ClientBudgetPage() {
   // Weighted allocation toward the period with more discretionary cash
   const discretionaryP1 = Math.max(0, incomeP1 - totalBillsP1);
   const discretionaryP2 = Math.max(0, incomeP2 - totalBillsP2);
-  const totalDiscretionary = discretionaryP1 + discretionaryP2;
+  const hasTwoPaychecks = depositsP1.length > 0 && depositsP2.length > 0;
+  // Fallback weights if only one paycheck exists: weight by bills (or even split)
+  const w1 = hasTwoPaychecks ? discretionaryP1 : Math.max(1, totalBillsP1);
+  const w2 = hasTwoPaychecks ? discretionaryP2 : Math.max(1, totalBillsP2);
 
   // Allocate Groceries first (weighted by discretionary)
-  const [groP1, groP2] = proportionalAlloc(
-    groceriesAmt,
-    discretionaryP1,
-    discretionaryP2
-  );
+  const [groP1, groP2] = proportionalAlloc(groceriesAmt, w1, w2);
 
   // Recompute discretionary *after* groceries, to split savings/investing
   const discretionaryAfterGroP1 = Math.max(0, discretionaryP1 - groP1);
@@ -600,13 +599,13 @@ export default function ClientBudgetPage() {
   // Allocate savings/investing using the post-groceries discretionary
   const [saveP1, saveP2] = proportionalAlloc(
     savingsAmt,
-    discretionaryAfterGroP1,
-    discretionaryAfterGroP2
+    Math.max(discretionaryAfterGroP1, w1),
+    Math.max(discretionaryAfterGroP2, w2)
   );
   const [investP1, investP2] = proportionalAlloc(
     investingAmt,
-    discretionaryAfterGroP1,
-    discretionaryAfterGroP2
+    Math.max(discretionaryAfterGroP1, w1),
+    Math.max(discretionaryAfterGroP2, w2)
   );
 
   function proportionalAlloc(
@@ -615,7 +614,12 @@ export default function ClientBudgetPage() {
     d2: number
   ): [number, number] {
     const total = d1 + d2;
-    if (total <= 0) return [0, 0];
+    if (target <= 0) return [0, 0];
+    if (total <= 0) {
+      // absolute fallback: even split
+      const p1 = Math.round(target / 2);
+      return [p1, target - p1];
+    }
     const p1 = Math.round((target * d1) / total);
     const p2 = target - p1;
     return [p1, p2];
@@ -922,6 +926,7 @@ export default function ClientBudgetPage() {
                 <div className="mt-2 text-[11px] text-slate-400 space-y-0.5">
                   <div>Income: {money(incomeP1)}</div>
                   <div>Bills: -{money(totalBillsP1)}</div>
+                  <div>Groceries: -{money(groP1)}</div>
                   <div>Savings: -{money(saveP1)}</div>
                   <div>Investing: -{money(investP1)}</div>
                 </div>
@@ -940,6 +945,7 @@ export default function ClientBudgetPage() {
                 <div className="mt-2 text-[11px] text-slate-400 space-y-0.5">
                   <div>Income: {money(incomeP2)}</div>
                   <div>Bills: -{money(totalBillsP2)}</div>
+                  <div>Groceries: -{money(groP2)}</div>
                   <div>Savings: -{money(saveP2)}</div>
                   <div>Investing: -{money(investP2)}</div>
                 </div>

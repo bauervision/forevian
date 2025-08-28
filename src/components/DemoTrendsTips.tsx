@@ -24,16 +24,7 @@ export default function DemoTrendsTips() {
         </>
       ),
     },
-    {
-      title: "Change the time scope",
-      body: (
-        <>
-          Use the <b>Period</b> toggle to switch between <b>Current</b> and{" "}
-          <b>YTD</b>. Pair it with the <b>Statement</b> switcher to hop between
-          specific months.
-        </>
-      ),
-    },
+
     {
       title: "Drill into the why",
       body: (

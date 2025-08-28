@@ -1,61 +1,57 @@
 // helpers/useRowsForSelection.ts
-import { readIndex, readCurrentId } from "@/lib/statements";
+"use client";
+
+import { useMemo } from "react";
+import type { Period } from "@/lib/period";
+import type { TxRow } from "@/lib/types";
+import { readIndex } from "@/lib/statements";
 import { readCatRules, applyCategoryRulesTo } from "@/lib/categoryRules";
 import { applyAlias } from "@/lib/aliases";
-import type { Period } from "@/lib/period";
-import React from "react";
+import { normalizePageText } from "@/lib/textNormalizer";
+import { rebuildFromPages } from "@/lib/import/reconcile";
 
 export function useRowsForSelection(
   period: Period,
-  selectedId: string,
-  liveRows: any[]
-) {
-  // 🔁 Recompute if storage changes (demo reseed, statement switch in another tab)
-  const [storageBump, setStorageBump] = React.useState(0);
-  React.useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (
-        e.key === "reconciler.statements.index.v2" ||
-        e.key === "reconciler.statements.current.v2"
-      ) {
-        setStorageBump((x) => x + 1);
-      }
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
+  selectedIdRaw: string | null,
+  currentMonthRows: TxRow[]
+): TxRow[] {
+  const selectedId = selectedIdRaw ?? "";
 
-  return React.useMemo(() => {
-    const idx = readIndex();
-    const selected = idx[selectedId];
-    if (!selected) return liveRows;
+  return useMemo(() => {
+    if (!selectedId) return [];
 
-    // CURRENT = only the chosen statement
     if (period === "CURRENT") {
-      const currentId = readCurrentId();
-      // If we’re looking at the "current" statement, prefer liveRows,
-      // but fall back to cachedTx when liveRows are empty (e.g., on dashboard/category pages).
-      if (selectedId === currentId) {
-        if (Array.isArray(liveRows) && liveRows.length > 0) return liveRows;
-        return Array.isArray(selected.cachedTx) ? selected.cachedTx : [];
-      }
-      // Viewing a non-current statement → use its cached snapshot
-      return Array.isArray(selected.cachedTx) ? selected.cachedTx : [];
+      // Whatever the provider currently holds for the selected month
+      return currentMonthRows || [];
     }
 
-    // YTD = Jan..selected.month of selected.year
+    // YTD: gather from Jan..selected month of the same year
+    const idx = readIndex();
+    const sel = idx[selectedId];
+    if (!sel) return [];
+
     const rules = readCatRules();
-    const all: any[] = [];
-    for (const s of Object.values(idx)) {
+    const all: TxRow[] = [];
+
+    for (let m = 1; m <= sel.stmtMonth; m++) {
+      const id =
+        String(sel.stmtYear).padStart(4, "0") +
+        "-" +
+        String(m).padStart(2, "0");
+      const s = idx[id];
       if (!s) continue;
-      if (s.stmtYear !== selected.stmtYear) continue;
-      if (s.stmtMonth > selected.stmtMonth) continue;
-      if (Array.isArray(s.cachedTx)) {
-        all.push(...s.cachedTx);
-      } else if (selectedId === readCurrentId() && s.id === selectedId) {
-        all.push(...liveRows);
+
+      let rows: TxRow[] = [];
+      if (Array.isArray(s.cachedTx) && s.cachedTx.length) {
+        rows = applyCategoryRulesTo(rules, s.cachedTx, applyAlias) as TxRow[];
+      } else if (Array.isArray(s.pagesRaw) && s.pagesRaw.length) {
+        const pages = s.pagesRaw.map(normalizePageText);
+        const res = rebuildFromPages(pages, s.stmtYear, applyAlias);
+        rows = applyCategoryRulesTo(rules, res.txs, applyAlias) as TxRow[];
       }
+      all.push(...rows);
     }
-    return applyCategoryRulesTo(rules, all, applyAlias) as typeof liveRows;
-  }, [period, selectedId, liveRows, storageBump]);
+
+    return all;
+  }, [period, selectedId, currentMonthRows]);
 }

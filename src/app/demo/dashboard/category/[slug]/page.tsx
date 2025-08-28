@@ -1,9 +1,6 @@
-// app/demo/dashboard/category/[slug]/page.tsx
-import ClientCategoryPage from "@/app/dashboard/category/[slug]/ClientCategoryPage";
+import ClientOnly from "./ClientOnly";
 import { DEMO_MONTHS } from "@/app/demo/data";
 import { catToSlug } from "@/lib/slug";
-import { groupLabelForCategory } from "@/lib/categoryGroups";
-import { Suspense } from "react";
 
 export const dynamicParams = false;
 
@@ -15,21 +12,10 @@ export function generateStaticParams() {
       slugs.add(catToSlug(leaf));
     }
   }
-  // a couple of anchors if you want them
-  ["Uncategorized"].forEach((c) => slugs.add(catToSlug(c)));
+  slugs.add(catToSlug("Uncategorized"));
   return Array.from(slugs).map((slug) => ({ slug }));
 }
 
-export default function Page() {
-  return (
-    <Suspense
-      fallback={
-        <div className="mx-auto max-w-6xl p-6 text-sm text-slate-400">
-          Loading demo category…
-        </div>
-      }
-    >
-      <ClientCategoryPage />
-    </Suspense>
-  );
+export default function Page({ params }: { params: { slug: string } }) {
+  return <ClientOnly slug={params.slug} />;
 }

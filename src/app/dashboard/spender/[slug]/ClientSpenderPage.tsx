@@ -1,7 +1,7 @@
 "use client";
-import React from "react";
+import React, { Suspense } from "react";
 import Link from "next/link";
-import { useParams, usePathname, useSearchParams } from "next/navigation";
+
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 import { useRowsForSelection } from "@/helpers/useRowsForSelection";
 import { type Period } from "@/lib/period";
@@ -21,15 +21,11 @@ import {
 } from "lucide-react";
 import BrandLogoDialog from "@/components/BrandLogoDialog";
 import ProtectedRoute from "@/components/ProtectedRoute";
+import { useClientSearchParam } from "@/lib/useClientSearchParams";
 
 /* ----------------------------- helpers ---------------------------------- */
 const money = (n: number) =>
   n.toLocaleString(undefined, { style: "currency", currency: "USD" });
-
-const useIsDemo = () => {
-  const p = usePathname();
-  return p?.startsWith("/demo") ?? false;
-};
 
 const normalizeSlugToSpender = (slug: string) => {
   const v = (slug || "").toLowerCase();
@@ -37,6 +33,10 @@ const normalizeSlugToSpender = (slug: string) => {
   if (v === "beth") return "Beth";
   if (v === "husband") return "Husband";
   if (v === "wife") return "Wife";
+  if (v === "you") return "You";
+  if (v === "spouse") return "Spouse";
+  if (v === "primary") return "Primary";
+  if (v === "secondary") return "Secondary";
   return "Joint";
 };
 
@@ -95,7 +95,6 @@ const spenderIcon = (who: string, className = "h-5 w-5") => {
   return <HelpCircle className={className} />;
 };
 
-/** Logo with icon fallback (honors BrandMap noLogo/icon) */
 function MerchantLogo({
   src,
   alt = "",
@@ -104,7 +103,7 @@ function MerchantLogo({
 }: {
   src?: string | null;
   alt?: string;
-  iconOverride?: string | null; // IconKey | null
+  iconOverride?: string | null;
   className?: string;
 }) {
   const [failed, setFailed] = React.useState(!src);
@@ -137,11 +136,31 @@ function MerchantLogo({
 }
 
 /* ------------------------------- page ------------------------------------ */
-export default function ClientSpenderPage() {
-  const isDemo = useIsDemo();
+
+// NEW: accept slug & isDemo so we don’t need any Next navigation hooks here.
+export default function ClientSpenderPage({
+  slug,
+  isDemo = false,
+}: {
+  slug: string;
+  isDemo?: boolean;
+}) {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-6xl p-6 text-sm text-slate-400">
+          Loading spender…
+        </div>
+      }
+    >
+      <SpenderInner slug={slug} isDemo={isDemo} />
+    </Suspense>
+  );
+}
+
+function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
   const base = isDemo ? "/demo" : "";
 
-  // Map last4 → spender per mode
   const CARD_TO_SPENDER = React.useMemo<Record<string, string>>(
     () =>
       isDemo
@@ -150,8 +169,7 @@ export default function ClientSpenderPage() {
     [isDemo]
   );
 
-  const params = useParams<{ slug: string }>();
-  const spender = normalizeSlugToSpender(params.slug || "");
+  const spender = normalizeSlugToSpender(slug);
 
   const [editOpen, setEditOpen] = React.useState(false);
   const [editSeed, setEditSeed] = React.useState<string>("");
@@ -164,10 +182,9 @@ export default function ClientSpenderPage() {
     rules,
   } = useBrandMap() as any;
 
-  const sp = useSearchParams();
-  const urlId = sp.get("statement");
+  // URL param via safe client hook
+  const urlId = useClientSearchParam("statement");
 
-  // Avoid hydration mismatches
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => setMounted(true), []);
 
@@ -191,7 +208,6 @@ export default function ClientSpenderPage() {
 
   const [period, setPeriod] = React.useState<Period>("CURRENT");
 
-  // Determine spender for each row using explicit user OR last4 mapping
   const whoForRow = React.useCallback(
     (r: any): string => {
       const explicit = (r.user || "").trim();
@@ -203,10 +219,8 @@ export default function ClientSpenderPage() {
     [CARD_TO_SPENDER]
   );
 
-  // scope rows by statement/period
   const viewRows = useRowsForSelection(period, selectedId, transactions);
 
-  // filter by spender
   const rows = React.useMemo(
     () =>
       viewRows.filter(
@@ -215,7 +229,6 @@ export default function ClientSpenderPage() {
     [viewRows, spender, whoForRow]
   );
 
-  // previous statement rows in same scope, filtered by spender (for MoM)
   const prevScopedRows = React.useMemo(() => {
     if (period !== "CURRENT") return [] as typeof rows;
     if (!selectedId) return [] as typeof rows;
@@ -241,19 +254,17 @@ export default function ClientSpenderPage() {
     );
   }, [period, selectedId, spender, whoForRow]);
 
-  // totals
   const total = React.useMemo(
     () => rows.reduce((s, r) => s + Math.abs(r.amount < 0 ? r.amount : 0), 0),
     [rows]
   );
 
-  // merchant rollups + MoM trend
   type Agg = {
     label: string;
     amt: number;
     prev: number;
     logo: string | null;
-    iconOverride: string | null; // IconKey
+    iconOverride: string | null;
     trend: ReturnType<typeof computeTrend>;
     deltaMoney: string;
   };
@@ -268,7 +279,7 @@ export default function ClientSpenderPage() {
           .replace(/\s{2,}/g, " ")
           .trim()
           .toLowerCase()
-          .replace(/\b([a-z])/g, (mm) => mm.toUpperCase()); // simple title-case
+          .replace(/\b([a-z])/g, (mm) => mm.toUpperCase());
         m[label] = (m[label] ?? 0) + spend;
       }
       return m;
@@ -276,46 +287,45 @@ export default function ClientSpenderPage() {
     const curr = sumBy(rows);
     const prev = sumBy(prevScopedRows);
 
-    const result: Agg[] = Object.entries(curr).map(([label, amt]) => {
-      // prefer rule by normalized name; else detect; logoFor obeys noLogo
-      const normalize = (s: string) =>
-        (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-      const ruleByName =
-        (rules || []).find(
-          (r: any) =>
-            r.enabled !== false && normalize(r.name) === normalize(label)
-        ) || null;
+    return Object.entries(curr)
+      .map(([label, amt]) => {
+        const normalize = (s: string) =>
+          (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+        const ruleByName =
+          (rules || []).find(
+            (r: any) =>
+              r.enabled !== false && normalize(r.name) === normalize(label)
+          ) || null;
 
-      const hit = ruleByName || detect(label) || null;
+        const hit = ruleByName || detect(label) || null;
 
-      let logo: string | null = null;
-      let iconOverride: string | null = null;
+        let logo: string | null = null;
+        let iconOverride: string | null = null;
 
-      if (hit?.noLogo) {
-        iconOverride = hit.icon || "generic";
-      } else if (hit?.domain) {
-        logo = logoFor(hit.domain);
-      } else if (hit) {
-        logo = logoFor(hit.name);
-      } else {
-        logo = logoFor(label);
-      }
+        if (hit?.noLogo) {
+          iconOverride = hit.icon || "generic";
+        } else if (hit?.domain) {
+          logo = logoFor(hit.domain);
+        } else if (hit) {
+          logo = logoFor(hit.name);
+        } else {
+          logo = logoFor(label);
+        }
 
-      const trend = computeTrend(amt, prev[label] ?? 0);
-      const deltaMoney =
-        (trend.delta >= 0 ? "" : "−") + money(Math.abs(trend.delta));
-      return {
-        label,
-        amt,
-        prev: prev[label] ?? 0,
-        logo,
-        iconOverride,
-        trend,
-        deltaMoney,
-      };
-    });
-
-    return result.sort((a, b) => b.amt - a.amt);
+        const trend = computeTrend(amt, prev[label] ?? 0);
+        const deltaMoney =
+          (trend.delta >= 0 ? "" : "−") + money(Math.abs(trend.delta));
+        return {
+          label,
+          amt,
+          prev: prev[label] ?? 0,
+          logo,
+          iconOverride,
+          trend,
+          deltaMoney,
+        };
+      })
+      .sort((a, b) => b.amt - a.amt);
   }, [rows, prevScopedRows, detect, logoFor, rules, brandVersion]);
 
   const viewMeta = React.useMemo(() => {
@@ -338,7 +348,7 @@ export default function ClientSpenderPage() {
             <span>{spender}</span>
           </h1>
 
-          {mounted && viewMeta && (
+          {viewMeta && (
             <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
               Viewing:{" "}
               {period === "CURRENT"

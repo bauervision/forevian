@@ -1,7 +1,12 @@
+//app/dashboard/category/[slug]/ClientCategoryPage.tsx
 "use client";
-import React from "react";
+import React, { Suspense } from "react";
 import Link from "next/link";
-import { useParams, useSearchParams, usePathname } from "next/navigation";
+import { usePathname } from "next/navigation";
+import {
+  useClientSearchParam,
+  useSelectedStatementId,
+} from "@/lib/useClientSearchParams";
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 import { type Period } from "@/lib/period";
 import { readIndex, readCurrentId, writeCurrentId } from "@/lib/statements";
@@ -18,6 +23,7 @@ import { useCategories } from "@/app/providers/CategoriesProvider";
 import { iconForCategory, IconFromKey, IconKey, isIconKey } from "@/lib/icons";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import DemoCategorySlugTips from "@/components/DemoCategorySlugTips";
+import { useSyncSelectedStatement } from "@/lib/useSyncSelectedStatement";
 
 /* ----------------------------- trends helpers ---------------------------- */
 
@@ -338,38 +344,59 @@ type MerchantAgg = {
 };
 
 /* ---------------------------------- page ---------------------------------- */
+export default function ClientCategoryPage({
+  slug,
+  isDemo,
+}: {
+  slug?: string;
+  isDemo?: boolean;
+}) {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-6xl p-6 text-sm text-slate-400">
+          Loading category…
+        </div>
+      }
+    >
+      <CategoryInner slugProp={slug} isDemoProp={isDemo} />
+    </Suspense>
+  );
+}
 
-export default function ClientCategoryPage() {
+function CategoryInner({
+  slugProp,
+  isDemoProp,
+}: {
+  slugProp?: string;
+  isDemoProp?: boolean;
+}) {
+  useSyncSelectedStatement(); // <- keep provider in sync for this page
+
+  const selectedId = useSelectedStatementId() ?? "";
+
   const isDemo = useIsDemo();
   const base = isDemo ? "/demo" : "";
 
   const { categories } = useCategories();
-  const params = useParams<{ slug: string }>();
+  const slug = (slugProp || "").toLowerCase();
   const { version: brandVersion, detect, logoFor, rules } = useBrandMap();
 
   const [editOpen, setEditOpen] = React.useState(false);
   const [editSeed, setEditSeed] = React.useState<string>("");
   const { transactions } = useReconcilerSelectors();
 
-  // URL-driven selection
-  const sp = useSearchParams();
+  const statementParam = useClientSearchParam("statement"); // one call only
 
-  // Statement id (kept in storage but prefer URL when present)
-  const selectedId = React.useMemo(
-    () => sp.get("statement") ?? readCurrentId() ?? "",
-    [sp]
-  );
-  React.useEffect(() => {
-    const sid = sp.get("statement");
-    if (sid && readCurrentId() !== sid) writeCurrentId(sid);
-  }, [sp]);
-  const urlId = sp.get("statement"); // string | null
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => setMounted(true), []);
+
+  // Keep localStorage in sync with the URL param when present
   React.useEffect(() => {
-    if (urlId && readCurrentId() !== urlId) writeCurrentId(urlId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlId]);
+    if (statementParam && readCurrentId() !== statementParam) {
+      writeCurrentId(statementParam);
+    }
+  }, [statementParam]);
 
   const [period, setPeriod] = React.useState<PeriodEx>("CURRENT");
 
@@ -382,13 +409,6 @@ export default function ClientCategoryPage() {
     const idx = readIndex();
     return idx[selectedId];
   }, [selectedId]);
-
-  // --- read slug and detect if it's a group
-  const slug = ((params?.slug as string) || sp.get("slug") || "")
-    .toString()
-    .toLowerCase();
-
-  const headerLabel = slugToCat(slug, categories);
 
   // --- filter current rows (slug compare)
   // Filter viewRows by leaf category (no grouping)
@@ -443,10 +463,10 @@ export default function ClientCategoryPage() {
   // Previous statement rows (for MoM trend)
   const prevRows = React.useMemo(() => {
     if (period !== "CURRENT") return [] as typeof viewRows;
+    if (!selectedId) return [] as typeof viewRows;
 
     const idx = readIndex();
-    const selected = (sp.get("statement") ?? readCurrentId()) || "";
-    const prevId = prevStatementId(selected);
+    const prevId = prevStatementId(selectedId);
     if (!prevId) return [] as typeof viewRows;
 
     const s = idx[prevId];
@@ -455,13 +475,13 @@ export default function ClientCategoryPage() {
     const rules = readCatRules();
     const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
     return applyCategoryRulesTo(rules, raw, applyAlias) as typeof viewRows;
-  }, [period, sp]);
+  }, [period, selectedId]);
 
   // Merchant rollup (current + prev → trend)
   const sumMerchants = (rowsIn: typeof rows) => {
     const m: Record<string, number> = {};
     for (const r of rowsIn) {
-      const raw = prettyDesc(r.description || r.merchant || "");
+      const raw = prettyDesc(r.description || "");
       const label = canonicalizeMerchantLabel(raw);
       const amt = Math.abs(r.amount < 0 ? r.amount : 0);
       if (amt > 0) m[label] = (m[label] ?? 0) + amt;
@@ -514,7 +534,7 @@ export default function ClientCategoryPage() {
     for (const r of prevRows) {
       const amt = Math.abs(r.amount < 0 ? r.amount : 0);
       if (!amt) continue;
-      const { label } = resolve(r.description || r.merchant || "");
+      const { label } = resolve(r.description || "");
       prevTotals.set(label, (prevTotals.get(label) ?? 0) + amt);
     }
 
@@ -525,9 +545,7 @@ export default function ClientCategoryPage() {
     for (const r of rows) {
       const amt = Math.abs(r.amount < 0 ? r.amount : 0);
       if (!amt) continue;
-      const { label, logo, iconOverride } = resolve(
-        r.description || r.merchant || ""
-      );
+      const { label, logo, iconOverride } = resolve(r.description || "");
       const prev = prevTotals.get(label) ?? 0;
       if (!cur[label]) cur[label] = { amt: 0, logo, prev, icon: iconOverride };
       cur[label].amt += amt;
@@ -743,9 +761,9 @@ export default function ClientCategoryPage() {
                                 setEditOpen(true);
                               }}
                               className="absolute -right-1 -bottom-1 h-6 w-6 rounded-lg
-                 border border-slate-700 bg-slate-900/95
-                 opacity-0 group-hover:opacity-100 transition
-                 flex items-center justify-center"
+  border border-slate-700 bg-slate-900/95
+  opacity-100 md:opacity-0 md:group-hover:opacity-100 transition
+  flex items-center justify-center"
                             >
                               <Pencil className="h-3.5 w-3.5 text-slate-300" />
                               <span className="sr-only">

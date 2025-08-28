@@ -88,6 +88,12 @@ export function writeCurrentId(id: string) {
   try {
     localStorage.setItem(CUR_KEY, id);
   } catch {}
+  // 🔔 tell the app something changed
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("forevian:statement-change", { detail: { id } })
+    );
+  }
 }
 export function upsertStatement(s: StatementSnapshot) {
   const idx = readIndex();

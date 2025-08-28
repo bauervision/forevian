@@ -1,8 +1,8 @@
 // app/reconciler/page.tsx
 "use client";
 
-import React from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import React, { useEffect } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 import {
   readIndex,
@@ -43,7 +43,11 @@ import {
 import DemoReconcilerTips from "../../components/DemoReconcilerTips";
 import { DEMO_MONTHS, DEMO_VERSION } from "@/app/demo/data";
 import { applyAlias } from "@/lib/aliases";
-import BottomCoach from "@/components/BottomCoach";
+
+import {
+  useClientSearchParam,
+  useSelectedStatementId,
+} from "@/lib/useClientSearchParams";
 
 /* --- tiny UI bits --- */
 function useEnsureCategoryExists() {
@@ -257,9 +261,9 @@ function payloadHash(): string {
 /** Seeds LS and the provider on /demo routes before other effects run. */
 function DemoSeeder() {
   const pathname = usePathname();
-  const search = useSearchParams();
-  const { setTransactions, setInputs } = useReconcilerSelectors();
 
+  const { setTransactions, setInputs } = useReconcilerSelectors();
+  const qp = useClientSearchParam("statement") || undefined;
   React.useLayoutEffect(() => {
     if (!pathname?.startsWith("/demo")) return;
 
@@ -278,7 +282,7 @@ function DemoSeeder() {
       localStorage.setItem(LS_IDX, JSON.stringify(idx));
 
       // Select statement: ?statement -> env -> latest -> first
-      const qp = search.get("statement") || undefined;
+
       const envId =
         (process.env.NEXT_PUBLIC_DEMO_MONTH as string | undefined) || undefined;
       const latest = DEMO_MONTHS.at(-1)?.id;
@@ -396,7 +400,7 @@ export default function ReconcilerPage() {
   const router = useRouter();
   const pathname = usePathname();
   const isDemo = pathname.startsWith("/demo");
-  const searchParams = useSearchParams();
+
   const { singleUser, setupComplete } = useSpenders();
   const showUserCol = setupComplete && singleUser === false;
 
@@ -450,18 +454,34 @@ export default function ReconcilerPage() {
 
   // keep ?statement in URL
   const setStatementInUrl = React.useCallback(
-    (id?: string) => {
-      if (isDemo) return; // ✅ no query param in demo
-      const sp = new URLSearchParams(searchParams.toString());
-      if (id) sp.set("statement", id);
+    (nextId?: string) => {
+      if (isDemo) return; // no query param in demo
+
+      // Start from the current client query string
+      const current =
+        typeof window === "undefined" ? "" : window.location.search;
+      const sp = new URLSearchParams(current);
+
+      if (nextId) sp.set("statement", nextId);
       else sp.delete("statement");
-      router.replace(`${pathname}?${sp.toString()}`);
+
+      const qs = sp.toString();
+      const href = qs ? `${pathname}?${qs}` : pathname;
+
+      router.replace(href);
     },
-    [router, pathname, searchParams, isDemo]
+    [isDemo, pathname, router]
   );
 
-  React.useEffect(() => {
-    // migrate / bootstrap
+  const selectedId = useSelectedStatementId(); // string | null
+
+  // Run bootstrap exactly once, but only after we know the selectedId (or it's null)
+  const bootstrapped = React.useRef(false);
+
+  useEffect(() => {
+    if (bootstrapped.current) return;
+
+    // --- migrate / bootstrap storage ---
     if (!isDemo) migrateLegacyIfNeeded();
 
     let idx = readIndex();
@@ -477,7 +497,7 @@ export default function ReconcilerPage() {
         upsertStatement(emptyStatement(id, label, y, m));
         idx = readIndex();
       } else {
-        // DEMO: materialize demo statements so readIndex()/readCurrentId() work
+        // Demo: materialize statements so readIndex()/readCurrentId() work
         for (const m of DEMO_MONTHS) {
           upsertStatement({
             ...emptyStatement(m.id, m.label, m.stmtYear, m.stmtMonth),
@@ -492,26 +512,25 @@ export default function ReconcilerPage() {
 
     setStatements(idx);
 
-    // Pick initial statement id
-    const initialUrlStatement = searchParams.get("statement");
+    // --- choose initial id ---
     const fallbackDemoId =
       DEMO_MONTHS.at(-1)?.id ?? DEMO_MONTHS[0]?.id ?? Object.keys(idx)[0] ?? "";
 
     const cid =
-      initialUrlStatement ||
-      readCurrentId() ||
-      Object.keys(idx)[0] ||
-      (isDemo ? fallbackDemoId : "");
+      selectedId || // URL (non-demo) or LS (demo) via hook
+      readCurrentId() || // persisted last selection
+      Object.keys(idx)[0] || // first available
+      (isDemo ? fallbackDemoId : ""); // demo fallback
 
     setCurrentId(cid);
-    if (!isDemo) setStatementInUrl(cid);
+    writeCurrentId(cid); // persist + broadcast (our patched version)
+    if (!isDemo) setStatementInUrl(cid); // mirror to URL only outside demo
 
+    // --- load data for cid ---
     const cur = idx[cid];
-
     setInputs(inputsFromStmt(cur));
 
     if (cur?.cachedTx?.length) {
-      // ✅ Use demo/parsed snapshot when present
       const rules = readCatRules();
       const txWithRules = applyCategoryRulesTo(rules, cur.cachedTx, applyAlias);
       setTransactions(txWithRules);
@@ -523,18 +542,24 @@ export default function ReconcilerPage() {
       setTransactions(txWithRules);
       if (!isDemo) ensureUpToDateParse(cur);
     } else {
-      // Only open importer in non-demo; on demo, leave provider’s seeded rows alone
-      if (!isDemo) {
-        setTransactions([]);
-        setOpenWizard(true);
-      }
+      setTransactions([]);
+      if (!isDemo) setOpenWizard(true);
     }
 
+    bootstrapped.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [selectedId, isDemo]);
+
+  // React to later changes (dropdown, back/forward, other tabs)
+  useEffect(() => {
+    const next = selectedId ?? "";
+    if (!next || next === currentId) return;
+    onSwitchStatement(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
   // respond to URL changes
-  const urlStatement = searchParams.get("statement") ?? "";
+  const urlStatement = useClientSearchParam("statement") ?? "";
   React.useEffect(() => {
     if (!urlStatement) return;
     if (currentId && currentId === urlStatement) return;

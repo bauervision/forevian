@@ -2,6 +2,9 @@
 import { Suspense } from "react";
 import ClientCategories from "./ClientCategories";
 
+// Keep static-friendly (or just omit this line if you don't set dynamic elsewhere)
+export const dynamic = "force-static";
+
 export default function Page() {
   return (
     <Suspense

@@ -1,7 +1,7 @@
 // app/demo/page.tsx
 "use client";
 
-import React from "react";
+import React, { Suspense } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -32,6 +32,20 @@ const USD = new Intl.NumberFormat("en-US", {
 const money = (n: number) => USD.format(n);
 
 export default function DemoHome() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-[70vh] max-w-6xl mx-auto px-4 py-10 text-sm text-slate-400">
+          Loading demo…
+        </main>
+      }
+    >
+      <DemoHomeInner />
+    </Suspense>
+  );
+}
+
+function DemoHomeInner() {
   const r = useRouter();
   const [hasData, setHasData] = React.useState(false);
 

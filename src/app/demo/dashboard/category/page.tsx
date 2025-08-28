@@ -2,14 +2,7 @@ import { Suspense } from "react";
 import ClientCategories from "@/app/dashboard/category/ClientCategories";
 import ClientCategoryPage from "@/app/dashboard/category/[slug]/ClientCategoryPage";
 
-export default function Page({
-  searchParams,
-}: {
-  searchParams?: { slug?: string };
-}) {
-  const hasSlug =
-    typeof searchParams?.slug === "string" && searchParams.slug.length > 0;
-
+export default function Page() {
   return (
     <Suspense
       fallback={
@@ -18,7 +11,7 @@ export default function Page({
         </div>
       }
     >
-      {hasSlug ? <ClientCategoryPage /> : <ClientCategories />}
+      <ClientCategories />
     </Suspense>
   );
 }

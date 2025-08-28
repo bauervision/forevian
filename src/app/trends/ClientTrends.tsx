@@ -48,8 +48,6 @@ type MonthBucket = {
   spendByCategory: Record<string, number>; // categoryName -> sum(outflows)
 };
 
-type PeriodView = "YTD" | "LAST_6" | "LAST_12";
-
 const fmtUSD = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -224,7 +222,6 @@ export default function ClientTrendsPage() {
 
   const { categories: sourceCats } = useCategories(); // source of truth
   const allMonths = React.useMemo(() => buildMonthlyFromStatements(), []);
-  const [period, setPeriod] = React.useState<PeriodView>("LAST_12");
 
   // Filter months by period
   const months = React.useMemo(() => {
@@ -236,12 +233,8 @@ export default function ClientTrendsPage() {
       const [y] = nowId.split("-").map(Number);
       return y || now.getFullYear();
     })();
-    if (period === "YTD") {
-      return allMonths.filter((m) => m.year === yearRef);
-    }
-    const take = period === "LAST_6" ? 6 : 12;
-    return allMonths.slice(-take);
-  }, [allMonths, period]);
+    return allMonths.filter((m) => m.year === yearRef);
+  }, [allMonths]);
 
   // Observed categories from data
   const observedCats = React.useMemo(() => {
@@ -297,26 +290,6 @@ export default function ClientTrendsPage() {
           <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
             {months.length} month{months.length === 1 ? "" : "s"}
           </span>
-
-          <div className="ml-auto flex items-center gap-2">
-            <span className="text-sm">Period:</span>
-            <div className="inline-flex rounded-lg border border-slate-700 overflow-hidden">
-              {(["YTD", "LAST_6", "LAST_12"] as PeriodView[]).map((p) => (
-                <button
-                  key={p}
-                  className={[
-                    "px-3 py-1 text-sm",
-                    period === p
-                      ? "bg-emerald-600 text-white"
-                      : "hover:bg-slate-900",
-                  ].join(" ")}
-                  onClick={() => setPeriod(p)}
-                >
-                  {p === "YTD" ? "YTD" : p === "LAST_6" ? "Last 6" : "Last 12"}
-                </button>
-              ))}
-            </div>
-          </div>
         </div>
 
         {/* Category picker (union of source-of-truth + observed) */}

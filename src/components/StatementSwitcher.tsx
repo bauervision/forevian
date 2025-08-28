@@ -1,9 +1,9 @@
-// components/StatementSwitcher.tsx
 "use client";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import dayjs from "dayjs";
-import { readCurrentId } from "@/lib/statements"; // 👈 use saved selection
+import { readCurrentId, writeCurrentId } from "@/lib/statements";
+import { useSelectedStatementId } from "@/lib/useClientSearchParams";
 
 type Statement = { id: string; label: string };
 
@@ -24,13 +24,15 @@ export default function StatementSwitcher({
 }) {
   const router = useRouter();
   const pathname = usePathname();
-  const sp = useSearchParams();
-  const idInUrl = sp.get("statement") ?? "";
+  const isDemo = pathname?.startsWith("/demo") ?? false;
+
+  // URL source of truth (non-demo)
+  const idFromUrl = useSelectedStatementId(); // string | null
 
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
-  // Build month ids (newest → oldest)
+  // Build candidate ids (newest → oldest)
   const allIds = useMemo(() => {
     const base = (
       available?.length
@@ -42,15 +44,36 @@ export default function StatementSwitcher({
     return base;
   }, [available, fallbackMonths]);
 
-  // Choose the intended id (URL > saved > newest)
-  const saved = mounted ? readCurrentId() : "";
-  const intended = idInUrl || saved || allIds[0] || "";
+  // Local selected state so demo routes can update instantly
+  const [selected, setSelected] = useState<string>("");
 
-  // Ensure the intended id is present in the dropdown list
+  // Initialize & keep in sync with URL/localStorage
+  useEffect(() => {
+    if (!mounted) return;
+
+    const saved = readCurrentId() || "";
+    const fallback = allIds[0] || "";
+    const next = (idFromUrl || saved || fallback || "").trim();
+
+    if (next && next !== selected) setSelected(next);
+
+    // Always persist to LS so the rest of the app can read it
+    if (next && next !== saved) writeCurrentId(next);
+
+    // If URL is empty on non-demo, mirror the chosen id once
+    if (!isDemo && !idFromUrl && next && typeof window !== "undefined") {
+      const u = new URL(window.location.href);
+      u.searchParams.set("statement", next);
+      router.replace(u.pathname + "?" + u.searchParams.toString());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mounted, idFromUrl, allIds, isDemo, router]);
+
+  // Ensure the currently selected id is present in the dropdown list
   const idsForSelect = useMemo(() => {
-    if (!intended) return allIds;
-    return allIds.includes(intended) ? allIds : [intended, ...allIds];
-  }, [allIds, intended]);
+    if (!selected) return allIds;
+    return allIds.includes(selected) ? allIds : [selected, ...allIds];
+  }, [allIds, selected]);
 
   const statements: Statement[] = useMemo(
     () =>
@@ -61,22 +84,20 @@ export default function StatementSwitcher({
     [idsForSelect]
   );
 
-  // If URL is empty, write the intended id once
-  useEffect(() => {
-    if (!mounted) return;
-    if (!idInUrl && intended) {
-      const next = new URLSearchParams(sp.toString());
-      next.set("statement", intended);
-      router.replace(`${pathname}?${next.toString()}`);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mounted, idInUrl, intended]);
+  const onChange = useCallback(
+    (id: string) => {
+      setSelected(id);
+      writeCurrentId(id);
 
-  const onChange = (id: string) => {
-    const next = new URLSearchParams(sp.toString());
-    next.set("statement", id);
-    router.replace(`${pathname}?${next.toString()}`);
-  };
+      // Non-demo: reflect in URL so other pages pick it up
+      if (!isDemo && typeof window !== "undefined") {
+        const u = new URL(window.location.href);
+        u.searchParams.set("statement", id);
+        router.replace(u.pathname + "?" + u.searchParams.toString());
+      }
+    },
+    [isDemo, router]
+  );
 
   const h = size === "sm" ? "h-9 text-sm" : "h-10";
   const wrapperW = className || "sm:w-56";
@@ -91,7 +112,7 @@ export default function StatementSwitcher({
       <div className="relative">
         <select
           aria-label={label}
-          value={idInUrl || intended || ""}
+          value={selected || ""}
           onChange={(e) => onChange(e.target.value)}
           className={`w-full ${h} rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 pr-9
                       focus:outline-none focus:ring-2 focus:ring-emerald-500/60 focus:border-emerald-500`}

@@ -7,13 +7,18 @@ import { readIndex, readCurrentId, writeCurrentId } from "@/lib/statements";
 
 import StatementSwitcher from "@/components/StatementSwitcher";
 import { User, User2, HelpCircle } from "lucide-react";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { iconForCategory } from "@/lib/icons"; // uses your shared icon util
 import { useRowsForSelection } from "@/helpers/useRowsForSelection";
 
 import ProtectedRoute from "@/components/ProtectedRoute";
 import DemoDashboardTips from "@/components/DemoDashboardTips";
+import {
+  useClientSearchParam,
+  useSelectedStatementId,
+} from "@/lib/useClientSearchParams";
+import { useSyncSelectedStatement } from "@/lib/useSyncSelectedStatement";
 /* ---------------------------- helpers & hooks ---------------------------- */
 
 function useIsDemo() {
@@ -137,6 +142,9 @@ const money = (n: number) => USD.format(n);
 /* --------------------------------- page ---------------------------------- */
 
 export default function ClientDashboard() {
+  useSyncSelectedStatement();
+
+  const selectedId = useSelectedStatementId();
   const isDemo = useIsDemo();
   const base = isDemo ? "/demo" : "";
 
@@ -151,19 +159,7 @@ export default function ClientDashboard() {
   const { transactions, inputs } = useReconcilerSelectors();
   const options = useStatementOptions();
 
-  // URL ↔ localStorage sync for statement
-  const searchParams = useSearchParams();
-  const urlStatement = searchParams.get("statement");
-  React.useEffect(() => {
-    if (!urlStatement) return;
-    if (readCurrentId() !== urlStatement) writeCurrentId(urlStatement);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlStatement]);
-
-  const selectedId = urlStatement ?? readCurrentId() ?? options[0]?.id ?? "";
-
   // make sure data is synced
-
   const { setInputs } = useReconcilerSelectors();
   React.useEffect(() => {
     if (!selectedId) return;
@@ -247,12 +243,6 @@ export default function ClientDashboard() {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 10);
   }, [viewRows]);
-
-  React.useEffect(() => {
-    if (!urlStatement) return;
-    if (readCurrentId() !== urlStatement) writeCurrentId(urlStatement);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlStatement]);
 
   return (
     <ProtectedRoute>
