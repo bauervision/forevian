@@ -31,7 +31,7 @@ import { catToSlug } from "@/lib/slug";
 import ProtectedRoute from "@/components/ProtectedRoute";
 
 // NEW: pull in categories provider setters
-import { useCategories } from "@/app/providers/CategoriesProvider";
+import { Category, useCategories } from "@/app/providers/CategoriesProvider";
 import { demoCategoryHref } from "@/app/demo/slug-helpers";
 import DemoCategoriesTips from "@/components/DemoCategoriesTips";
 import {
@@ -230,10 +230,13 @@ export default function ClientCategories() {
   const { setAll, setCategories } = useCategories() as any; // NEW setters
 
   // pull from provider (fallback to empty array just in case)
-  const { categories = [] } = useCategories() as { categories: string[] };
+  const { categories = [] } = useCategories() as { categories: Category[] };
 
   const mgrKey = React.useMemo(
-    () => `mgr-${categories.length}-${categories.join("|")}`,
+    () =>
+      `mgr-${categories.length}-${categories
+        .map((c) => c.id || c.slug || c.name)
+        .join("|")}`,
     [categories]
   );
 
@@ -293,35 +296,61 @@ export default function ClientCategories() {
   // Build current + previous totals keyed by top-level category (group label)
   // build totals by *leaf* category (categoryOverride ?? category)
   const catCards = React.useMemo(() => {
-    const sumByLeaf = (rows: any[]) => {
-      const m: Record<string, number> = {};
+    // fast lookup maps
+    const bySlug = new Map(
+      categories.map((c) => [(c.slug || "").toLowerCase(), c] as const)
+    );
+    const byName = new Map(
+      categories.map((c) => [c.name.toLowerCase(), c] as const)
+    );
+    const uncategorized =
+      categories.find((c) => c.name.toLowerCase() === "uncategorized") ??
+      categories[0];
+
+    // create a sum map for a given row set
+    const makeSums = (rows: any[]) => {
+      const sums = new Map<string, number>(); // key = provider slug (lowercase)
       for (const r of rows) {
-        const name = (
-          r.categoryOverride ??
-          r.category ??
-          "Uncategorized"
+        const rawName = String(
+          (r.categoryOverride ?? r.category ?? "Uncategorized") || ""
         ).trim();
         const amt = r.amount < 0 ? Math.abs(r.amount) : 0;
-        if (!amt || !name) continue;
-        m[name] = (m[name] ?? 0) + amt;
+        if (!amt) continue;
+
+        const slug = catToSlug(rawName);
+        const cat =
+          bySlug.get(slug) ||
+          byName.get(rawName.toLowerCase()) ||
+          uncategorized;
+
+        const key = (cat.slug || "uncategorized").toLowerCase();
+        sums.set(key, (sums.get(key) ?? 0) + amt);
       }
-      return m;
+      return sums;
     };
 
-    const curr = sumByLeaf(viewRows);
-    const prev = sumByLeaf(prevRows);
+    const currentSums = makeSums(viewRows);
+    const prevSums = makeSums(prevRows);
 
-    return Object.entries(curr)
-      .sort((a, b) => b[1] - a[1])
-      .map(([name, value]) => ({
-        name,
-        value,
-        trend: computeTrend(value, prev[name] ?? 0),
-      }));
-  }, [viewRows, prevRows]);
+    // union of all slugs we have (so trend is computed even if prev is 0)
+    const allSlugs = new Set<string>([
+      ...currentSums.keys(),
+      ...prevSums.keys(),
+    ]);
+
+    return Array.from(allSlugs)
+      .map((slug) => {
+        const cat = bySlug.get(slug)!; // provider Category
+        const total = currentSums.get(slug) ?? 0;
+        const prev = prevSums.get(slug) ?? 0;
+        const trend = computeTrend(total, prev); // {dir,pct,delta}
+        return { cat, total, prev, trend };
+      })
+      .sort((a, b) => b.total - a.total);
+  }, [categories, viewRows, prevRows]);
 
   const grandTotal = React.useMemo(
-    () => catCards.reduce((s, c) => s + c.value, 0),
+    () => catCards.reduce((s, c) => s + c.total, 0),
     [catCards]
   );
 
@@ -418,13 +447,13 @@ export default function ClientCategories() {
           </div>
         ) : (
           <ul className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
-            {catCards.map(({ name, value, trend }) => {
+            {catCards.map(({ cat, total, trend }) => {
               const pct = grandTotal
-                ? Math.round((value / grandTotal) * 100)
+                ? Math.round((total / grandTotal) * 100)
                 : 0;
-              const accent = accentFor(name);
+              const accent = accentFor(cat.name);
 
-              const slug = catToSlug(name); // <-- pass *unencoded* slug to the helper
+              const slug = catToSlug(cat.name); // <-- pass *unencoded* slug to the helper
 
               const href = isDemo
                 ? demoCategoryHref(slug, selectedId) // ✅ works for known + new slugs
@@ -435,7 +464,7 @@ export default function ClientCategories() {
                   }`;
 
               return (
-                <li key={name} className="group">
+                <li key={cat.name} className="group">
                   <Link href={href} className="block focus:outline-none">
                     <div
                       className={`relative rounded-2xl border bg-slate-900 border-l-4 p-4
@@ -446,12 +475,12 @@ export default function ClientCategories() {
                       {/* Header row: icon + name (no amount here) */}
                       <div className="flex items-center gap-3">
                         <div className="h-14 w-14 rounded-xl bg-slate-950/60 border border-slate-700 flex items-center justify-center shrink-0">
-                          {iconFor(name)}
+                          {iconFor(cat.name)}
                         </div>
 
                         <div className="flex-1 min-w-0">
                           <div className="text-base font-semibold text-white truncate">
-                            {name}
+                            {cat.name}
                           </div>
                           <div className="text-xs text-slate-300">
                             {pct}% of spend
@@ -462,7 +491,7 @@ export default function ClientCategories() {
                       {/* Amount + trend row */}
                       <div className="mt-3 flex items-center justify-between">
                         <div className="text-lg sm:text-xl font-semibold">
-                          {money(value)}
+                          {money(total)}
                         </div>
                         <TrendPill
                           dir={trend.dir}

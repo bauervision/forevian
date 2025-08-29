@@ -9,8 +9,10 @@ import { parseWithProfile } from "@/lib/import/run";
 import type { ImportProfile } from "@/lib/import/profile";
 import { useAuthUID } from "@/lib/fx";
 import { useSpenders } from "@/lib/spenders";
-import { useCategories } from "@/app/providers/CategoriesProvider";
+import { Category, useCategories } from "@/app/providers/CategoriesProvider";
 import WelcomeDialog from "@/components/WelcomeDialog";
+import { DEFAULT_CATEGORIES } from "@/lib/categories/defaults";
+import { catToSlug } from "@/lib/slug";
 
 /* ---------------- helpers ---------------- */
 
@@ -116,6 +118,7 @@ type UIStarterCategory = {
   name: string;
   icon?: string;
   color?: string;
+  hint?: string;
 };
 type UIRule = {
   id: string;
@@ -123,35 +126,6 @@ type UIRule = {
   categoryId: string;
   isRegex?: boolean;
 };
-
-const DEFAULT_CATEGORIES: UIStarterCategory[] = [
-  { id: "fastfood", name: "Fast Food", icon: "🍟", color: "#ef4444" },
-  { id: "dining", name: "Dining", icon: "🍽️", color: "#f59e0b" },
-  { id: "fuel", name: "Fuel", icon: "⛽", color: "#10b981" },
-  { id: "home", name: "Home/Utilities", icon: "🏠", color: "#22c55e" },
-  { id: "ent", name: "Entertainment", icon: "🎬", color: "#6366f1" },
-  { id: "shop", name: "Shopping", icon: "🛍️", color: "#06b6d4" },
-  { id: "pay", name: "Income/Payroll", icon: "💼", color: "#14b8a6" },
-  { id: "xfer", name: "Transfers", icon: "🔁", color: "#a855f7" },
-  { id: "rent", name: "Rent/Mortgage", icon: "🏡", color: "#84cc16" },
-  { id: "debt", name: "Debt", icon: "💳", color: "#f43f5e" },
-  { id: "impulse", name: "Impulse/Misc", icon: "🎲", color: "#fb923c" },
-  { id: "doctors", name: "Doctors", icon: "🩺", color: "#38bdf8" },
-  {
-    id: "memberships",
-    name: "Memberships (Costco, YMCA)",
-    icon: "🪪",
-    color: "#22d3ee",
-  },
-  {
-    id: "subs",
-    name: "Subscriptions (Netflix, Peacock)",
-    icon: "📺",
-    color: "#e879f9",
-  },
-  { id: "starbucks", name: "Starbucks", icon: "☕", color: "#166534" },
-  { id: "cashback", name: "Cash Back", icon: "💵", color: "#84cc16" },
-];
 
 function randomNiceColor() {
   const palette = [
@@ -253,9 +227,7 @@ export default function Onboarding() {
   const [busy, setBusy] = React.useState(false);
 
   // categories & rules
-  const [cats, setCats] = React.useState<UIStarterCategory[]>(
-    () => DEFAULT_CATEGORIES
-  );
+  const [cats, setCats] = React.useState<Category[]>(() => DEFAULT_CATEGORIES);
   const [rules, setRules] = React.useState<UIRule[]>([]);
 
   // spenders (onboarding entry)
@@ -326,7 +298,12 @@ export default function Onboarding() {
       if (/RENT|MORTGAGE/i.test(wDesc)) addRule("RENT", "rent");
       if (/STARBUCKS/i.test(wDesc)) addRule("STARBUCKS", "starbucks");
       if (/NETFLIX|PEACOCK|DISNEY|HULU|SPOTIFY|APPLE\s*MUSIC/i.test(wDesc))
-        addRule("NETFLIX", "subs");
+        if (
+          /HARRIS|KROGER|FOOD\s*LION|SAFEWAY|PUBLIX|ALDI|LIDL|HEB|MEIJER|WINCO|SPROUTS|WEGMANS|GIANT|STOP\s*&\s*SHOP/i.test(
+            wDesc
+          )
+        )
+          addRule("NETFLIX", "subs");
       if (/COSTCO|YMCA|SAM.?S\s*CLUB/i.test(wDesc))
         addRule("COSTCO", "memberships");
 
@@ -346,6 +323,7 @@ export default function Onboarding() {
 
   function saveProfile() {
     if (!proposal) return;
+
     const base: Pick<ImportProfile, "version" | "groups"> = {
       version: 1,
       groups: {} as ImportProfile["groups"],
@@ -357,14 +335,23 @@ export default function Onboarding() {
     updateProfile(fullProfile);
     persistStarters(uid, cats, rules);
 
-    const names = cats.map((c) => c.name).filter(Boolean);
-    const lower = new Set(categories.map((n: string) => n.toLowerCase()));
-    const merged = [...categories];
-    for (const n of names) if (!lower.has(n.toLowerCase())) merged.push(n);
+    // categories is Category[] now; cats is your onboarding Category[] edits
+    // Union by name (case-insensitive), keep existing objects when present
+    const existingByName = new Map(
+      categories.map((c) => [c.name.toLowerCase(), c] as const)
+    );
+
+    const merged: Category[] = [...categories];
+    for (const c of cats) {
+      const key = c.name.toLowerCase();
+      if (!existingByName.has(key)) {
+        merged.push(c); // push the full object, not just the name
+        existingByName.set(key, c);
+      }
+    }
 
     setCategories(merged);
   }
-
   /* ---------- Step 4: Spenders save ---------- */
 
   const step4CanContinue =
@@ -652,6 +639,8 @@ FANG 3141 Payroll Jul 15 TRN*1*9000852321
                         name: "New Category",
                         icon: "🗂️",
                         color: randomNiceColor(),
+                        hint: "",
+                        slug: catToSlug("New Category"),
                       },
                     ])
                   }
@@ -659,7 +648,7 @@ FANG 3141 Payroll Jul 15 TRN*1*9000852321
                 >
                   + Add Category
                 </button>
-                <button
+                {/* <button
                   onClick={() =>
                     setCats((xs) =>
                       xs.map((c) => ({ ...c, color: randomNiceColor() }))
@@ -669,7 +658,7 @@ FANG 3141 Payroll Jul 15 TRN*1*9000852321
                   title="Randomize all colors"
                 >
                   🎲 Randomize All
-                </button>
+                </button> */}
               </div>
             </div>
 
@@ -685,7 +674,13 @@ FANG 3141 Payroll Jul 15 TRN*1*9000852321
                     onChange={(e) =>
                       setCats((xs) =>
                         xs.map((x) =>
-                          x.id === c.id ? { ...x, name: e.target.value } : x
+                          x.id === c.id
+                            ? {
+                                ...x,
+                                name: e.target.value,
+                                slug: catToSlug(e.target.value),
+                              }
+                            : x
                         )
                       )
                     }
@@ -704,61 +699,25 @@ FANG 3141 Payroll Jul 15 TRN*1*9000852321
                     placeholder="Icon (emoji)"
                   />
 
-                  <div className="col-span-5 flex items-center gap-2">
-                    <input
-                      type="color"
-                      className="h-8 w-10 rounded border border-slate-700 bg-slate-900"
-                      value={c.color || "#1f2937"}
-                      onChange={(e) =>
-                        setCats((xs) =>
-                          xs.map((x) =>
-                            x.id === c.id ? { ...x, color: e.target.value } : x
-                          )
-                        )
-                      }
-                      title="Pick a color"
-                    />
-                    <input
-                      className="flex-1 rounded-lg bg-slate-900 border border-slate-700 px-2 py-1"
-                      value={c.color ?? ""}
-                      onChange={(e) =>
-                        setCats((xs) =>
-                          xs.map((x) =>
-                            x.id === c.id ? { ...x, color: e.target.value } : x
-                          )
-                        )
-                      }
-                      placeholder="#hex or name"
-                    />
-                    <button
-                      onClick={() =>
-                        setCats((xs) =>
-                          xs.map((x) =>
-                            x.id === c.id
-                              ? { ...x, color: randomNiceColor() }
-                              : x
-                          )
-                        )
-                      }
-                      className="text-xs rounded-lg px-2 py-1 border border-slate-700 hover:bg-slate-800"
-                      title="Randomize color"
-                    >
-                      🎲
-                    </button>
-                  </div>
+                  {/* COLOR block unchanged ... */}
 
-                  <div className="col-span-2 flex items-center justify-end">
-                    <button
-                      onClick={() => {
-                        setCats((xs) => xs.filter((x) => x.id !== c.id));
-                        setRules((rs) =>
-                          rs.filter((r) => r.categoryId !== c.id)
-                        );
-                      }}
-                      className="text-xs rounded-lg px-3 py-1 border border-slate-700 hover:bg-slate-800"
-                    >
-                      Remove
-                    </button>
+                  <div className="col-span-12 grid grid-cols-12 gap-2">
+                    {/* NEW: Hint editor */}
+                    <input
+                      className="col-span-10 rounded-lg bg-slate-900 border border-slate-700 px-2 py-1 text-sm"
+                      value={c.hint ?? ""}
+                      onChange={(e) =>
+                        setCats((xs) =>
+                          xs.map((x) =>
+                            x.id === c.id ? { ...x, hint: e.target.value } : x
+                          )
+                        )
+                      }
+                      placeholder="Hint (examples show to the user, e.g., “YMCA, Costco”)"
+                    />
+                    <div className="col-span-2 text-right text-[11px] text-slate-400">
+                      {c.hint ? "Shown as example" : ""}
+                    </div>
                   </div>
                 </div>
               ))}

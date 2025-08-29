@@ -1,43 +1,43 @@
-export const slug = (s: string) =>
-  s
+// lib/slug.ts
+import type { Category } from "@/app/providers/CategoriesProvider";
+
+/** Canonical slugger for categories (accent-stripping, & → and, "/" → "-", etc.) */
+// lib/slug.ts
+export const catToSlug = (name: string) =>
+  (name || "")
     .toLowerCase()
     .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-
-export const unslug = (s: string) =>
-  s.replace(/-/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
-
-export const catToSlug = (name: string) =>
-  name
-    .toLowerCase()
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "") // strip accents
     .replace(/&/g, " and ")
-    .replace(/\//g, "-") // ✅ convert slashes to hyphens
-    .replace(/\s+/g, "-")
-    .replace(/[^a-z0-9-]/g, "")
+    .replace(/\//g, "-") // keep slashes as hyphens
+    .replace(/[^a-z0-9]+/g, "-") // <-- fold ANY punctuation/space into "-"
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
 
-const capitalize = (w: string) => (w ? w[0].toUpperCase() + w.slice(1) : w);
+/** Pretty display from slug (fallback only; prefer real category.name when you have it). */
+export const slugToPretty = (s: string) =>
+  decodeURIComponent(s || "")
+    .split("-")
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(" ");
 
-export const slugToCat = (slug: string, categories?: string[]) => {
-  const s = decodeURIComponent(slug.toLowerCase());
+/** Find a Category by slug (case-insensitive). */
+export function findCategoryBySlug(categories: Category[], slug: string) {
+  const key = decodeURIComponent(slug || "").toLowerCase();
+  return categories.find((c) => (c.slug || "").toLowerCase() === key);
+}
 
-  // Prefer exact match via catToSlug
-  if (categories?.length) {
-    const exact = categories.find((c) => catToSlug(c) === s);
-    if (exact) return exact;
-
-    // Legacy fallback: tolerate old slugs like "impulsemisc"
-    const loose = s.replace(/[^a-z0-9]/g, "");
-    const looseHit = categories.find(
-      (c) => catToSlug(c).replace(/[^a-z0-9]/g, "") === loose
-    );
-    if (looseHit) return looseHit;
-  }
-
-  // Generic prettifier fallback
-  return s.split("-").map(capitalize).join(" ");
-};
+/** Ensure every category has a good slug; dedupe if collisions occur. */
+export function ensureSlugsUnique(categories: Category[]): Category[] {
+  const seen = new Set<string>();
+  return categories.map((c) => {
+    let base = c.slug && c.slug.trim() ? c.slug : catToSlug(c.name);
+    if (!base) base = catToSlug(c.id || "category");
+    let slug = base;
+    let i = 2;
+    while (seen.has(slug)) slug = `${base}-${i++}`;
+    seen.add(slug);
+    return { ...c, slug };
+  });
+}

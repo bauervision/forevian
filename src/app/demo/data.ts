@@ -61,7 +61,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "06/05",
         description: "Dominion Energy VA",
         amount: -210.49,
-        category: "Utilities",
+        category: "Home/Utilities",
         user: "Joint",
       },
       {
@@ -78,7 +78,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "06/18",
         description: "T-Mobile",
         amount: -85.0,
-        category: "Utilities",
+        category: "Home/Utilities",
         user: "Joint",
       },
       {
@@ -86,7 +86,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "06/22",
         description: "Cox Communications",
         amount: -89.99,
-        category: "Utilities",
+        category: "Home/Utilities",
         user: "Joint",
       },
       {
@@ -94,7 +94,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "06/25",
         description: "Virginia Natural Gas",
         amount: -42.1,
-        category: "Utilities",
+        category: "Home/Utilities",
         user: "Joint",
       },
 
@@ -104,7 +104,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "06/06",
         description: "Newrez (Mortgage)",
         amount: -1895.0,
-        category: "Housing",
+        category: "Rent/Mortgage",
         user: "Joint",
       },
 
@@ -114,7 +114,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "06/08",
         description: "Shell #334 Fuel",
         amount: -64.88,
-        category: "Gas",
+        category: "Fuel",
         user: "Husband",
         cardLast4: "5280",
       },
@@ -322,7 +322,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "07/05",
         description: "Dominion Energy VA",
         amount: -195.88,
-        category: "Utilities",
+        category: "Home/Utilities",
         user: "Joint",
       },
       {
@@ -330,7 +330,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "07/16",
         description: "T-Mobile",
         amount: -85.0,
-        category: "Utilities",
+        category: "Home/Utilities",
         user: "Joint",
       },
       {
@@ -338,7 +338,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "07/21",
         description: "Cox Communications",
         amount: -89.99,
-        category: "Utilities",
+        category: "Home/Utilities",
         user: "Joint",
       },
       {
@@ -346,7 +346,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "07/25",
         description: "Virginia Natural Gas",
         amount: -38.55,
-        category: "Utilities",
+        category: "Home/Utilities",
         user: "Joint",
       },
 
@@ -356,7 +356,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "07/06",
         description: "Newrez (Mortgage)",
         amount: -1895.0,
-        category: "Housing",
+        category: "Rent/Mortgage",
         user: "Joint",
       },
 
@@ -366,7 +366,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "07/08",
         description: "Shell #334 Fuel",
         amount: -58.41,
-        category: "Gas",
+        category: "Fuel",
         user: "Husband",
         cardLast4: "5280",
       },
@@ -475,7 +475,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "07/28",
         description: "Transfer to Savings",
         amount: -400.0,
-        category: "Transfer:Savings",
+        category: "Transfer: Savings",
         user: "Joint",
       },
       {
@@ -483,7 +483,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "07/28",
         description: "Brokerage Contribution",
         amount: -300.0,
-        category: "Transfer:Investing",
+        category: "Transfer: Investing",
         user: "Joint",
       },
     ],
@@ -555,7 +555,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "08/05",
         description: "Dominion Energy VA",
         amount: -201.22,
-        category: "Utilities",
+        category: "Home/Utilities",
         user: "Joint",
       },
       {
@@ -572,7 +572,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "08/16",
         description: "T-Mobile",
         amount: -85.0,
-        category: "Utilities",
+        category: "Home/Utilities",
         user: "Joint",
       },
       {
@@ -580,7 +580,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "08/21",
         description: "Cox Communications",
         amount: -89.99,
-        category: "Utilities",
+        category: "Home/Utilities",
         user: "Joint",
       },
       {
@@ -588,7 +588,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "08/25",
         description: "Virginia Natural Gas",
         amount: -41.75,
-        category: "Utilities",
+        category: "Home/Utilities",
         user: "Joint",
       },
 
@@ -598,7 +598,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "08/06",
         description: "Newrez (Mortgage)",
         amount: -1895.0,
-        category: "Housing",
+        category: "Rent/Mortgage",
         user: "Joint",
       },
 
@@ -608,7 +608,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "08/08",
         description: "Shell #334 Fuel",
         amount: -61.2,
-        category: "Gas",
+        category: "Fuel",
         user: "Husband",
         cardLast4: "5280",
       },
@@ -719,7 +719,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "08/28",
         description: "Transfer to Savings",
         amount: -400.0,
-        category: "Transfer:Savings",
+        category: "Transfer: Savings",
         user: "Joint",
       },
       {
@@ -727,7 +727,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "08/28",
         description: "Brokerage Contribution",
         amount: -300.0,
-        category: "Transfer:Investing",
+        category: "Transfer: Investing",
         user: "Joint",
       },
     ],

@@ -18,7 +18,7 @@ import { useRowsForSelection } from "@/helpers/useRowsForSelection";
 import { Pencil, ArrowLeft } from "lucide-react";
 import { useBrandMap } from "@/app/providers/BrandMapProvider";
 import BrandLogoDialog from "@/components/BrandLogoDialog";
-import { catToSlug, slugToCat } from "@/lib/slug";
+import { catToSlug, findCategoryBySlug, slugToPretty } from "@/lib/slug";
 import { useCategories } from "@/app/providers/CategoriesProvider";
 import { iconForCategory, IconFromKey, IconKey, isIconKey } from "@/lib/icons";
 import ProtectedRoute from "@/components/ProtectedRoute";
@@ -477,24 +477,6 @@ function CategoryInner({
     return applyCategoryRulesTo(rules, raw, applyAlias) as typeof viewRows;
   }, [period, selectedId]);
 
-  // Merchant rollup (current + prev → trend)
-  const sumMerchants = (rowsIn: typeof rows) => {
-    const m: Record<string, number> = {};
-    for (const r of rowsIn) {
-      const raw = prettyDesc(r.description || "");
-      const label = canonicalizeMerchantLabel(raw);
-      const amt = Math.abs(r.amount < 0 ? r.amount : 0);
-      if (amt > 0) m[label] = (m[label] ?? 0) + amt;
-    }
-    return m;
-  };
-
-  const merchCurrent = React.useMemo(() => sumMerchants(rows), [rows]);
-  const merchPrev = React.useMemo(
-    () => sumMerchants(prevScopedRows),
-    [prevScopedRows]
-  );
-
   const byMerchant = React.useMemo<MerchantAgg[]>(() => {
     const normalize = (s: string) =>
       (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
@@ -569,22 +551,23 @@ function CategoryInner({
 
   // Resolve a display name for the *leaf* category
   const catDisplay = React.useMemo(() => {
-    const fromProvider = slugToCat(slug, categories);
-    if (fromProvider && fromProvider !== slug) return fromProvider;
+    // 1) Prefer provider object match via slug
+    const hit = findCategoryBySlug(categories as any, slug);
+    if (hit?.name) return hit.name;
 
+    // 2) Fallback: infer from any matching transaction row
     const any = viewRows.find(
       (r) =>
         catToSlug(
           (r.categoryOverride ?? r.category ?? "Uncategorized").trim()
         ) === slug
     );
-    if (any)
+    if (any) {
       return (any.categoryOverride ?? any.category ?? "Uncategorized").trim();
+    }
 
-    return slug
-      .split("-")
-      .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
-      .join(" ");
+    // 3) Last-resort: prettify the slug
+    return slugToPretty(slug);
   }, [slug, categories, viewRows]);
 
   const catAccent = accentForCategory(catDisplay);

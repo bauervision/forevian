@@ -19,6 +19,9 @@ import {
   useSelectedStatementId,
 } from "@/lib/useClientSearchParams";
 import { useSyncSelectedStatement } from "@/lib/useSyncSelectedStatement";
+import { applyCategoryRulesTo, readCatRules } from "@/lib/categoryRules";
+import { applyAlias } from "@/lib/aliases";
+import { catToSlug } from "@/lib/slug";
 /* ---------------------------- helpers & hooks ---------------------------- */
 
 function useIsDemo() {
@@ -61,8 +64,6 @@ const kpiAccent = (
       return "from-slate-600/20 to-slate-500/5 border-slate-500";
   }
 };
-
-const toSlug = (s: string) => (s || "").toLowerCase().replace(/\s+/g, "-");
 
 // lightweight accent util (reuse your category look)
 function accentFor(cat: string) {
@@ -179,16 +180,34 @@ export default function ClientDashboard() {
   }, [selectedId]);
 
   const [period, setPeriod] = React.useState<Period>("CURRENT");
+  const baseRows = useRowsForSelection(period, selectedId, transactions);
 
-  const viewRows = useRowsForSelection(period, selectedId, transactions);
-  const totals = React.useMemo(
-    () =>
-      computeTotals(
-        viewRows,
-        period === "YTD" ? 0 : inputs.beginningBalance ?? 0
-      ),
-    [viewRows, inputs, period]
-  );
+  const viewRows = React.useMemo(() => {
+    if (period !== "YTD") return baseRows;
+    if (!selectedId) return baseRows;
+
+    const idx = readIndex();
+    const cur = idx[selectedId];
+    if (!cur) return baseRows;
+
+    const rules = readCatRules();
+    const all: any[] = [];
+
+    for (const s of Object.values(idx)) {
+      if (!s) continue;
+      if (s.stmtYear !== cur.stmtYear) continue;
+      if (s.stmtMonth > cur.stmtMonth) continue;
+
+      if (Array.isArray(s.cachedTx)) {
+        all.push(...s.cachedTx);
+      } else if (s.id === selectedId) {
+        // use live rows for the selected month if needed
+        all.push(...transactions);
+      }
+    }
+
+    return applyCategoryRulesTo(rules, all, applyAlias);
+  }, [period, selectedId, baseRows, transactions]);
 
   // True Spend excludes Transfers, Debt, Cash Back
   const trueSpend = React.useMemo(() => {
@@ -243,6 +262,15 @@ export default function ClientDashboard() {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 10);
   }, [viewRows]);
+
+  const totals = React.useMemo(
+    () =>
+      computeTotals(
+        viewRows,
+        period === "YTD" ? 0 : inputs.beginningBalance ?? 0
+      ),
+    [viewRows, inputs, period]
+  );
 
   return (
     <ProtectedRoute>
@@ -374,7 +402,7 @@ export default function ClientDashboard() {
               {topCats.map(([cat, amt]) => {
                 const accent = accentFor(cat);
                 const href = `${base}/dashboard/category/${encodeURIComponent(
-                  toSlug(cat)
+                  catToSlug(cat)
                 )}${selectedId ? `?statement=${selectedId}` : ""}`;
                 return (
                   <li key={cat} className="group">

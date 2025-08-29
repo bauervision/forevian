@@ -213,6 +213,11 @@ function seriesForCategories(months: MonthBucket[], cats: string[]) {
   }));
 }
 
+const catName = (c: unknown): string =>
+  typeof c === "string"
+    ? c
+    : (typeof c === "object" && c && (c as any).name) || "";
+
 /* ---------------------------------- page ---------------------------------- */
 
 export default function ClientTrendsPage() {
@@ -247,9 +252,13 @@ export default function ClientTrendsPage() {
   // Union with source-of-truth categories
   const allCatsUnion = React.useMemo(() => {
     const set = new Set<string>();
-    sourceCats.forEach((c) =>
-      set.add((c || "").trim()).add(groupLabelForCategory(c || ""))
-    ); // ensure top labels exist too
+    sourceCats.forEach((c) => {
+      const n = catName(c).trim();
+      if (!n) return;
+      set.add(n);
+      const group = groupLabelForCategory(n) || "";
+      if (group) set.add(group);
+    });
     observedCats.forEach((c) => set.add((c || "").trim()));
     // Remove empties
     set.delete("");
@@ -260,20 +269,59 @@ export default function ClientTrendsPage() {
 
   // Initial selection: prefer some common ones if present; else top-3 from latest month; else first 3 from union
   const [cats, setCats] = React.useState<string[]>(() => {
-    const defaults = ["Utilities", "Fast Food", "Dining"];
-    const seeded = defaults.filter(
-      (d) => observedCats.includes(d) || sourceCats.includes(d)
+    // Helpers (safe for string | {name}|{slug})
+    type CatLike = string | { name?: string | null; slug?: string | null };
+    const catLabel = (c: CatLike): string =>
+      typeof c === "string" ? c : ((c?.name ?? c?.slug ?? "") as string);
+
+    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " "); // light normalize for set keys
+
+    // Build fast lookup (normalized) from observed/source lists
+    const observedSet = new Set(
+      (observedCats ?? [])
+        .map((c: CatLike) => norm(catLabel(c)))
+        .filter(Boolean)
     );
+    const sourceSet = new Set(
+      (sourceCats ?? []).map((c: CatLike) => norm(catLabel(c))).filter(Boolean)
+    );
+
+    // Prefer these defaults *if present* in observed/source
+    // (Align with your current category naming)
+    const preferredDefaults = ["Home/Utilities", "Fast Food", "Dining"];
+
+    const seeded = preferredDefaults.filter((d) => {
+      const key = norm(d);
+      return observedSet.has(key) || sourceSet.has(key);
+    });
+
     if (seeded.length) return seeded;
-    const last = allMonths[allMonths.length - 1];
-    if (last) {
+
+    // Else: use last month's top 3 (by spend)
+    const last = allMonths?.[allMonths.length - 1];
+    if (last && last.spendByCategory) {
       const top3 = Object.entries(last.spendByCategory)
-        .sort((a, b) => b[1] - a[1])
+        .sort((a, b) => (b[1] as number) - (a[1] as number))
         .slice(0, 3)
-        .map(([k]) => k);
+        .map(([k]) => k)
+        .filter(Boolean);
       if (top3.length) return top3;
     }
-    return allCatsUnion.slice(0, 3);
+
+    // Else: fall back to first 3 from union (normalize + dedupe)
+    const unionNames = Array.from(
+      new Set(
+        (allCatsUnion ?? [])
+          .map((c: CatLike) => catLabel(c))
+          .map((s) => s.trim())
+          .filter(Boolean)
+      )
+    );
+
+    if (unionNames.length >= 3) return unionNames.slice(0, 3);
+
+    // Absolute final fallback: show the preferred defaults (even if not observed)
+    return preferredDefaults;
   });
 
   const series = React.useMemo(

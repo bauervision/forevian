@@ -34,8 +34,8 @@ export default function DemoDashboardTips() {
       body: (
         <>
           You can also explore your top expense categories from here. Click the{" "}
-          <b>Utilities</b> card to dive into those transactions—this will take
-          you to the Utilities category view.
+          <b>Home/Utilities</b> card to dive into those transactions—this will
+          take you to the Utilities category view.
         </>
       ),
     },

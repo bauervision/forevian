@@ -32,14 +32,8 @@ import ImportStatementWizard from "@/components/ImportPagesDialog";
 import { useCategories } from "@/app/providers/CategoriesProvider";
 import { TxRow } from "@/lib/types";
 import { useSpenders } from "@/lib/spenders";
-import CategoryManagerDialog from "@/components/CategoryManagerDialog";
+
 import { useAuthUID } from "@/lib/fx";
-import {
-  markStartersApplied,
-  readStarterCats,
-  readStarterRules,
-  startersAlreadyApplied,
-} from "@/lib/starters";
 import DemoReconcilerTips from "../../components/DemoReconcilerTips";
 import { DEMO_MONTHS, DEMO_VERSION } from "@/app/demo/data";
 import { applyAlias } from "@/lib/aliases";
@@ -48,26 +42,40 @@ import {
   useClientSearchParam,
   useSelectedStatementId,
 } from "@/lib/useClientSearchParams";
+import CategorySelect from "@/components/CategorySelect";
+import { resolveAliasNameToCategory } from "@/lib/categories/aliases";
+import { catToSlug } from "@/lib/slug";
 
 /* --- tiny UI bits --- */
-function useEnsureCategoryExists() {
-  const { categories = [], setAll, setCategories } = useCategories() as any;
+export function useEnsureCategoryExists() {
+  const pathname = usePathname();
+  const isDemo = pathname?.startsWith("/demo") ?? false;
+  const { categories, setAll } = useCategories(); // Category[]
 
   return React.useCallback(
-    (name: string) => {
-      const label = (name || "").trim();
-      if (!label) return;
+    (label: string) => {
+      if (isDemo) return; // 🚫 never mutate global categories from demo rows
 
-      const lower = new Set(
-        (categories || []).map((c: string) => c.toLowerCase())
-      );
-      if (lower.has(label.toLowerCase())) return;
+      const existing = resolveAliasNameToCategory(label, categories);
+      if (existing) return; // already covered by canonical/alias
 
-      const next = [...categories, label];
-      if (typeof setAll === "function") setAll(next);
-      else if (typeof setCategories === "function") setCategories(next);
+      // If you *really* want to allow auto-creation for non-demo:
+      const name = (label || "").trim();
+      if (!name) return;
+
+      const newCat = {
+        id:
+          crypto.randomUUID?.() ?? `cat-${Math.random().toString(36).slice(2)}`,
+        name,
+        icon: "🗂️",
+        color: "#475569",
+        hint: "",
+        slug: catToSlug(name),
+      };
+
+      setAll([...categories, newCat]);
     },
-    [categories, setAll, setCategories]
+    [categories, setAll, pathname]
   );
 }
 
@@ -110,105 +118,6 @@ const fmtUSD = new Intl.NumberFormat("en-US", {
   currency: "USD",
 });
 const money = (n: number) => fmtUSD.format(n);
-
-// keeps the same API, adds a real Add button and safeguards
-const CATEGORY_ADD_SENTINEL = "__ADD__";
-
-function CategorySelect({
-  value,
-  onChange,
-  disabled = false,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  disabled?: boolean;
-}) {
-  const { categories } = useCategories();
-  const [openMgr, setOpenMgr] = React.useState(false);
-  const selectRef = React.useRef<HTMLSelectElement>(null);
-  // track pre-open list so we can detect what was added
-  const beforeCatsRef = React.useRef<string[] | null>(null);
-  const [awaitingNew, setAwaitingNew] = React.useState(false);
-
-  const sorted = React.useMemo(() => {
-    const set = new Set(categories.map((c) => c.trim()).filter(Boolean));
-    if (value && !set.has(value)) set.add(value); // ensure current shows
-    const list = Array.from(set).sort((a, b) =>
-      a.localeCompare(b, undefined, { sensitivity: "base" })
-    );
-    const i = list.findIndex((x) => x.toLowerCase() === "uncategorized");
-    if (i >= 0) {
-      const [u] = list.splice(i, 1);
-      list.push(u === "Uncategorized" ? u : "Uncategorized");
-    }
-    return list;
-  }, [categories, value]);
-
-  // after the manager closes, detect newly-added label & apply it
-  React.useEffect(() => {
-    if (openMgr) return; // wait until dialog is closed
-    if (!awaitingNew) return; // only if we opened via ＋ Add
-
-    setAwaitingNew(false);
-
-    const before = beforeCatsRef.current ?? [];
-    beforeCatsRef.current = null;
-
-    const lower = new Set(before.map((c) => c.toLowerCase()));
-    const added = (categories || []).filter((c) => !lower.has(c.toLowerCase()));
-
-    if (added.length > 0) {
-      // Heuristic: pick the first non-"Uncategorized" new label, else the first
-      const pick =
-        added.find((c) => c.toLowerCase() !== "uncategorized") ?? added[0];
-      onChange(pick); // ✅ auto-assign the new category
-    }
-  }, [openMgr, awaitingNew, categories, onChange]);
-
-  return (
-    <>
-      <div className="flex items-center gap-2">
-        <select
-          ref={selectRef}
-          value={value}
-          disabled={disabled}
-          onChange={(e) => {
-            const v = e.target.value;
-            if (v === "__ADD__") {
-              // snapshot the list so we can diff later
-              beforeCatsRef.current = [...(categories || [])];
-              setAwaitingNew(true);
-              setOpenMgr(true);
-              return;
-            }
-            onChange(v);
-          }}
-          className="bg-slate-900 text-slate-100 border border-slate-700 rounded-2xl px-2 py-1"
-        >
-          {sorted.map((opt) => (
-            <option key={opt} value={opt}>
-              {opt}
-            </option>
-          ))}
-          <option value="__ADD__">＋ Add Category…</option>
-        </select>
-      </div>
-
-      {/* Mount the manager only when open, and re-mount when categories change */}
-      {openMgr && (
-        <CategoryManagerDialog
-          key={`mgr-${categories.length}-${categories.join("|")}`}
-          open
-          onClose={() => setOpenMgr(false)}
-          // onAdded={(newName) => {
-          //   onChange(newName);
-          //   selectRef.current?.focus(); // NEW
-          // }}
-        />
-      )}
-    </>
-  );
-}
 
 // -------------- Demo Seeder ------------------
 
@@ -352,54 +261,12 @@ function DemoSeeder() {
 export default function ReconcilerPage() {
   const uid = useAuthUID();
   const { categories, setAll, setCategories } = useCategories() as any;
-
-  React.useEffect(() => {
-    if (!uid) return;
-    if (startersAlreadyApplied(uid)) return;
-
-    const starters = readStarterCats(uid); // [{ id, name, icon?, color? }]
-    if (!Array.isArray(starters) || starters.length === 0) {
-      markStartersApplied(uid);
-      return;
-    }
-
-    // Use ONLY starter categories (trim + dedupe, case-insensitive)
-    const deduped = Array.from(
-      new Set(
-        starters
-          .map((c) => (c?.name || "").trim())
-          .filter(Boolean)
-          .map((n) => n.toLowerCase())
-      )
-    ).map(
-      (n) =>
-        starters.find((c) => c.name?.toLowerCase() === n)?.name?.trim() || n
-    );
-
-    // Use whichever setter your provider exposes:
-    if (typeof setAll === "function") setAll(deduped);
-    else if (typeof setCategories === "function") setCategories(deduped);
-
-    // (Optional) Seed simple rules so they’re available immediately.
-    // We translate starter rules’ categoryId -> category name.
-    const idToName = new Map(starters.map((c) => [c.id, c.name]));
-    const srules = readStarterRules(uid);
-    for (const r of srules) {
-      const catName = idToName.get(r.categoryId);
-      if (!catName) continue;
-      // Minimal seed: treat pattern as a candidate key.
-      // Your upsertCategoryRules(keys, category) already handles storage/merge.
-      upsertCategoryRules([r.pattern], catName);
-    }
-
-    markStartersApplied(uid);
-  }, [uid, categories, setAll, setCategories]);
+  const pathname = usePathname();
+  const isDemo = pathname?.startsWith("/demo") ?? false;
 
   const ensureCategoryExists = useEnsureCategoryExists();
 
   const router = useRouter();
-  const pathname = usePathname();
-  const isDemo = pathname.startsWith("/demo");
 
   const { singleUser, setupComplete } = useSpenders();
   const showUserCol = setupComplete && singleUser === false;

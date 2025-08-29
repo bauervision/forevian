@@ -67,7 +67,6 @@ const STOP = new Set([
   "corp",
   "company",
   "online",
-  "transfer",
   "xfer",
   "payment",
   "epay",
@@ -129,6 +128,24 @@ const STOP = new Set([
   "news",
 ]);
 
+// Reward-like categories we should NEVER apply to expenses (negatives)
+const REWARD_CATS = new Set(["cash back", "cashback", "rewards", "points"]);
+
+// Generic, too-broad unigrams we won't keep as rules
+const BAD_UNIGRAMS = new Set([
+  "cash",
+  "back",
+  "cashback",
+  "reward",
+  "rewards",
+  "points",
+  "bonus",
+  "credit",
+  "debit",
+  "purchase",
+  "payment",
+]);
+
 function normalizeTokens(s: string): string[] {
   const cleaned = stripAuthAndCard(s)
     .toLowerCase()
@@ -173,9 +190,16 @@ function pruneWeakRules(rules: CategoryRule[]): CategoryRule[] {
       continue;
     }
     const body = r.key.slice(4);
-    if (!body || STOP.has(body)) continue; // drop single stopwords
-    // if it's a single token and super short, drop it
-    if (!body.includes("_") && body.length <= 3) continue;
+
+    // drop empties/stopwords
+    if (!body || STOP.has(body)) continue;
+
+    // kill weak unigrams (short or generic reward-y)
+    if (!body.includes("_")) {
+      if (body.length <= 3) continue;
+      if (BAD_UNIGRAMS.has(body)) continue;
+    }
+
     res.push(r);
   }
   return res;
@@ -213,16 +237,23 @@ export function applyCategoryRulesTo<T extends TxLike>(
   return rows.map((r) => {
     const alias = aliasFn ? aliasFn(stripAuthAndCard(r.description)) : null;
     const keys = candidateKeys(r.description, alias);
+
     let cat: string | undefined;
     for (const k of keys) {
       const hit = map.get(k);
-      if (hit) {
-        cat = hit;
-        break;
+      if (!hit) continue;
+
+      // ⛔ Don't assign reward-like categories to withdrawals
+      if ((r.amount ?? 0) < 0 && REWARD_CATS.has(hit.trim().toLowerCase())) {
+        continue; // try next key
       }
+
+      cat = hit;
+      break;
     }
+
     if (cat && r.amount !== 0) {
-      if (r.categoryOverride && r.categoryOverride.trim()) return r; // respect explicit override
+      if (r.categoryOverride && r.categoryOverride.trim()) return r;
       return { ...r, category: cat } as T;
     }
     return r;
@@ -235,8 +266,20 @@ export function upsertCategoryRules(
   source: CategoryRule["source"] = "token"
 ) {
   if (!keys.length) return;
-  const rules = readCatRules();
+  const rules = readCatRules(); // already prunes persisted junk
+
   for (const key of keys) {
+    if (key.startsWith("tok:")) {
+      const body = key.slice(4);
+      if (
+        !body ||
+        STOP.has(body) ||
+        (!body.includes("_") && (body.length <= 3 || BAD_UNIGRAMS.has(body)))
+      ) {
+        continue; // skip writing weak token rule
+      }
+    }
+
     const idx = rules.findIndex((r) => r.key === key);
     if (idx >= 0) rules[idx] = { ...rules[idx], category };
     else rules.push({ key, category, source });

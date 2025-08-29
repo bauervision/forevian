@@ -15,6 +15,7 @@ import { writeOverride, keyForTx } from "@/lib/overrides";
 import { useCategories } from "@/app/providers/CategoriesProvider";
 import { usePathname } from "next/navigation";
 import DemoBudgetTips from "@/components/DemoBudgetTips";
+import CategorySelect from "@/components/CategorySelect";
 
 /* ------------------------------------------------------------------ */
 /* Types & utils                                                      */
@@ -178,65 +179,6 @@ function ensureTxLike(r: any): TxLike {
 }
 
 /* -------------------------- Category Select ---------------------------- */
-
-const CATEGORY_ADD_SENTINEL = "__ADD__";
-
-function CategorySelect({
-  value,
-  onChange,
-  disabled = false,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  disabled?: boolean;
-}) {
-  const { categories } = useCategories() as any;
-  const CategoryManagerDialog =
-    require("@/components/CategoryManagerDialog").default;
-  const [openMgr, setOpenMgr] = React.useState(false);
-
-  const sorted = React.useMemo(() => {
-    const set: Set<string> = new Set(
-      (categories || []).map((c: string) => c.trim()).filter(Boolean)
-    );
-    if (value && !set.has(value)) set.add(value);
-    const list = Array.from(set) as string[];
-    list.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-    const i = list.findIndex((x) => x.toLowerCase() === "uncategorized");
-    if (i >= 0) {
-      const [u] = list.splice(i, 1);
-      list.push(u === "Uncategorized" ? u : "Uncategorized");
-    }
-    return list;
-  }, [categories, value]);
-
-  return (
-    <>
-      <select
-        value={value}
-        disabled={disabled}
-        onChange={(e) => {
-          const v = e.target.value;
-          if (v === CATEGORY_ADD_SENTINEL) {
-            setOpenMgr(true);
-            return;
-          }
-          onChange(v);
-        }}
-        className="bg-slate-900 text-slate-100 border border-slate-700 rounded-xl px-2 py-1"
-      >
-        {sorted.map((opt) => (
-          <option key={opt} value={opt}>
-            {opt}
-          </option>
-        ))}
-        <option value={CATEGORY_ADD_SENTINEL}>＋ Edit Categories…</option>
-      </select>
-
-      <CategoryManagerDialog open={openMgr} onClose={() => setOpenMgr(false)} />
-    </>
-  );
-}
 
 /* --------------------- Savings/Investing helpers ---------------------- */
 
@@ -416,13 +358,39 @@ export default function ClientBudgetPage() {
   const isForecast = viewOffset === 1;
 
   // Make sure tracking cats exist (once)
-  const { categories = [], setCategories } = useCategories() as any;
+  const { categories = [], setCategories } = useCategories();
   React.useEffect(() => {
-    const need = ["Transfer:Savings", "Transfer:Investing"];
-    const lower = new Set(categories.map((c: string) => c.toLowerCase()));
-    const missing = need.filter((n) => !lower.has(n.toLowerCase()));
-    if (missing.length && typeof setCategories === "function") {
-      setCategories([...categories, ...missing]);
+    const need = [
+      {
+        name: "Transfer: Savings",
+        icon: "🔁",
+        color: "#a855f7",
+        slug: "transfer-savings",
+      },
+      {
+        name: "Transfer: Investing",
+        icon: "📈",
+        color: "#8b5cf6",
+        slug: "transfer-investing",
+      },
+    ];
+    const lower = new Set(categories.map((c) => c.name.toLowerCase()));
+    const toAdd = need.filter((n) => !lower.has(n.name.toLowerCase()));
+    if (toAdd.length) {
+      const next = [
+        ...categories,
+        ...toAdd.map((n) => ({
+          id:
+            crypto.randomUUID?.() ??
+            `cat-${Math.random().toString(36).slice(2)}`,
+          name: n.name,
+          icon: n.icon,
+          color: n.color,
+          hint: "",
+          slug: n.slug, // stable & consistent
+        })),
+      ];
+      setCategories(next);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
