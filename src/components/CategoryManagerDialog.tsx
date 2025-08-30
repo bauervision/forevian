@@ -50,6 +50,12 @@ const randomNiceColor = () => {
   return palette[Math.floor(Math.random() * palette.length)];
 };
 
+// Treat "", null, undefined as empty so we don't clobber existing values
+const pickNonEmpty = <T extends string | undefined>(
+  current: T,
+  fallback?: string
+) => (current && String(current).trim() ? current : fallback ?? "");
+
 export default function CategoryManagerDialog({
   open,
   onClose,
@@ -98,8 +104,6 @@ export default function CategoryManagerDialog({
   function addLocal() {
     const id = mkrowid();
     lastAddedRowIdRef.current = id;
-    // 🔹 trigger scroll/flash/focus for this new row
-    setHighlightCatId(id);
 
     setList((xs) => [
       {
@@ -134,9 +138,9 @@ export default function CategoryManagerDialog({
         next.push({
           ...existing,
           name,
-          icon: r.icon ?? existing.icon,
-          color: r.color ?? existing.color,
-          hint: r.hint ?? existing.hint,
+          icon: pickNonEmpty(r.icon, existing.icon),
+          color: pickNonEmpty(r.color, existing.color),
+          hint: pickNonEmpty(r.hint, existing.hint),
           slug: slugify(name),
         });
       } else {
@@ -146,9 +150,9 @@ export default function CategoryManagerDialog({
               ? crypto.randomUUID()
               : `cat-${Math.random().toString(36).slice(2)}`,
           name,
-          icon: r.icon ?? "",
-          color: r.color ?? randomNiceColor(),
-          hint: r.hint ?? "",
+          icon: pickNonEmpty(r.icon, "🗂️"),
+          color: pickNonEmpty(r.color, randomNiceColor()),
+          hint: pickNonEmpty(r.hint, ""),
           slug: slugify(name),
         });
       }
@@ -242,6 +246,13 @@ export default function CategoryManagerDialog({
     return () => clearTimeout(t);
   }, [highlightCatId]);
 
+  // icon picker handler – matches IconPicker signature exactly
+  const handleIconChange = (rowId: string) => (emoji: string) => {
+    setList((prev) =>
+      prev.map((r) => (r.rowId === rowId ? { ...r, icon: emoji } : r))
+    );
+  };
+
   return (
     <div
       className="fixed inset-0 z-[80] grid place-items-center"
@@ -297,15 +308,10 @@ export default function CategoryManagerDialog({
                   <div className="col-span-2 flex items-center gap-2">
                     <IconPicker
                       value={row.icon ?? ""}
-                      onChange={(emoji) =>
-                        setList((prev) =>
-                          prev.map((r) =>
-                            r.rowId === row.rowId ? { ...r, icon: emoji } : r
-                          )
-                        )
-                      }
+                      onChange={handleIconChange(row.rowId)}
                     />
                   </div>
+
                   {/* color */}
                   <div className="col-span-3 flex items-center gap-2">
                     <input

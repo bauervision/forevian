@@ -1,4 +1,3 @@
-// components/IconPicker.tsx
 "use client";
 import * as React from "react";
 
@@ -51,6 +50,9 @@ const EMOJI_CATALOG = [
   // health
   "🩺",
   "💊",
+  // insurance / protection
+  "🛡️", // shield (VS16)
+  "🛡", // shield (no VS16)
   // misc
   "🎲",
   "⭐",
@@ -102,6 +104,8 @@ export default function IconPicker({
       transfer: ["🔁", "📈", "🏦"],
       health: ["🩺", "💊"],
       fun: ["🎬", "🎧", "🎮", "🎟️"],
+      insurance: ["🛡️", "🛡"],
+      shield: ["🛡️", "🛡"],
       misc: ["🎲", "⭐", "🔥", "✅", "❌", "❓"],
     };
     const hits = new Set<string>();
@@ -144,7 +148,7 @@ export default function IconPicker({
           <input
             autoFocus
             className="mb-2 w-full rounded-lg bg-slate-900 border border-slate-700 px-2 py-1 text-sm"
-            placeholder="Search (coffee, fuel, sub, …) or paste emoji"
+            placeholder="Search (coffee, fuel, insurance, …) or paste emoji"
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
