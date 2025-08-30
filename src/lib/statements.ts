@@ -13,15 +13,24 @@ export type StatementSnapshot = {
   // store parsed rows so other pages (Trends) can read without re-parsing
   cachedTx?: import("@/app/providers/ReconcilerProvider").Transaction[];
   normalizerVersion?: number;
+  source?: string;
 };
 
 const IDX_KEY = "reconciler.statements.index.v2";
 const CUR_KEY = "reconciler.statements.current.v2";
 
-// Legacy keys we may recover from:
-const LEGACY_CACHE = "reconciler.cache.v1";
-const LEGACY_TX = "reconciler.tx.v1";
-const LEGACY_IN = "reconciler.inputs.v1";
+function storagePrefix(): string {
+  if (typeof window === "undefined") return "real::";
+  // Treat *only* /demo and its descendants as demo
+  return window.location.pathname.startsWith("/demo") ? "demo::" : "real::";
+}
+
+function KEY_IDX() {
+  return `${storagePrefix()}stmts.v2`;
+}
+function KEY_CUR() {
+  return `${storagePrefix()}stmts.currentId`;
+}
 
 const MONTHS = [
   "January",
@@ -67,34 +76,30 @@ export function emptyStatement(
 
 export function readIndex(): Record<string, StatementSnapshot> {
   try {
-    return JSON.parse(localStorage.getItem(IDX_KEY) || "{}");
+    const raw = localStorage.getItem(KEY_IDX());
+    return raw ? JSON.parse(raw) : {};
   } catch {
     return {};
   }
 }
 export function writeIndex(idx: Record<string, StatementSnapshot>) {
   try {
-    localStorage.setItem(IDX_KEY, JSON.stringify(idx));
+    localStorage.setItem(KEY_IDX(), JSON.stringify(idx));
   } catch {}
 }
 export function readCurrentId(): string | null {
   try {
-    return localStorage.getItem(CUR_KEY);
+    return localStorage.getItem(KEY_CUR()) || null;
   } catch {
     return null;
   }
 }
 export function writeCurrentId(id: string) {
   try {
-    localStorage.setItem(CUR_KEY, id);
+    localStorage.setItem(KEY_CUR(), id);
   } catch {}
-  // 🔔 tell the app something changed
-  if (typeof window !== "undefined") {
-    window.dispatchEvent(
-      new CustomEvent("forevian:statement-change", { detail: { id } })
-    );
-  }
 }
+
 export function upsertStatement(s: StatementSnapshot) {
   const idx = readIndex();
   idx[s.id] = s;

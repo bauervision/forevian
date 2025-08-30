@@ -13,6 +13,7 @@ import { Category, useCategories } from "@/app/providers/CategoriesProvider";
 import WelcomeDialog from "@/components/WelcomeDialog";
 import { DEFAULT_CATEGORIES } from "@/lib/categories/defaults";
 import { catToSlug } from "@/lib/slug";
+import IconPicker from "@/components/IconPicker";
 
 /* ---------------- helpers ---------------- */
 
@@ -168,6 +169,11 @@ function persistStarters(
   } catch {}
 }
 
+function catIdByName(cats: Category[], name: string) {
+  const k = name.trim().toLowerCase();
+  return cats.find((c) => c.name.trim().toLowerCase() === k)?.id ?? "";
+}
+
 /* ------------- page component ------------- */
 
 export default function Onboarding() {
@@ -182,6 +188,10 @@ export default function Onboarding() {
   } = useSpenders();
 
   const { categories, setCategories } = useCategories();
+
+  const [highlightCatId, setHighlightCatId] = React.useState<string | null>(
+    null
+  );
 
   // welcome modal gating
   const WELCOME_KEY = `ui.import.onboard.welcome::${uid ?? "anon"}`;
@@ -277,38 +287,82 @@ export default function Onboarding() {
       }));
       setPreview(rows);
 
-      // cheap rule seeds
+      // Build starter rules, mapped to canonical category IDs
       const sugg: UIRule[] = [];
-      const addRule = (pattern: string, catId: string) =>
+      const addRule = (pattern: string, catId: string) => {
+        if (!catId) return;
         sugg.push({
-          id: crypto.randomUUID(),
+          id: crypto.randomUUID?.() ?? Math.random().toString(36).slice(2),
           pattern,
           categoryId: catId,
           isRegex: false,
         });
+      };
 
       const wDesc = rows[0]?.fields?.description ?? "";
       const dDesc = rows[1]?.fields?.description ?? "";
-      if (/PAYROLL|PAY|IBM/i.test(dDesc)) addRule("PAYROLL", "pay");
-      if (/TRANSFER|ZELLE|VENMO|ONLINE TRANSFER/i.test(wDesc))
-        addRule("TRANSFER", "xfer");
-      if (/SHELL|BP|EXXON|SUNOCO|GAS|FUEL/i.test(wDesc)) addRule("GAS", "fuel");
-      if (/AMAZON|TARGET|WALMART|BEST\s*BUY|SHOP/i.test(wDesc))
-        addRule("AMAZON", "shop");
-      if (/RENT|MORTGAGE/i.test(wDesc)) addRule("RENT", "rent");
-      if (/STARBUCKS/i.test(wDesc)) addRule("STARBUCKS", "starbucks");
-      if (/NETFLIX|PEACOCK|DISNEY|HULU|SPOTIFY|APPLE\s*MUSIC/i.test(wDesc))
-        if (
-          /HARRIS|KROGER|FOOD\s*LION|SAFEWAY|PUBLIX|ALDI|LIDL|HEB|MEIJER|WINCO|SPROUTS|WEGMANS|GIANT|STOP\s*&\s*SHOP/i.test(
-            wDesc
-          )
-        )
-          addRule("NETFLIX", "subs");
-      if (/COSTCO|YMCA|SAM.?S\s*CLUB/i.test(wDesc))
-        addRule("COSTCO", "memberships");
+
+      // Resolve IDs from current cats (DEFAULT_CATEGORIES should be preloaded)
+      const idFastFood = catIdByName(cats, "Fast Food");
+      const idDining = catIdByName(cats, "Dining");
+      const idGroceries = catIdByName(cats, "Groceries");
+      const idFuel = catIdByName(cats, "Fuel");
+      const idHomeUtils = catIdByName(cats, "Home/Utilities");
+      const idInsurance = catIdByName(cats, "Insurance");
+      const idEntertainment = catIdByName(cats, "Entertainment");
+      const idShopping = catIdByName(cats, "Shopping");
+      const idAmazon = catIdByName(cats, "Amazon");
+      const idIncome = catIdByName(cats, "Income/Payroll");
+      const idRent = catIdByName(cats, "Rent/Mortgage");
+      const idSubs = catIdByName(cats, "Subscriptions");
+      const idMembers = catIdByName(cats, "Memberships");
+
+      // Income / payroll
+      if (/PAYROLL|PAY\b/i.test(dDesc) && idIncome)
+        addRule("PAYROLL", idIncome);
+
+      // Transfers: do NOT auto-map to a “Transfers” category; user sets Savings/Investing later
+      // if (/TRANSFER|ZELLE|VENMO|ONLINE TRANSFER/i.test(wDesc)) { /* intentionally skip */ }
+
+      // Fuel
+      if (/SHELL|BP|EXXON|SUNOCO|GAS|FUEL/i.test(wDesc) && idFuel)
+        addRule("GAS", idFuel);
+
+      // Groceries / Shopping / Amazon
+      if (
+        /HARRIS|KROGER|FOOD\s*LION|SAFEWAY|PUBLIX|ALDI|LIDL|HEB|MEIJER|WINCO|SPROUTS|WEGMANS|GIANT|STOP\s*&\s*SHOP|COSTCO/i.test(
+          wDesc
+        ) &&
+        idGroceries
+      )
+        addRule("GROCERY", idGroceries);
+      if (/AMZN|AMAZON/i.test(wDesc) && idAmazon) addRule("AMAZON", idAmazon);
+      if (/TARGET|WALMART|BEST\s*BUY|SHOP/i.test(wDesc) && idShopping)
+        addRule("SHOP", idShopping);
+
+      // Housing
+      if (/RENT|MORTGAGE/i.test(wDesc) && idRent) addRule("RENT", idRent);
+
+      // Dining / coffee
+      if (/STARBUCKS|COFFEE/i.test(wDesc) && idDining)
+        addRule("COFFEE", idDining);
+
+      // Subscriptions / streaming (incl. Prime Video)
+      if (
+        /NETFLIX|PEACOCK|DISNEY|HULU|SPOTIFY|APPLE\s*MUSIC|PRIME\s*VIDEO|MAX\b/i.test(
+          wDesc
+        ) &&
+        idSubs
+      )
+        addRule("STREAM", idSubs);
+
+      // Memberships
+      if (/COSTCO|YMCA|SAM.?S\s*CLUB/i.test(wDesc) && idMembers)
+        addRule("MEMBERSHIP", idMembers);
 
       setRules((prev) => (prev.length ? prev : sugg));
 
+      // Card last-4 hints
       const found = Array.from(
         new Set(rows.map((r) => r.fields?.last4).filter(Boolean))
       ) as string[];
@@ -423,7 +477,29 @@ export default function Onboarding() {
     );
   }
 
-  /* ---------- render ---------- */
+  // After render, if we just added a category: scroll, flash, focus name input
+  React.useEffect(() => {
+    if (!highlightCatId) return;
+    const row = document.getElementById(`cat-row-${highlightCatId}`);
+    if (row) {
+      row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      row.classList.add("flash-highlight");
+      // focus the Name input inside this row
+      const nameInput = row.querySelector<HTMLInputElement>(
+        'input[data-cat-name="1"]'
+      );
+      // delay one frame so the node exists and smooth scroll begins
+      requestAnimationFrame(() => {
+        nameInput?.focus();
+        nameInput?.select?.();
+        // remove the flash class after the animation ends (~1.2s)
+        setTimeout(() => row.classList.remove("flash-highlight"), 1400);
+      });
+    }
+    // clear the flag
+    const t = setTimeout(() => setHighlightCatId(null), 10);
+    return () => clearTimeout(t);
+  }, [highlightCatId]);
 
   return (
     <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6">
@@ -632,33 +708,27 @@ FANG 3141 Payroll Jul 15 TRN*1*9000852321
               <div className="flex gap-2">
                 <button
                   onClick={() =>
-                    setCats((xs) => [
-                      ...xs,
-                      {
-                        id: crypto.randomUUID(),
-                        name: "New Category",
-                        icon: "🗂️",
-                        color: randomNiceColor(),
-                        hint: "",
-                        slug: catToSlug("New Category"),
-                      },
-                    ])
+                    setCats((xs) => {
+                      const id = crypto.randomUUID();
+                      // set highlight *before* returning, so the next render can act on it
+                      setHighlightCatId(id);
+                      return [
+                        {
+                          id,
+                          name: "New Category",
+                          icon: "🗂️",
+                          color: randomNiceColor(),
+                          hint: "",
+                          slug: catToSlug("New Category"),
+                        },
+                        ...xs, // <-- add at TOP
+                      ];
+                    })
                   }
                   className="text-xs rounded-lg px-3 py-1 bg-slate-800 border border-slate-700 hover:bg-slate-700"
                 >
                   + Add Category
                 </button>
-                {/* <button
-                  onClick={() =>
-                    setCats((xs) =>
-                      xs.map((c) => ({ ...c, color: randomNiceColor() }))
-                    )
-                  }
-                  className="text-xs rounded-lg px-3 py-1 border border-slate-700 hover:bg-slate-800"
-                  title="Randomize all colors"
-                >
-                  🎲 Randomize All
-                </button> */}
               </div>
             </div>
 
@@ -666,9 +736,11 @@ FANG 3141 Payroll Jul 15 TRN*1*9000852321
               {cats.map((c) => (
                 <div
                   key={c.id}
+                  id={`cat-row-${c.id}`} // <-- for scroll/flash
                   className="grid grid-cols-12 gap-2 items-center rounded-xl border border-slate-700 bg-slate-950 p-2"
                 >
                   <input
+                    data-cat-name="1" // <-- so we can focus the Name field
                     className="col-span-3 rounded-lg bg-slate-900 border border-slate-700 px-2 py-1"
                     value={c.name}
                     onChange={(e) =>
@@ -686,18 +758,18 @@ FANG 3141 Payroll Jul 15 TRN*1*9000852321
                     }
                     placeholder="Name"
                   />
-                  <input
-                    className="col-span-2 rounded-lg bg-slate-900 border border-slate-700 px-2 py-1"
-                    value={c.icon ?? ""}
-                    onChange={(e) =>
-                      setCats((xs) =>
-                        xs.map((x) =>
-                          x.id === c.id ? { ...x, icon: e.target.value } : x
+                  <div className="col-span-2">
+                    <IconPicker
+                      value={c.icon ?? ""}
+                      onChange={(val: string) =>
+                        setCats((xs) =>
+                          xs.map((x) =>
+                            x.id === c.id ? { ...x, icon: val } : x
+                          )
                         )
-                      )
-                    }
-                    placeholder="Icon (emoji)"
-                  />
+                      }
+                    />
+                  </div>
 
                   {/* COLOR block unchanged ... */}
 
@@ -992,7 +1064,13 @@ FANG 3141 Payroll Jul 15 TRN*1*9000852321
               ← Back
             </button>
             <button
-              onClick={() => r.replace("/reconciler?import=1")}
+              onClick={() => {
+                try {
+                  localStorage.setItem("ui.reconciler.autoOpenImporter", "1");
+                } catch {}
+                // route to real reconciler (non-demo)
+                r.replace("/reconciler?import=1");
+              }}
               className="rounded-xl px-4 py-2 bg-emerald-600 text-white hover:bg-emerald-700"
             >
               Open the statement importer →

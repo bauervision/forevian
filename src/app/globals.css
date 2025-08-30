@@ -37,3 +37,25 @@ body {
 html {
   color-scheme: dark;
 }
+
+@keyframes flashHighlight {
+  0% {
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0);
+  }
+  20% {
+    box-shadow: 0 0 0 6px rgba(56, 189, 248, 0.35);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0);
+  }
+}
+.flash-highlight {
+  animation: flashHighlight 1200ms ease-out 1;
+  transition: background-color 200ms ease;
+  background-color: rgba(
+    8,
+    47,
+    73,
+    0.35
+  ); /* slate/cyan tint that fades with the class removal */
+}

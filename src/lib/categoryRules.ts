@@ -260,6 +260,49 @@ export function applyCategoryRulesTo<T extends TxLike>(
   });
 }
 
+function normalizeCategoryTarget(name: string): string {
+  const s = (name || "").trim();
+
+  // direct canonical names pass through
+  const canon = new Set([
+    "Fast Food",
+    "Dining",
+    "Groceries",
+    "Fuel",
+    "Home/Utilities",
+    "Insurance",
+    "Entertainment",
+    "Shopping",
+    "Amazon",
+    "Income/Payroll",
+    "Transfer: Savings",
+    "Transfer: Investing",
+    "Rent/Mortgage",
+    "Debt",
+    "Impulse/Misc",
+    "Doctors",
+    "Memberships",
+    "Subscriptions",
+    "Cash Back",
+    "Uncategorized",
+  ]);
+  if (canon.has(s)) return s;
+
+  // common drift → canonical
+  const low = s.toLowerCase();
+  if (low === "utilities" || low === "home utilities" || low === "utility")
+    return "Home/Utilities";
+  if (low === "gas") return "Fuel";
+  if (low === "housing" || low === "mortgage" || low === "rent")
+    return "Rent/Mortgage";
+  if (low === "amazon marketplace" || low === "amazon.com") return "Amazon";
+  if (low === "income" || low === "payroll") return "Income/Payroll";
+  if (low === "transfers" || low === "transfer") return "Uncategorized"; // users will mark Savings/Investing explicitly
+
+  // vendor-y or off-list labels fall back to Uncategorized instead of polluting the category set
+  return "Uncategorized";
+}
+
 export function upsertCategoryRules(
   keys: string[],
   category: string,
@@ -267,6 +310,8 @@ export function upsertCategoryRules(
 ) {
   if (!keys.length) return;
   const rules = readCatRules(); // already prunes persisted junk
+
+  const safeCategory = normalizeCategoryTarget(category);
 
   for (const key of keys) {
     if (key.startsWith("tok:")) {
@@ -281,8 +326,9 @@ export function upsertCategoryRules(
     }
 
     const idx = rules.findIndex((r) => r.key === key);
-    if (idx >= 0) rules[idx] = { ...rules[idx], category };
-    else rules.push({ key, category, source });
+    if (idx >= 0)
+      rules[idx] = { ...rules[idx], category: safeCategory, source };
+    else rules.push({ key, category: safeCategory, source });
   }
   writeCatRules(rules);
 }

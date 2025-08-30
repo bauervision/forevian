@@ -11,12 +11,14 @@ import {
   makeId,
   monthLabel,
   type StatementSnapshot,
+  writeCurrentId,
 } from "@/lib/statements";
 import { normalizePageText } from "@/lib/textNormalizer";
 import { rebuildFromPages } from "@/lib/import/reconcile";
 import { readCatRules, applyCategoryRulesTo } from "@/lib/categoryRules";
 import { NORMALIZER_VERSION } from "@/lib/textNormalizer";
 import { useSpenders } from "@/lib/spenders";
+import { normalizeToCanonical } from "@/lib/categories/normalization";
 
 /* ---------- local UI helpers ---------- */
 
@@ -112,6 +114,11 @@ function prevMonth(year: number, month: number) {
     : { year, month: month - 1 };
 }
 
+function isUserStatement(s: any) {
+  // treat undefined/new snapshots as user unless explicitly tagged demo
+  return !s?.source || s.source !== "demo";
+}
+
 /* ---------- component ---------- */
 
 export default function ImportStatementWizard({
@@ -141,6 +148,27 @@ export default function ImportStatementWizard({
     totalDeposits: 0,
     totalWithdrawals: 0,
   });
+
+  const step1Ending = React.useMemo(
+    () =>
+      +(
+        (inputs.beginningBalance || 0) +
+        (inputs.totalDeposits || 0) -
+        (inputs.totalWithdrawals || 0)
+      ).toFixed(2),
+    [inputs]
+  );
+
+  // Step 1 — check if a previous statement exists; controls the “Use previous…” button
+
+  const hasPrev = React.useMemo(() => {
+    const { year: py, month: pm } = prevMonth(stmtYear, stmtMonth);
+    const prev = readIndex()[makeId(py, pm)];
+    return !!(
+      prev &&
+      ((prev.cachedTx?.length ?? 0) > 0 || (prev.pagesRaw?.length ?? 0) > 0)
+    );
+  }, [stmtYear, stmtMonth]);
 
   // Step 2 state – page-by-page paste
   const [pages, setPages] = React.useState<string[]>([]);
@@ -251,6 +279,7 @@ export default function ImportStatementWizard({
     const idx = readIndex();
     const prev = idx[prevId];
     if (!prev) return;
+
     const prevRows = Array.isArray(prev.cachedTx) ? prev.cachedTx : [];
     const prevBegin = prev.inputs?.beginningBalance ?? 0;
     const prevDeposits = +prevRows
@@ -260,7 +289,7 @@ export default function ImportStatementWizard({
       .reduce((s, r: any) => s + (r.amount < 0 ? Math.abs(r.amount) : 0), 0)
       .toFixed(2);
     const prevEnd = +(prevBegin + prevDeposits - prevWithdrawals).toFixed(2);
-    setInputs((prev) => ({ ...prev, beginningBalance: prevEnd }));
+    setInputs((prevX) => ({ ...prevX, beginningBalance: prevEnd }));
   }
 
   function addOrSavePage() {
@@ -326,8 +355,10 @@ export default function ImportStatementWizard({
 
       const cleaned = withRules.map((t) => ({
         ...t,
+        category: normalizeToCanonical(t.category),
         cardLast4: last4OrNull(t.cardLast4) ?? undefined,
       }));
+      setTxs(cleaned);
 
       setTxs(cleaned);
     } catch (e: any) {
@@ -375,6 +406,16 @@ export default function ImportStatementWizard({
     };
 
     upsertStatement(snap);
+    writeCurrentId(id); // <— keep it selected globally
+    // Optional: nudge any listeners that don’t watch LS keys:
+    try {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: "forevian.currentStatementId",
+          newValue: id,
+        })
+      );
+    } catch {}
     onClose();
     onDone?.(id);
   }
@@ -439,7 +480,9 @@ export default function ImportStatementWizard({
         {step === 1 && (
           <Panel className="p-4 mt-4 space-y-4">
             <h3 className="font-semibold">1) General statement info</h3>
+
             <div className="grid md:grid-cols-4 gap-3 items-end">
+              {/* Year */}
               <div>
                 <label className="text-xs block mb-1 text-slate-400">
                   Statement Year
@@ -453,6 +496,8 @@ export default function ImportStatementWizard({
                   }
                 />
               </div>
+
+              {/* Month */}
               <div>
                 <label className="text-xs block mb-1 text-slate-400">
                   Statement Month
@@ -469,6 +514,8 @@ export default function ImportStatementWizard({
                   ))}
                 </select>
               </div>
+
+              {/* Beginning */}
               <div>
                 <label className="text-xs block mb-1 text-slate-400">
                   Beginning Balance
@@ -486,15 +533,19 @@ export default function ImportStatementWizard({
                   }
                 />
               </div>
-              <div className="flex flex-wrap gap-2">
-                <ToolbarButton
-                  onClick={seedBeginningFromPrev}
-                  className="w-full sm:w-auto"
-                >
-                  Use previous ending as beginning
-                </ToolbarButton>
-              </div>
 
+              {/* Contextual helper column */}
+              <div className="flex flex-wrap gap-2">
+                {hasPrev && (
+                  <ToolbarButton
+                    onClick={seedBeginningFromPrev}
+                    className="w-full sm:w-auto"
+                  >
+                    Use previous ending as beginning
+                  </ToolbarButton>
+                )}
+              </div>
+              {/* Deposits */}
               <div>
                 <label className="text-xs block mb-1 text-slate-400">
                   Total Deposits
@@ -513,6 +564,7 @@ export default function ImportStatementWizard({
                 />
               </div>
 
+              {/* Withdrawals */}
               <div>
                 <label className="text-xs block mb-1 text-slate-400">
                   Total Withdrawals
@@ -529,6 +581,19 @@ export default function ImportStatementWizard({
                     }))
                   }
                 />
+              </div>
+
+              {/* NEW: Ending Balance (calculated) */}
+              <div className="rounded-2xl border border-slate-700 bg-slate-900 p-3">
+                <div className="text-xs text-slate-400">
+                  Ending Balance (calculated)
+                </div>
+                <div className="text-lg font-semibold text-cyan-300 mt-0.5">
+                  {money(step1Ending)}
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1">
+                  beginning + deposits − withdrawals
+                </div>
               </div>
             </div>
 

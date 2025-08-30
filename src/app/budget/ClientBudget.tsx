@@ -660,15 +660,27 @@ export default function ClientBudgetPage() {
     return [p1, p2];
   }
 
-  const availableP1 = +(
+  function rebalancePeriods(p1: number, p2: number): [number, number] {
+    // If one is negative and the other is positive, shift from the positive side
+    if (p1 < 0 && p2 > 0) {
+      const shift = Math.min(p2, -p1);
+      return [p1 + shift, p2 - shift];
+    }
+    if (p2 < 0 && p1 > 0) {
+      const shift = Math.min(p1, -p2);
+      return [p1 - shift, p2 + shift];
+    }
+    return [p1, p2];
+  }
+
+  let availableP1 = +(
     (incomeP1 || 0) -
     (totalBillsP1 || 0) -
     (groP1 || 0) -
     (saveP1 || 0) -
     (investP1 || 0)
   ).toFixed(2);
-
-  const availableP2 = +(
+  let availableP2 = +(
     (incomeP2 || 0) -
     (totalBillsP2 || 0) -
     (groP2 || 0) -
@@ -676,15 +688,14 @@ export default function ClientBudgetPage() {
     (investP2 || 0)
   ).toFixed(2);
 
-  const availableToSpend = React.useMemo(() => {
-    const left =
-      totalIncome -
-      totalBills -
-      (groceriesAmt || 0) -
-      (savingsAmt || 0) -
-      (investingAmt || 0);
-    return +left.toFixed(2);
-  }, [totalIncome, totalBills, groceriesAmt, savingsAmt, investingAmt]);
+  // Rebalance to avoid negatives while keeping month totals constant
+  [availableP1, availableP2] = rebalancePeriods(availableP1, availableP2);
+
+  // After availableP1 / availableP2 are computed & adjusted (see next section)
+  const availableToSpend = React.useMemo(
+    () => +(availableP1 + availableP2).toFixed(2),
+    [availableP1, availableP2]
+  );
 
   // Labels for periods
   const depositDays = React.useMemo(

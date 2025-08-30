@@ -47,6 +47,21 @@ import { resolveAliasNameToCategory } from "@/lib/categories/aliases";
 import { catToSlug } from "@/lib/slug";
 
 /* --- tiny UI bits --- */
+
+function pickInitialId(
+  idx: Record<string, StatementSnapshot>,
+  isDemo: boolean,
+  selectedFromUrl: string | null
+) {
+  // Prefer explicit URL (non-demo), then persisted selection, then first available
+  const persisted = readCurrentId();
+  const first = Object.keys(idx)[0] ?? "";
+
+  if (!isDemo && selectedFromUrl) return selectedFromUrl;
+  if (persisted && idx[persisted]) return persisted;
+  return first;
+}
+
 export function useEnsureCategoryExists() {
   const pathname = usePathname();
   const isDemo = pathname?.startsWith("/demo") ?? false;
@@ -348,14 +363,12 @@ export default function ReconcilerPage() {
   useEffect(() => {
     if (bootstrapped.current) return;
 
-    // --- migrate / bootstrap storage ---
     if (!isDemo) migrateLegacyIfNeeded();
 
     let idx = readIndex();
 
     if (!Object.keys(idx).length) {
       if (!isDemo) {
-        // Non-demo: create an empty shell so the importer opens
         const now = new Date();
         const y = now.getFullYear();
         const m = now.getMonth() + 1;
@@ -364,7 +377,6 @@ export default function ReconcilerPage() {
         upsertStatement(emptyStatement(id, label, y, m));
         idx = readIndex();
       } else {
-        // Demo: materialize statements so readIndex()/readCurrentId() work
         for (const m of DEMO_MONTHS) {
           upsertStatement({
             ...emptyStatement(m.id, m.label, m.stmtYear, m.stmtMonth),
@@ -379,22 +391,42 @@ export default function ReconcilerPage() {
 
     setStatements(idx);
 
-    // --- choose initial id ---
-    const fallbackDemoId =
-      DEMO_MONTHS.at(-1)?.id ?? DEMO_MONTHS[0]?.id ?? Object.keys(idx)[0] ?? "";
-
-    const cid =
-      selectedId || // URL (non-demo) or LS (demo) via hook
-      readCurrentId() || // persisted last selection
-      Object.keys(idx)[0] || // first available
-      (isDemo ? fallbackDemoId : ""); // demo fallback
-
+    // Choose initial id (URL for real, else persisted, else first)
+    const cid = pickInitialId(idx, isDemo, selectedId);
     setCurrentId(cid);
-    writeCurrentId(cid); // persist + broadcast (our patched version)
-    if (!isDemo) setStatementInUrl(cid); // mirror to URL only outside demo
+    writeCurrentId(cid);
+    if (!isDemo) setStatementInUrl(cid);
 
-    // --- load data for cid ---
-    const cur = idx[cid];
+    bootstrapped.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, isDemo]);
+
+  // React to later changes (dropdown, back/forward, other tabs)
+  useEffect(() => {
+    const next = selectedId ?? "";
+    if (!next || next === currentId) return;
+    onSwitchStatement(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
+
+  // Load the selected statement any time currentId changes
+  useEffect(() => {
+    if (!currentId) return;
+    const idx = readIndex();
+    setStatements(idx);
+
+    const cur = idx[currentId];
+    if (!cur) {
+      // If the id vanished, pick a safe fallback
+      const fallback = Object.keys(idx)[0] ?? "";
+      setCurrentId(fallback);
+      writeCurrentId(fallback);
+      if (!isDemo) setStatementInUrl(fallback);
+      setTransactions([]);
+      setInputs({} as any);
+      return;
+    }
+
     setInputs(inputsFromStmt(cur));
 
     if (cur?.cachedTx?.length) {
@@ -413,17 +445,11 @@ export default function ReconcilerPage() {
       if (!isDemo) setOpenWizard(true);
     }
 
-    bootstrapped.current = true;
+    // Mirror selection to URL / persist it
+    writeCurrentId(currentId);
+    if (!isDemo) setStatementInUrl(currentId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, isDemo]);
-
-  // React to later changes (dropdown, back/forward, other tabs)
-  useEffect(() => {
-    const next = selectedId ?? "";
-    if (!next || next === currentId) return;
-    onSwitchStatement(next);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId]);
+  }, [currentId, isDemo, applyAlias]);
 
   // respond to URL changes
   const urlStatement = useClientSearchParam("statement") ?? "";
@@ -524,6 +550,8 @@ export default function ReconcilerPage() {
               Statement
             </span>
             <StatementSwitcher
+              value={currentId} // <-- pass selected id
+              onChange={(id) => setCurrentId(id)} // <-- just set state; effects do the rest
               available={Object.values(statements)
                 .map((s) => ({ id: s.id, y: s.stmtYear, m: s.stmtMonth }))
                 .sort((a, b) => a.y - b.y || a.m - b.m)
@@ -532,6 +560,7 @@ export default function ReconcilerPage() {
               size="sm"
               className="w-44 sm:w-56"
             />
+
             <ToolbarButton onClick={() => setOpenWizard(true)}>
               + New Statement
             </ToolbarButton>

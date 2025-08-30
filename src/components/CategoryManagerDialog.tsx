@@ -98,6 +98,8 @@ export default function CategoryManagerDialog({
   function addLocal() {
     const id = mkrowid();
     lastAddedRowIdRef.current = id;
+    // 🔹 trigger scroll/flash/focus for this new row
+    setHighlightCatId(id);
 
     setList((xs) => [
       {
@@ -216,6 +218,30 @@ export default function CategoryManagerDialog({
 
   if (!open) return null;
 
+  // flashing setup
+  const [highlightCatId, setHighlightCatId] = React.useState<string | null>(
+    null
+  );
+
+  React.useEffect(() => {
+    if (!highlightCatId) return;
+    const row = document.getElementById(`mgr-cat-row-${highlightCatId}`);
+    if (row) {
+      row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      row.classList.add("flash-highlight");
+      const nameInput = row.querySelector<HTMLInputElement>(
+        'input[data-cat-name="1"]'
+      );
+      requestAnimationFrame(() => {
+        nameInput?.focus();
+        nameInput?.select?.();
+        setTimeout(() => row.classList.remove("flash-highlight"), 1400);
+      });
+    }
+    const t = setTimeout(() => setHighlightCatId(null), 10);
+    return () => clearTimeout(t);
+  }, [highlightCatId]);
+
   return (
     <div
       className="fixed inset-0 z-[80] grid place-items-center"
@@ -246,10 +272,12 @@ export default function CategoryManagerDialog({
               return (
                 <div
                   key={row.rowId}
+                  id={`mgr-cat-row-${row.rowId}`} // dialog uses a different id prefix
                   className="grid grid-cols-12 gap-2 items-center rounded-xl border border-slate-700 bg-slate-950 px-2 py-2"
                 >
                   {/* name */}
                   <input
+                    data-cat-name="1"
                     className="col-span-4 rounded-lg bg-slate-900 border border-slate-700 px-2 py-1 text-sm placeholder-slate-500"
                     value={row.name}
                     onChange={(e) =>

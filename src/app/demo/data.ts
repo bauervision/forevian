@@ -1,9 +1,5 @@
 // app/demo/data.ts
 import type { StatementSnapshot } from "@/lib/statements";
-import type {
-  Transaction,
-  ReconcilerInputs,
-} from "@/app/providers/ReconcilerProvider";
 
 export const DEMO_VERSION = 7; // bump this when you change names/data
 
@@ -25,12 +21,20 @@ export const DEMO_MONTHS: DemoMonth[] = [
       totalWithdrawals: 3656.58, // sum of negatives below
     },
     cachedTx: [
-      // Deposits
+      // Deposits (two paychecks)
       {
-        id: "tx-dep-2025-06",
+        id: "tx-dep1-2025-06",
         date: "06/01",
         description: "Payroll Direct Deposit",
-        amount: +5000,
+        amount: +2500,
+        category: "Income",
+        user: "Joint",
+      },
+      {
+        id: "tx-dep2-2025-06",
+        date: "06/26", // >15th to land in period 2
+        description: "Payroll Direct Deposit",
+        amount: +2500,
         category: "Income",
         user: "Joint",
       },
@@ -267,12 +271,20 @@ export const DEMO_MONTHS: DemoMonth[] = [
       totalWithdrawals: 3633.46, // sum of negatives below
     },
     cachedTx: [
-      // Deposit
+      // Deposits (two paychecks)
       {
-        id: "tx-dep-2025-07",
+        id: "tx-dep1-2025-07",
         date: "07/01",
         description: "Payroll Direct Deposit",
-        amount: +5000,
+        amount: +2500,
+        category: "Income",
+        user: "Joint",
+      },
+      {
+        id: "tx-dep2-2025-07",
+        date: "07/26", // >15th
+        description: "Payroll Direct Deposit",
+        amount: +2500,
         category: "Income",
         user: "Joint",
       },
@@ -303,7 +315,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "07/03",
         description: "AMZN Mktp US*",
         amount: -82.14,
-        category: "Amazon Marketplace",
+        category: "Impulse/Misc",
         user: "Husband",
         cardLast4: "5280",
       },
@@ -501,12 +513,20 @@ export const DEMO_MONTHS: DemoMonth[] = [
       totalWithdrawals: 3652.24, // sum of negatives below
     },
     cachedTx: [
-      // Deposit
+      // Deposits (two paychecks)
       {
-        id: "tx-dep-2025-08",
+        id: "tx-dep1-2025-08",
         date: "08/01",
         description: "Payroll Direct Deposit",
-        amount: +5000,
+        amount: +2500,
+        category: "Income",
+        user: "Joint",
+      },
+      {
+        id: "tx-dep2-2025-08",
+        date: "08/23", // >15th
+        description: "Payroll Direct Deposit",
+        amount: +2500,
         category: "Income",
         user: "Joint",
       },
@@ -535,7 +555,7 @@ export const DEMO_MONTHS: DemoMonth[] = [
         date: "08/03",
         description: "AMZN Mktp US*",
         amount: -96.05,
-        category: "Amazon Marketplace",
+        category: "Impulse/Misc",
         user: "Husband",
         cardLast4: "5280",
       },
@@ -741,7 +761,6 @@ export const DEMO_BUDGETS = {
     Housing: 1900,
     Utilities: 260,
     Groceries: 700,
-    "Amazon Marketplace": 300,
     Shopping: 300,
     Dining: 350,
     "Fast Food": 200,

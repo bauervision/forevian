@@ -1,13 +1,12 @@
 "use client";
-import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import dayjs from "dayjs";
-import { readCurrentId, writeCurrentId } from "@/lib/statements";
-import { useSelectedStatementId } from "@/lib/useClientSearchParams";
 
 type Statement = { id: string; label: string };
 
 export default function StatementSwitcher({
+  value,
+  onChange,
   available,
   fallbackMonths = 6,
   label = "Statement",
@@ -15,23 +14,19 @@ export default function StatementSwitcher({
   size = "md",
   className = "",
 }: {
+  /** currently selected statement id (YYYY-MM) */
+  value?: string;
+  /** called when user picks a different statement id */
+  onChange?: (id: string) => void;
+  /** ids to show (YYYY-MM), newest→oldest or any order */
   available?: string[];
+  /** used only when `available` is empty; shows N recent months */
   fallbackMonths?: number;
   label?: string;
   showLabel?: boolean;
   size?: "sm" | "md";
   className?: string;
 }) {
-  const router = useRouter();
-  const pathname = usePathname();
-  const isDemo = pathname?.startsWith("/demo") ?? false;
-
-  // URL source of truth (non-demo)
-  const idFromUrl = useSelectedStatementId(); // string | null
-
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
-
   // Build candidate ids (newest → oldest)
   const allIds = useMemo(() => {
     const base = (
@@ -44,66 +39,28 @@ export default function StatementSwitcher({
     return base;
   }, [available, fallbackMonths]);
 
-  // Local selected state so demo routes can update instantly
-  const [selected, setSelected] = useState<string>("");
-
-  // Initialize & keep in sync with URL/localStorage
-  useEffect(() => {
-    if (!mounted) return;
-
-    const saved = readCurrentId() || "";
-    const fallback = allIds[0] || "";
-    const next = (idFromUrl || saved || fallback || "").trim();
-
-    if (next && next !== selected) setSelected(next);
-
-    // Always persist to LS so the rest of the app can read it
-    if (next && next !== saved) writeCurrentId(next);
-
-    // If URL is empty on non-demo, mirror the chosen id once
-    if (!isDemo && !idFromUrl && next && typeof window !== "undefined") {
-      const u = new URL(window.location.href);
-      u.searchParams.set("statement", next);
-      router.replace(u.pathname + "?" + u.searchParams.toString());
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mounted, idFromUrl, allIds, isDemo, router]);
-
-  // Ensure the currently selected id is present in the dropdown list
+  // Ensure the selected id is present in the menu (in case parent passes one not in `available`)
   const idsForSelect = useMemo(() => {
-    if (!selected) return allIds;
-    return allIds.includes(selected) ? allIds : [selected, ...allIds];
-  }, [allIds, selected]);
+    if (!value) return allIds;
+    return allIds.includes(value) ? allIds : [value, ...allIds];
+  }, [allIds, value]);
 
   const statements: Statement[] = useMemo(
     () =>
       idsForSelect.map((id) => ({
         id,
-        label: dayjs(id + "-01").format("MMM YYYY"),
+        label: dayjs(id + "-01").isValid()
+          ? dayjs(id + "-01").format("MMM YYYY")
+          : id,
       })),
     [idsForSelect]
-  );
-
-  const onChange = useCallback(
-    (id: string) => {
-      setSelected(id);
-      writeCurrentId(id);
-
-      // Non-demo: reflect in URL so other pages pick it up
-      if (!isDemo && typeof window !== "undefined") {
-        const u = new URL(window.location.href);
-        u.searchParams.set("statement", id);
-        router.replace(u.pathname + "?" + u.searchParams.toString());
-      }
-    },
-    [isDemo, router]
   );
 
   const h = size === "sm" ? "h-9 text-sm" : "h-10";
   const wrapperW = className || "sm:w-56";
 
   return (
-    <div className={`w-full ${wrapperW}`} suppressHydrationWarning>
+    <div className={`w-full ${wrapperW}`}>
       {showLabel && (
         <label className="block text-xs uppercase tracking-wide text-slate-400 mb-1">
           {label}
@@ -112,8 +69,8 @@ export default function StatementSwitcher({
       <div className="relative">
         <select
           aria-label={label}
-          value={selected || ""}
-          onChange={(e) => onChange(e.target.value)}
+          value={value ?? ""}
+          onChange={(e) => onChange?.(e.target.value)}
           className={`w-full ${h} rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 px-3 pr-9
                       focus:outline-none focus:ring-2 focus:ring-emerald-500/60 focus:border-emerald-500`}
         >
