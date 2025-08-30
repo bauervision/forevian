@@ -3,33 +3,36 @@ import { Suspense } from "react";
 import ClientCategoryPage from "./ClientCategoryPage";
 import { catToSlug } from "@/lib/slug";
 
-// Prevent unexpected dynamic params during export
 export const dynamicParams = false;
 
-// ✅ Tell Next.js which slugs to prebuild for static export
+// Prebuild all of your default categories (matches DEFAULT_CATEGORIES)
 export function generateStaticParams() {
-  // Top-level category/group names you surface elsewhere in the app.
-  // Add/remove here as your taxonomy evolves.
   const GROUPS = [
-    "Groceries",
     "Fast Food",
     "Dining",
+    "Groceries",
     "Fuel",
     "Home/Utilities",
     "Insurance",
-    "Subscriptions",
-    "Shopping",
-    "Debt",
     "Entertainment",
-    "Cash Back",
+    "Shopping",
+    "Amazon",
+    "Income/Payroll",
+    "Transfer: Savings",
+    "Transfer: Investing",
+    "Rent/Mortgage",
+    "Debt",
     "Impulse/Misc",
+    "Doctors",
+    "Memberships",
+    "Subscriptions",
+    "Cash Back",
     "Uncategorized",
   ];
-
   return GROUPS.map((name) => ({ slug: catToSlug(name) }));
 }
 
-export default function Page() {
+export default function Page({ params }: { params: { slug: string } }) {
   return (
     <Suspense
       fallback={
@@ -38,7 +41,7 @@ export default function Page() {
         </div>
       }
     >
-      <ClientCategoryPage />
+      <ClientCategoryPage slug={params.slug} isDemo={false} />
     </Suspense>
   );
 }

@@ -2,26 +2,26 @@
 import { Suspense } from "react";
 import ClientSpenderPage from "./ClientSpenderPage";
 
-// Prevent unexpected params at runtime for static export
 export const dynamicParams = false;
 
-// ✅ List the spender slugs you want statically exported
+// Include the spender slugs you link to from the Dashboard
 export function generateStaticParams() {
-  // Pick the set you actually use. You can add/remove anytime and rebuild.
   const SPENDERS = [
     "joint",
     "you",
     "spouse",
     "primary",
     "secondary",
-    // If you use named profiles, include them here:
+    // named profiles / demo aliases
     "mike",
     "beth",
+    "husband",
+    "wife",
   ];
   return SPENDERS.map((slug) => ({ slug }));
 }
 
-export default function Page() {
+export default function Page({ params }: { params: { slug: string } }) {
   return (
     <Suspense
       fallback={
@@ -30,7 +30,7 @@ export default function Page() {
         </div>
       }
     >
-      <ClientSpenderPage />
+      <ClientSpenderPage slug={params.slug} isDemo={false} />
     </Suspense>
   );
 }

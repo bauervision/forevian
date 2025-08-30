@@ -1,20 +1,23 @@
-//app/dashboard/category/[slug]/ClientCategoryPage.tsx
 "use client";
 import React, { Suspense } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   useClientSearchParam,
   useSelectedStatementId,
 } from "@/lib/useClientSearchParams";
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 import { type Period } from "@/lib/period";
-import { readIndex, readCurrentId, writeCurrentId } from "@/lib/statements";
+import {
+  readIndex,
+  readCurrentId,
+  writeCurrentId,
+  type StatementSnapshot,
+} from "@/lib/statements";
 import { readCatRules, applyCategoryRulesTo } from "@/lib/categoryRules";
 import { applyAlias } from "@/lib/aliases";
 import { prettyDesc } from "@/lib/txEnrich";
 import StatementSwitcher from "@/components/StatementSwitcher";
-import { useRowsForSelection } from "@/helpers/useRowsForSelection";
 import { Pencil, ArrowLeft } from "lucide-react";
 import { useBrandMap } from "@/app/providers/BrandMapProvider";
 import BrandLogoDialog from "@/components/BrandLogoDialog";
@@ -24,6 +27,8 @@ import { iconForCategory, IconFromKey, IconKey, isIconKey } from "@/lib/icons";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import DemoCategorySlugTips from "@/components/DemoCategorySlugTips";
 import { useSyncSelectedStatement } from "@/lib/useSyncSelectedStatement";
+import { normalizePageText } from "@/lib/textNormalizer";
+import { rebuildFromPages } from "@/lib/import/reconcile";
 
 /* ----------------------------- trends helpers ---------------------------- */
 
@@ -32,17 +37,83 @@ function useIsDemo() {
   return p?.startsWith("/demo") ?? false;
 }
 
+function hasData(s?: StatementSnapshot) {
+  return !!(
+    (Array.isArray(s?.cachedTx) && s!.cachedTx.length > 0) ||
+    (Array.isArray(s?.pagesRaw) && s!.pagesRaw.length > 0)
+  );
+}
+
+function pickBestStatementId(
+  selectedFromUrl: string | null,
+  isDemo: boolean
+): string {
+  const idx = readIndex();
+  if (!isDemo && selectedFromUrl && idx[selectedFromUrl])
+    return selectedFromUrl;
+
+  const saved = readCurrentId();
+  if (saved && idx[saved]) return saved;
+
+  const sorted = Object.values(idx).sort(
+    (a, b) => b.stmtYear - a.stmtYear || b.stmtMonth - a.stmtMonth
+  );
+  const withData = sorted.filter(hasData);
+  return withData[0]?.id || sorted[0]?.id || "";
+}
+
+/** Build rows for a specific statement id (uses cachedTx or rebuilds from pages). */
+function buildRowsForCurrent(id: string) {
+  const idx = readIndex();
+  const cur = idx[id];
+  if (!cur) return [] as any[];
+
+  let base: any[] = [];
+  if (Array.isArray(cur.cachedTx) && cur.cachedTx.length) {
+    base = cur.cachedTx;
+  } else if (Array.isArray(cur.pagesRaw) && cur.pagesRaw.length) {
+    const sanitized = cur.pagesRaw.map(normalizePageText);
+    const res = rebuildFromPages(sanitized, cur.stmtYear, applyAlias);
+    base = res.txs;
+  }
+
+  const rules = readCatRules();
+  return applyCategoryRulesTo(rules, base, applyAlias);
+}
+
+/** Build YTD rows up to the month of `id`. */
+function buildRowsForYTD(id: string) {
+  const idx = readIndex();
+  const cur = idx[id];
+  if (!cur) return [] as any[];
+  const rules = readCatRules();
+
+  const rows: any[] = [];
+  const sameYear = Object.values(idx).filter(
+    (s) => s && s.stmtYear === cur.stmtYear && s.stmtMonth <= cur.stmtMonth
+  );
+  for (const s of sameYear) {
+    let base: any[] = [];
+    if (Array.isArray(s.cachedTx) && s.cachedTx.length) base = s.cachedTx;
+    else if (Array.isArray(s.pagesRaw) && s.pagesRaw.length) {
+      const sanitized = s.pagesRaw.map(normalizePageText);
+      const res = rebuildFromPages(sanitized, s.stmtYear, applyAlias);
+      base = res.txs;
+    }
+    if (base.length) rows.push(...base);
+  }
+  return applyCategoryRulesTo(rules, rows, applyAlias);
+}
+
 function prevStatementId(currentId?: string | null) {
   if (!currentId) return null;
   const [y, m] = currentId.split("-").map(Number);
   if (!y || !m) return null;
   const pm = m === 1 ? 12 : m - 1;
   const py = m === 1 ? y - 1 : y;
-  const candidate = `${py.toString().padStart(4, "0")}-${pm
-    .toString()
-    .padStart(2, "0")}`;
+  const cand = `${String(py).padStart(4, "0")}-${String(pm).padStart(2, "0")}`;
   const idx = readIndex();
-  return idx[candidate] ? candidate : null;
+  return idx[cand] ? cand : null;
 }
 
 function computeTrend(curr: number, prev: number) {
@@ -121,6 +192,7 @@ const moneyFmt = new Intl.NumberFormat("en-US", {
   currency: "USD",
 });
 const money = (n: number) => moneyFmt.format(n);
+const moneySigned = (n: number) => (n >= 0 ? "" : "−") + money(Math.abs(n));
 
 function accentForCategory(catName: string) {
   const c = catName.toLowerCase();
@@ -157,52 +229,8 @@ function accentForCategory(catName: string) {
   return "from-rose-600/20 to-rose-500/5 border-rose-500";
 }
 
-/** Very small brand-domain map for logo fetching (extend anytime). */
-const BRAND_DOMAINS: Array<[RegExp, string]> = [
-  [/wendy/i, "wendys.com"],
-  [/taco\s*bell/i, "tacobell.com"],
-  [/mcdonald/i, "mcdonalds.com"],
-  [/chick-?fil-?a/i, "chick-fil-a.com"],
-  [/starbucks/i, "starbucks.com"],
-  [/target/i, "target.com"],
-  [/amazon/i, "amazon.com"],
-  [/costco/i, "costco.com"],
-  [/home\s*depot/i, "homedepot.com"],
-  [/netflix/i, "netflix.com"],
-  [/disney/i, "disneyplus.com"],
-  [/hulu/i, "hulu.com"],
-  [/t-?mobile/i, "t-mobile.com"],
-  [/dominion\s*energy/i, "dominionenergy.com"],
-];
-
-function cleanNoise(text: string) {
-  let s = text || "";
-  s = s.replace(
-    /^(?:SPO|TST|TS|SQ|SQM|DNH|DOORDASH|UBER|GH|GRUBHUB|AMZN|AMAZON)\s*\*/i,
-    " "
-  );
-  s = s.replace(/https?:\/\/\S+/gi, " ");
-  s = s.replace(/\b\d{3}[-\s]?\d{3}[-\s]?\d{4}\b/g, " ");
-  s = s.replace(/#\s*\d{2,}/g, " ");
-  s = s.replace(/\b\d{4,}\b/g, " ");
-  s = s.replace(
-    /\b(virginia\s*bch|virginia|beach|chesape\w*|chesapeake)\b/gi,
-    " "
-  );
-  s = s.replace(
-    /\b(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV)\b/gi,
-    " "
-  );
-  s = s.replace(/\s{2,}/g, " ").trim();
-  return s;
-}
-
-function titleCase(s: string) {
-  return s.toLowerCase().replace(/\b([a-z])/g, (m) => m.toUpperCase());
-}
-
-type BrandPat = { name: string; domain: string; rx: RegExp };
-const BRAND_PATS: BrandPat[] = [
+/** Brand helpers (same as your file) */
+const BRAND_PATS = [
   {
     name: "Prime Video",
     domain: "primevideo.com",
@@ -257,25 +285,44 @@ const BRAND_PATS: BrandPat[] = [
   },
 ];
 
+function cleanNoise(text: string) {
+  let s = text || "";
+  s = s.replace(
+    /^(?:SPO|TST|TS|SQ|SQM|DNH|DOORDASH|UBER|GH|GRUBHUB|AMZN|AMAZON)\s*\*/i,
+    " "
+  );
+  s = s.replace(/https?:\/\/\S+/gi, " ");
+  s = s.replace(/\b\d{3}[-\s]?\d{3}[-\s]?\d{4}\b/g, " ");
+  s = s.replace(/#\s*\d{2,}/g, " ");
+  s = s.replace(/\b\d{4,}\b/g, " ");
+  s = s.replace(
+    /\b(virginia\s*bch|virginia|beach|chesape\w*|chesapeake)\b/gi,
+    " "
+  );
+  s = s.replace(
+    /\b(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV)\b/gi,
+    " "
+  );
+  s = s.replace(/\s{2,}/g, " ").trim();
+  return s;
+}
+function titleCase(s: string) {
+  return s.toLowerCase().replace(/\b([a-z])/g, (m) => m.toUpperCase());
+}
 function canonicalizeMerchantLabel(raw: string) {
   const input = raw || "";
   const aliased = applyAlias(input) || null;
-
   for (const b of BRAND_PATS) if (b.rx.test(input)) return b.name;
-
   const cleaned = cleanNoise(input);
   for (const b of BRAND_PATS) if (b.rx.test(cleaned)) return b.name;
-
   if (aliased) {
     for (const b of BRAND_PATS) if (b.rx.test(aliased)) return b.name;
     const aliasedClean = cleanNoise(aliased);
     for (const b of BRAND_PATS) if (b.rx.test(aliasedClean)) return b.name;
     return titleCase(aliasedClean || aliased);
   }
-
   return titleCase(cleaned || input);
 }
-
 function logoUrlFor(label: string) {
   const hit = BRAND_PATS.find((b) => b.rx.test(label));
   if (hit) return `https://logo.clearbit.com/${hit.domain}`;
@@ -299,12 +346,7 @@ function MerchantLogo({
   iconOverride?: IconKey | null;
 }) {
   const [failed, setFailed] = React.useState(!src);
-
-  // when the src changes (e.g., you saved a new domain), try loading again
-  React.useEffect(() => {
-    setFailed(!src);
-  }, [src]);
-
+  React.useEffect(() => setFailed(!src), [src]);
   if (!src || failed) {
     return (
       <div
@@ -319,7 +361,6 @@ function MerchantLogo({
       </div>
     );
   }
-
   return (
     <img
       src={src}
@@ -330,18 +371,6 @@ function MerchantLogo({
     />
   );
 }
-
-const moneySigned = (n: number) => (n >= 0 ? "" : "−") + money(Math.abs(n));
-
-type MerchantAgg = {
-  label: string;
-  amt: number;
-  logo: string | null;
-  prev: number;
-  trend: ReturnType<typeof computeTrend>;
-  deltaMoney: string;
-  icon: IconKey | null;
-};
 
 /* ---------------------------------- page ---------------------------------- */
 export default function ClientCategoryPage({
@@ -371,12 +400,60 @@ function CategoryInner({
   slugProp?: string;
   isDemoProp?: boolean;
 }) {
-  useSyncSelectedStatement(); // <- keep provider in sync for this page
+  useSyncSelectedStatement();
 
-  const selectedId = useSelectedStatementId() ?? "";
-
+  const router = useRouter();
   const isDemo = useIsDemo();
   const base = isDemo ? "/demo" : "";
+
+  const selectedFromUrl = useSelectedStatementId();
+  const [effectiveId, setEffectiveId] = React.useState<string>("");
+
+  // choose a valid id (most recent WITH DATA), persist, mirror to URL (non-demo)
+  React.useEffect(() => {
+    const id = pickBestStatementId(selectedFromUrl, isDemo);
+    if (!id) return;
+    if (id !== effectiveId) setEffectiveId(id);
+    if (id !== readCurrentId()) writeCurrentId(id);
+    if (!isDemo && typeof window !== "undefined") {
+      const u = new URL(window.location.href);
+      u.searchParams.set("statement", id);
+      router.replace(u.pathname + "?" + u.searchParams.toString());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFromUrl, isDemo]);
+
+  // reflect inputs for consistency (optional, but keeps provider aligned)
+  const { setInputs } = useReconcilerSelectors();
+  React.useEffect(() => {
+    if (!effectiveId) return;
+    const s = readIndex()[effectiveId];
+    if (!s) return;
+    setInputs({
+      beginningBalance: s.inputs?.beginningBalance ?? 0,
+      totalDeposits: s.inputs?.totalDeposits ?? 0,
+      totalWithdrawals: s.inputs?.totalWithdrawals ?? 0,
+    });
+  }, [effectiveId, setInputs]);
+
+  // switcher options
+  const options = React.useMemo(() => {
+    const idx = readIndex();
+    return Object.values(idx)
+      .map((s: any) => ({
+        id: s.id,
+        label: s.label,
+        year: s.stmtYear,
+        month: s.stmtMonth,
+      }))
+      .sort((a, b) => a.year - b.year || a.month - b.month);
+  }, [effectiveId]);
+
+  const statementParam = useClientSearchParam("statement");
+  React.useEffect(() => {
+    if (statementParam && readCurrentId() !== statementParam)
+      writeCurrentId(statementParam);
+  }, [statementParam]);
 
   const { categories } = useCategories();
   const slug = (slugProp || "").toLowerCase();
@@ -384,100 +461,47 @@ function CategoryInner({
 
   const [editOpen, setEditOpen] = React.useState(false);
   const [editSeed, setEditSeed] = React.useState<string>("");
-  const { transactions } = useReconcilerSelectors();
-
-  const statementParam = useClientSearchParam("statement"); // one call only
-
-  const [mounted, setMounted] = React.useState(false);
-  React.useEffect(() => setMounted(true), []);
-
-  // Keep localStorage in sync with the URL param when present
-  React.useEffect(() => {
-    if (statementParam && readCurrentId() !== statementParam) {
-      writeCurrentId(statementParam);
-    }
-  }, [statementParam]);
 
   const [period, setPeriod] = React.useState<PeriodEx>("CURRENT");
 
-  // Rows for the selected statement / scope
-  const viewRows = useRowsForSelection(period, selectedId, transactions);
+  // rows for CURRENT/YTD derived directly from snapshots
+  const scopedAllRows = React.useMemo(() => {
+    if (!effectiveId) return [] as any[];
+    return period === "YTD"
+      ? buildRowsForYTD(effectiveId)
+      : buildRowsForCurrent(effectiveId);
+  }, [effectiveId, period]);
 
-  // Pull meta for the header chip from the selected id
+  // previous rows for MoM (same category scope)
+  const prevRowsAll = React.useMemo(() => {
+    if (period !== "CURRENT" || !effectiveId) return [] as any[];
+    const prevId = prevStatementId(effectiveId);
+    if (!prevId) return [] as any[];
+    return buildRowsForCurrent(prevId);
+  }, [period, effectiveId]);
+
+  // Pull meta for the header chip
   const viewMeta = React.useMemo(() => {
-    if (!selectedId) return undefined;
+    if (!effectiveId) return undefined;
     const idx = readIndex();
-    return idx[selectedId];
-  }, [selectedId]);
+    return idx[effectiveId];
+  }, [effectiveId]);
 
-  // --- filter current rows (slug compare)
-  // Filter viewRows by leaf category (no grouping)
+  // Filter by leaf category slug
   const rows = React.useMemo(() => {
-    const bySlug = (r: any) =>
-      catToSlug((r.categoryOverride ?? r.category ?? "Uncategorized").trim());
-
-    // primary: use hydrated rows from the provider scope
-    let filtered = viewRows.filter((r) => bySlug(r) === slug);
-
-    if (filtered.length === 0 && selectedId) {
-      // fallback: read the statement snapshot directly
-      const idx = readIndex();
-      const s = idx[selectedId];
-      if (s && Array.isArray(s.cachedTx)) {
-        const rules = readCatRules();
-        const scoped = applyCategoryRulesTo(
-          rules,
-          s.cachedTx,
-          applyAlias
-        ) as typeof viewRows;
-        filtered = scoped.filter((r) => bySlug(r) === slug);
-      }
-    }
-    return filtered;
-  }, [viewRows, slug, selectedId]);
-
-  // --- previous month rows for the SAME scope (for MoM)
-  const prevScopedRows = React.useMemo(() => {
-    if (period !== "CURRENT") return [] as typeof rows;
-
-    const idx = readIndex();
-    const prevId = prevStatementId(selectedId);
-    if (!prevId) return [] as typeof rows;
-
-    const s = idx[prevId];
-    if (!s) return [] as typeof rows;
-
-    const rules = readCatRules();
-    const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
-    const allPrev = applyCategoryRulesTo(
-      rules,
-      raw,
-      applyAlias
-    ) as typeof viewRows;
-
     const rowSlug = (r: any) =>
       catToSlug((r.categoryOverride ?? r.category ?? "Uncategorized").trim());
-    return allPrev.filter((r) => rowSlug(r) === slug);
-  }, [period, selectedId, slug]);
+    return scopedAllRows.filter((r) => rowSlug(r) === slug);
+  }, [scopedAllRows, slug]);
 
-  // Previous statement rows (for MoM trend)
   const prevRows = React.useMemo(() => {
-    if (period !== "CURRENT") return [] as typeof viewRows;
-    if (!selectedId) return [] as typeof viewRows;
+    const rowSlug = (r: any) =>
+      catToSlug((r.categoryOverride ?? r.category ?? "Uncategorized").trim());
+    return prevRowsAll.filter((r) => rowSlug(r) === slug);
+  }, [prevRowsAll, slug]);
 
-    const idx = readIndex();
-    const prevId = prevStatementId(selectedId);
-    if (!prevId) return [] as typeof viewRows;
-
-    const s = idx[prevId];
-    if (!s) return [] as typeof viewRows;
-
-    const rules = readCatRules();
-    const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
-    return applyCategoryRulesTo(rules, raw, applyAlias) as typeof viewRows;
-  }, [period, selectedId]);
-
-  const byMerchant = React.useMemo<MerchantAgg[]>(() => {
+  // Merchant aggregation (same logic as your file, just using rows/prevRows above)
+  const byMerchant = React.useMemo(() => {
     const normalize = (s: string) =>
       (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 
@@ -549,14 +573,12 @@ function CategoryInner({
       .sort((a, b) => b.amt - a.amt);
   }, [rows, prevRows, detect, logoFor, rules, brandVersion]);
 
-  // Resolve a display name for the *leaf* category
+  // Resolve display name for the leaf category
   const catDisplay = React.useMemo(() => {
-    // 1) Prefer provider object match via slug
     const hit = findCategoryBySlug(categories as any, slug);
     if (hit?.name) return hit.name;
 
-    // 2) Fallback: infer from any matching transaction row
-    const any = viewRows.find(
+    const any = scopedAllRows.find(
       (r) =>
         catToSlug(
           (r.categoryOverride ?? r.category ?? "Uncategorized").trim()
@@ -565,10 +587,8 @@ function CategoryInner({
     if (any) {
       return (any.categoryOverride ?? any.category ?? "Uncategorized").trim();
     }
-
-    // 3) Last-resort: prettify the slug
     return slugToPretty(slug);
-  }, [slug, categories, viewRows]);
+  }, [slug, categories, scopedAllRows]);
 
   const catAccent = accentForCategory(catDisplay);
   const total = React.useMemo(
@@ -576,7 +596,6 @@ function CategoryInner({
     [rows]
   );
 
-  // Demo-aware card->spender mapping for display
   const CARD_TO_SPENDER = React.useMemo<Record<string, string>>(
     () =>
       isDemo
@@ -597,7 +616,7 @@ function CategoryInner({
             <span>{catDisplay}</span>
           </h1>
 
-          {mounted && viewMeta && (
+          {viewMeta && (
             <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
               Viewing:{" "}
               {period === "CURRENT"
@@ -613,6 +632,21 @@ function CategoryInner({
               Statement
             </span>
             <StatementSwitcher
+              // control the selection so switching recomputes this page
+              // @ts-ignore — component accepts value/onChange in your implementation
+              value={effectiveId}
+              onChange={(id: string) => {
+                setEffectiveId(id);
+                writeCurrentId(id);
+                if (!isDemo && typeof window !== "undefined") {
+                  const u = new URL(window.location.href);
+                  u.searchParams.set("statement", id);
+                  router.replace(u.pathname + "?" + u.searchParams.toString());
+                }
+              }}
+              available={Object.values(readIndex())
+                .map((s) => s.id)
+                .sort()}
               showLabel={false}
               size="sm"
               className="w-44 sm:w-56"
@@ -651,13 +685,13 @@ function CategoryInner({
           <div className="flex flex-wrap items-center gap-3 justify-between">
             <Link
               href={`${base}/dashboard/category${
-                selectedId ? `?statement=${encodeURIComponent(selectedId)}` : ""
+                effectiveId
+                  ? `?statement=${encodeURIComponent(effectiveId)}`
+                  : ""
               }`}
               aria-label="Back to Categories"
               title="Back to Categories"
-              className="inline-flex items-center gap-2 h-9 px-3 rounded-xl
-             border border-slate-700 bg-slate-900 hover:bg-slate-800
-             focus:outline-none focus:ring-2 focus:ring-emerald-500/60"
+              className="inline-flex items-center gap-2 h-9 px-3 rounded-xl border border-slate-700 bg-slate-900 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/60"
             >
               <ArrowLeft className="h-5 w-5 text-slate-300" />
               <span className="text-sm text-slate-300">Back to Categories</span>
@@ -674,26 +708,10 @@ function CategoryInner({
           </div>
         </section>
 
-        {/* Merchants grid (cards) */}
+        {/* Merchants grid */}
         <section>
           <h3 className="font-semibold mb-2">By Merchant</h3>
-          {!mounted ? (
-            <ul
-              className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4"
-              suppressHydrationWarning
-            >
-              {Array.from({ length: 8 }).map((_, i) => (
-                <li
-                  key={i}
-                  className="rounded-2xl border border-slate-700 bg-slate-900 p-4 animate-pulse"
-                >
-                  <div className="h-16 w-16 rounded-xl bg-slate-800 mb-3" />
-                  <div className="h-4 w-32 bg-slate-800 rounded" />
-                  <div className="h-5 w-24 bg-slate-800 rounded mt-3" />
-                </li>
-              ))}
-            </ul>
-          ) : byMerchant.length === 0 ? (
+          {byMerchant.length === 0 ? (
             <div className="rounded-2xl border border-slate-700 bg-slate-900 p-6 text-sm text-slate-400">
               No transactions in this scope.
             </div>
@@ -702,6 +720,7 @@ function CategoryInner({
               {byMerchant.map(
                 ({ label, amt, logo, trend, deltaMoney, prev, icon }) => {
                   const share = total ? Math.round((amt / total) * 100) : 0;
+                  const catAccent = accentForCategory(catDisplay);
                   return (
                     <li key={label} className="group">
                       <div
@@ -727,7 +746,7 @@ function CategoryInner({
                         </div>
 
                         <div className="mt-4 flex items-center gap-3">
-                          <div className="shrink-0">
+                          <div className="shrink-0 relative">
                             <MerchantLogo
                               src={logo}
                               alt={label}
@@ -744,9 +763,9 @@ function CategoryInner({
                                 setEditOpen(true);
                               }}
                               className="absolute -right-1 -bottom-1 h-6 w-6 rounded-lg
-  border border-slate-700 bg-slate-900/95
-  opacity-100 md:opacity-0 md:group-hover:opacity-100 transition
-  flex items-center justify-center"
+                              border border-slate-700 bg-slate-900/95
+                              opacity-100 md:opacity-0 md:group-hover:opacity-100 transition
+                              flex items-center justify-center"
                             >
                               <Pencil className="h-3.5 w-3.5 text-slate-300" />
                               <span className="sr-only">

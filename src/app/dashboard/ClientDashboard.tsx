@@ -1,33 +1,46 @@
 "use client";
+
 import React from "react";
-import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
-import { computeTotals } from "@/lib/metrics";
-import { type Period } from "@/lib/period";
-import { readIndex, readCurrentId, writeCurrentId } from "@/lib/statements";
-
-import StatementSwitcher from "@/components/StatementSwitcher";
-import { User, User2, HelpCircle } from "lucide-react";
-import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { iconForCategory } from "@/lib/icons"; // uses your shared icon util
-import { useRowsForSelection } from "@/helpers/useRowsForSelection";
+import { usePathname, useRouter } from "next/navigation";
 
+import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import DemoDashboardTips from "@/components/DemoDashboardTips";
+import StatementSwitcher from "@/components/StatementSwitcher";
+
+import { computeTotals } from "@/lib/metrics";
+import { type Period } from "@/lib/period";
 import {
-  useClientSearchParam,
+  readIndex,
+  readCurrentId,
+  writeCurrentId,
+  type StatementSnapshot,
+} from "@/lib/statements";
+import {
   useSelectedStatementId,
+  useClientSearchParam,
 } from "@/lib/useClientSearchParams";
 import { useSyncSelectedStatement } from "@/lib/useSyncSelectedStatement";
+
 import { applyCategoryRulesTo, readCatRules } from "@/lib/categoryRules";
 import { applyAlias } from "@/lib/aliases";
 import { catToSlug } from "@/lib/slug";
+import { iconForCategory } from "@/lib/icons";
+import { User, User2, HelpCircle } from "lucide-react";
+
 /* ---------------------------- helpers & hooks ---------------------------- */
 
 function useIsDemo() {
   const p = usePathname();
   return p?.startsWith("/demo") ?? false;
 }
+
+const USD = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+});
+const money = (n: number) => USD.format(n);
 
 const spenderAccent = (who: string) => {
   const w = (who || "").toLowerCase();
@@ -47,7 +60,6 @@ const spenderIcon = (who: string, className = "h-6 w-6") => {
 
 const slugSpender = (s: string) => (s || "").toLowerCase();
 
-// put near the top of the file (below imports)
 const kpiAccent = (
   accent: "green" | "red" | "neutral" | "violet" | "amber" = "neutral"
 ) => {
@@ -95,14 +107,104 @@ function accentFor(cat: string) {
   return "from-rose-600/20 to-rose-500/5 border-rose-500";
 }
 
-function useStatementOptions() {
-  const [opts, setOpts] = React.useState<
-    Array<{ id: string; label: string; year: number; month: number }>
-  >([]);
+function hasData(s?: StatementSnapshot) {
+  return !!(
+    (Array.isArray(s?.cachedTx) && s!.cachedTx.length > 0) ||
+    (Array.isArray(s?.pagesRaw) && s!.pagesRaw.length > 0)
+  );
+}
 
+function pickBestStatementId(
+  selectedFromUrl: string | null,
+  isDemo: boolean
+): string {
+  const idx = readIndex();
+  if (!isDemo && selectedFromUrl && idx[selectedFromUrl])
+    return selectedFromUrl;
+
+  const saved = readCurrentId();
+  if (saved && idx[saved]) return saved;
+
+  const sorted = Object.values(idx).sort(
+    (a, b) => b.stmtYear - a.stmtYear || b.stmtMonth - a.stmtMonth
+  );
+  const withData = sorted.filter(hasData);
+  return withData[0]?.id || sorted[0]?.id || "";
+}
+
+function buildRowsForCurrent(id: string) {
+  const idx = readIndex();
+  const cur = idx[id];
+  if (!cur) return [] as any[];
+  const rules = readCatRules();
+
+  // Prefer cachedTx; if none (rare on dashboard), just empty (wizard handles parsing elsewhere)
+  const base = Array.isArray(cur.cachedTx) ? cur.cachedTx : [];
+  return applyCategoryRulesTo(rules, base, applyAlias);
+}
+
+function buildRowsForYTD(id: string) {
+  const idx = readIndex();
+  const cur = idx[id];
+  if (!cur) return [] as any[];
+  const rules = readCatRules();
+
+  const rows: any[] = [];
+  for (const s of Object.values(idx)) {
+    if (!s) continue;
+    if (s.stmtYear !== cur.stmtYear) continue;
+    if (s.stmtMonth > cur.stmtMonth) continue;
+    if (Array.isArray(s.cachedTx)) rows.push(...s.cachedTx);
+  }
+  return applyCategoryRulesTo(rules, rows, applyAlias);
+}
+
+/* --------------------------------- page ---------------------------------- */
+
+export default function ClientDashboard() {
+  useSyncSelectedStatement();
+
+  const isDemo = useIsDemo();
+  const base = isDemo ? "/demo" : "";
+  const router = useRouter();
+
+  const selectedFromUrl = useSelectedStatementId();
+  const [effectiveId, setEffectiveId] = React.useState<string>("");
+
+  // Keep inputs in sync for totals calc
+  const { inputs, setInputs } = useReconcilerSelectors();
+
+  // Choose an id that actually exists & has data
   React.useEffect(() => {
+    const id = pickBestStatementId(selectedFromUrl, isDemo);
+    if (!id) return;
+    if (id !== effectiveId) setEffectiveId(id);
+
+    // mirror/persist for cross-page cohesion
+    if (id !== readCurrentId()) writeCurrentId(id);
+    if (!isDemo && typeof window !== "undefined") {
+      const u = new URL(window.location.href);
+      u.searchParams.set("statement", id);
+      router.replace(u.pathname + "?" + u.searchParams.toString());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFromUrl, isDemo]);
+
+  // Sync inputs from the selected statement (for computeTotals' beginning balance)
+  React.useEffect(() => {
+    if (!effectiveId) return;
+    const s = readIndex()[effectiveId];
+    if (!s) return;
+    setInputs({
+      beginningBalance: s.inputs?.beginningBalance ?? 0,
+      totalDeposits: s.inputs?.totalDeposits ?? 0,
+      totalWithdrawals: s.inputs?.totalWithdrawals ?? 0,
+    });
+  }, [effectiveId, setInputs]);
+
+  const options = React.useMemo(() => {
     const idx = readIndex();
-    const entries = Object.values(idx)
+    return Object.values(idx)
       .map((s: any) => ({
         id: s.id,
         label: s.label,
@@ -110,104 +212,16 @@ function useStatementOptions() {
         month: s.stmtMonth,
       }))
       .sort((a, b) => a.year - b.year || a.month - b.month);
-    setOpts(entries);
-
-    // also refresh when storage changes (e.g., reset demo in another tab)
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === "reconciler.statements.index.v2") {
-        const idx2 = readIndex();
-        const entries2 = Object.values(idx2)
-          .map((s: any) => ({
-            id: s.id,
-            label: s.label,
-            year: s.stmtYear,
-            month: s.stmtMonth,
-          }))
-          .sort((a, b) => a.year - b.year || a.month - b.month);
-        setOpts(entries2);
-      }
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
-
-  return opts;
-}
-
-const USD = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-});
-const money = (n: number) => USD.format(n);
-
-/* --------------------------------- page ---------------------------------- */
-
-export default function ClientDashboard() {
-  useSyncSelectedStatement();
-
-  const selectedId = useSelectedStatementId();
-  const isDemo = useIsDemo();
-  const base = isDemo ? "/demo" : "";
-
-  const CARD_TO_SPENDER = React.useMemo<Record<string, string>>(
-    () =>
-      isDemo
-        ? { "5280": "Husband", "0161": "Wife" }
-        : { "5280": "Mike", "0161": "Beth" },
-    [isDemo]
-  );
-
-  const { transactions, inputs } = useReconcilerSelectors();
-  const options = useStatementOptions();
-
-  // make sure data is synced
-  const { setInputs } = useReconcilerSelectors();
-  React.useEffect(() => {
-    if (!selectedId) return;
-    const s = readIndex()[selectedId];
-    if (!s) return;
-    setInputs({
-      beginningBalance: s.inputs?.beginningBalance ?? 0,
-      totalDeposits: s.inputs?.totalDeposits ?? 0,
-      totalWithdrawals: s.inputs?.totalWithdrawals ?? 0,
-    });
-  }, [selectedId, setInputs]);
-
-  const viewMeta = React.useMemo(() => {
-    if (!selectedId) return undefined;
-    const idx = readIndex();
-    return idx[selectedId];
-  }, [selectedId]);
+  }, [effectiveId]); // light refresh after selection changes
 
   const [period, setPeriod] = React.useState<Period>("CURRENT");
-  const baseRows = useRowsForSelection(period, selectedId, transactions);
 
   const viewRows = React.useMemo(() => {
-    if (period !== "YTD") return baseRows;
-    if (!selectedId) return baseRows;
-
-    const idx = readIndex();
-    const cur = idx[selectedId];
-    if (!cur) return baseRows;
-
-    const rules = readCatRules();
-    const all: any[] = [];
-
-    for (const s of Object.values(idx)) {
-      if (!s) continue;
-      if (s.stmtYear !== cur.stmtYear) continue;
-      if (s.stmtMonth > cur.stmtMonth) continue;
-
-      if (Array.isArray(s.cachedTx)) {
-        all.push(...s.cachedTx);
-      } else if (s.id === selectedId) {
-        // use live rows for the selected month if needed
-        all.push(...transactions);
-      }
-    }
-
-    return applyCategoryRulesTo(rules, all, applyAlias);
-  }, [period, selectedId, baseRows, transactions]);
+    if (!effectiveId) return [] as any[];
+    return period === "YTD"
+      ? buildRowsForYTD(effectiveId)
+      : buildRowsForCurrent(effectiveId);
+  }, [effectiveId, period]);
 
   // True Spend excludes Transfers, Debt, Cash Back
   const trueSpend = React.useMemo(() => {
@@ -235,17 +249,24 @@ export default function ClientDashboard() {
     [viewRows]
   );
 
+  // Spender mapping (demo vs real names)
+  const CARD_TO_SPENDER = React.useMemo<Record<string, string>>(
+    () =>
+      isDemo
+        ? { "5280": "Husband", "0161": "Wife" }
+        : { "5280": "Mike", "0161": "Beth" },
+    [isDemo]
+  );
+
   const bySpender = React.useMemo(() => {
     const map: Record<string, number> = {};
     for (const r of viewRows) {
       if (r.amount >= 0) continue;
-
       const explicit = (r.user || "").trim();
       const who =
         explicit ||
         (r.cardLast4 ? CARD_TO_SPENDER[r.cardLast4] : undefined) ||
         "Joint";
-
       map[who] = (map[who] ?? 0) + Math.abs(r.amount);
     }
     return map;
@@ -275,21 +296,22 @@ export default function ClientDashboard() {
   return (
     <ProtectedRoute>
       <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6">
-        {/* Header row (no duplicate title) */}
+        {/* Header row */}
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-bold">Dashboard</h1>
 
-          {viewMeta && (
-            <>
-              <StatementSwitcher
-                available={
-                  options.length ? options.map((o) => o.id) : undefined
-                }
-                showLabel={false}
-                size="sm"
-                className="w-44 sm:w-56"
-              />
-            </>
+          {effectiveId && (
+            <StatementSwitcher
+              // keep the switcher in agreement with our chosen id
+              // (works with/without value/onChange in your current implementation)
+              // @ts-ignore — supports controlled or URL/LS driven usage
+              value={effectiveId}
+              onChange={(id: string) => setEffectiveId(id)}
+              available={options.length ? options.map((o) => o.id) : undefined}
+              showLabel={false}
+              size="sm"
+              className="w-44 sm:w-56"
+            />
           )}
 
           <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -326,7 +348,6 @@ export default function ClientDashboard() {
             value={money(totals.income)}
             accent="green"
           />
-          {/* Keeping your original net math to avoid changing semantics */}
           <KpiCard
             label="Net"
             value={money(totals.income - totals.expense)}
@@ -341,7 +362,7 @@ export default function ClientDashboard() {
           <KpiCard label="Cash Back" value={money(cashBack)} accent="green" />
         </section>
 
-        {/* Second row: Spend by Spender */}
+        {/* Spend by Spender */}
         <section className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
           <h3 className="font-semibold mb-2">Spend by Spender</h3>
 
@@ -357,7 +378,9 @@ export default function ClientDashboard() {
                   const accent = spenderAccent(who);
                   const href = `${base}/dashboard/spender/${encodeURIComponent(
                     slugSpender(who)
-                  )}${!isDemo && selectedId ? `?statement=${selectedId}` : ""}`;
+                  )}${
+                    !isDemo && effectiveId ? `?statement=${effectiveId}` : ""
+                  }`;
                   return (
                     <li key={who} className="group">
                       <Link href={href} className="block focus:outline-none">
@@ -389,8 +412,7 @@ export default function ClientDashboard() {
           )}
         </section>
 
-        {/* Top categories */}
-        {/* Top categories (as cards) */}
+        {/* Top Categories */}
         <section>
           <h3 className="font-semibold mb-2">Top Categories (Expenses)</h3>
           {topCats.length === 0 ? (
@@ -403,7 +425,7 @@ export default function ClientDashboard() {
                 const accent = accentFor(cat);
                 const href = `${base}/dashboard/category/${encodeURIComponent(
                   catToSlug(cat)
-                )}${selectedId ? `?statement=${selectedId}` : ""}`;
+                )}${effectiveId ? `?statement=${effectiveId}` : ""}`;
                 return (
                   <li key={cat} className="group">
                     <Link href={href} className="block focus:outline-none">
@@ -435,6 +457,7 @@ export default function ClientDashboard() {
           )}
         </section>
       </div>
+
       <DemoDashboardTips />
     </ProtectedRoute>
   );
@@ -442,7 +465,6 @@ export default function ClientDashboard() {
 
 /* ------------------------------ UI elements ------------------------------ */
 
-// replace your existing KpiCard with this
 function KpiCard({
   label,
   value,

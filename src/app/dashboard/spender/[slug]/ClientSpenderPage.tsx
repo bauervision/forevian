@@ -1,11 +1,16 @@
 "use client";
 import React, { Suspense } from "react";
 import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
-import { useRowsForSelection } from "@/helpers/useRowsForSelection";
 import { type Period } from "@/lib/period";
-import { readIndex, readCurrentId, writeCurrentId } from "@/lib/statements";
+import {
+  readIndex,
+  readCurrentId,
+  writeCurrentId,
+  type StatementSnapshot,
+} from "@/lib/statements";
 import { readCatRules, applyCategoryRulesTo } from "@/lib/categoryRules";
 import { applyAlias } from "@/lib/aliases";
 import { prettyDesc } from "@/lib/txEnrich";
@@ -21,9 +26,22 @@ import {
 } from "lucide-react";
 import BrandLogoDialog from "@/components/BrandLogoDialog";
 import ProtectedRoute from "@/components/ProtectedRoute";
-import { useClientSearchParam } from "@/lib/useClientSearchParams";
+import {
+  useClientSearchParam,
+  useSelectedStatementId,
+} from "@/lib/useClientSearchParams";
+import { useSyncSelectedStatement } from "@/lib/useSyncSelectedStatement";
+import StatementSwitcher from "@/components/StatementSwitcher";
+import { normalizePageText } from "@/lib/textNormalizer";
+import { rebuildFromPages } from "@/lib/import/reconcile";
 
 /* ----------------------------- helpers ---------------------------------- */
+
+function useIsDemo() {
+  const p = usePathname();
+  return p?.startsWith("/demo") ?? false;
+}
+
 const money = (n: number) =>
   n.toLocaleString(undefined, { style: "currency", currency: "USD" });
 
@@ -40,11 +58,88 @@ const normalizeSlugToSpender = (slug: string) => {
   return "Joint";
 };
 
+function hasData(s?: StatementSnapshot) {
+  return !!(
+    (Array.isArray(s?.cachedTx) && s!.cachedTx.length > 0) ||
+    (Array.isArray(s?.pagesRaw) && s!.pagesRaw.length > 0)
+  );
+}
+
+function pickBestStatementId(
+  selectedFromUrl: string | null,
+  isDemo: boolean
+): string {
+  const idx = readIndex();
+  if (!isDemo && selectedFromUrl && idx[selectedFromUrl])
+    return selectedFromUrl;
+
+  const saved = readCurrentId();
+  if (saved && idx[saved]) return saved;
+
+  const sorted = Object.values(idx).sort(
+    (a, b) => b.stmtYear - a.stmtYear || b.stmtMonth - a.stmtMonth
+  );
+  const withData = sorted.filter(hasData);
+  return withData[0]?.id || sorted[0]?.id || "";
+}
+
+function buildRowsForCurrent(id: string) {
+  const idx = readIndex();
+  const cur = idx[id];
+  if (!cur) return [] as any[];
+
+  let base: any[] = [];
+  if (Array.isArray(cur.cachedTx) && cur.cachedTx.length) {
+    base = cur.cachedTx;
+  } else if (Array.isArray(cur.pagesRaw) && cur.pagesRaw.length) {
+    const sanitized = cur.pagesRaw.map(normalizePageText);
+    const res = rebuildFromPages(sanitized, cur.stmtYear, applyAlias);
+    base = res.txs;
+  }
+
+  const rules = readCatRules();
+  return applyCategoryRulesTo(rules, base, applyAlias);
+}
+
+function buildRowsForYTD(id: string) {
+  const idx = readIndex();
+  const cur = idx[id];
+  if (!cur) return [] as any[];
+  const rules = readCatRules();
+
+  const rows: any[] = [];
+  const sameYear = Object.values(idx).filter(
+    (s) => s && s.stmtYear === cur.stmtYear && s.stmtMonth <= cur.stmtMonth
+  );
+  for (const s of sameYear) {
+    let base: any[] = [];
+    if (Array.isArray(s.cachedTx) && s.cachedTx.length) base = s.cachedTx;
+    else if (Array.isArray(s.pagesRaw) && s.pagesRaw.length) {
+      const sanitized = s.pagesRaw.map(normalizePageText);
+      const res = rebuildFromPages(sanitized, s.stmtYear, applyAlias);
+      base = res.txs;
+    }
+    if (base.length) rows.push(...base);
+  }
+  return applyCategoryRulesTo(rules, rows, applyAlias);
+}
+
+function prevStatementId(currentId?: string | null) {
+  if (!currentId) return null;
+  const [y, m] = currentId.split("-").map(Number);
+  if (!y || !m) return null;
+  const pm = m === 1 ? 12 : m - 1;
+  const py = m === 1 ? y - 1 : y;
+  const cand = `${String(py).padStart(4, "0")}-${String(pm).padStart(2, "0")}`;
+  const idx = readIndex();
+  return idx[cand] ? cand : null;
+}
+
 function computeTrend(curr: number, prev: number) {
   if (!prev && !curr) return { dir: "flat" as const, pct: 0, delta: 0 };
   if (!prev && curr) return { dir: "up" as const, pct: 100, delta: curr };
   const delta = curr - prev;
-  const pct = Math.round((delta / (prev || 1)) * 100);
+  const pct = Math.round((delta / prev) * 100);
   return delta > 0
     ? { dir: "up" as const, pct, delta }
     : delta < 0
@@ -137,10 +232,9 @@ function MerchantLogo({
 
 /* ------------------------------- page ------------------------------------ */
 
-// NEW: accept slug & isDemo so we don’t need any Next navigation hooks here.
 export default function ClientSpenderPage({
   slug,
-  isDemo = false,
+  isDemo,
 }: {
   slug: string;
   isDemo?: boolean;
@@ -153,20 +247,24 @@ export default function ClientSpenderPage({
         </div>
       }
     >
-      <SpenderInner slug={slug} isDemo={isDemo} />
+      <SpenderInner slug={slug} isDemo={!!isDemo} />
     </Suspense>
   );
 }
 
 function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
-  const base = isDemo ? "/demo" : "";
+  useSyncSelectedStatement();
+
+  const router = useRouter();
+  const demoRoute = useIsDemo();
+  const base = demoRoute ? "/demo" : "";
 
   const CARD_TO_SPENDER = React.useMemo<Record<string, string>>(
     () =>
-      isDemo
+      demoRoute
         ? { "5280": "Husband", "0161": "Wife" }
         : { "5280": "Mike", "0161": "Beth" },
-    [isDemo]
+    [demoRoute]
   );
 
   const spender = normalizeSlugToSpender(slug);
@@ -174,7 +272,6 @@ function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
   const [editOpen, setEditOpen] = React.useState(false);
   const [editSeed, setEditSeed] = React.useState<string>("");
 
-  const { transactions } = useReconcilerSelectors();
   const {
     version: brandVersion,
     detect,
@@ -182,29 +279,48 @@ function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
     rules,
   } = useBrandMap() as any;
 
-  // URL param via safe client hook
-  const urlId = useClientSearchParam("statement");
+  const selectedFromUrl = useSelectedStatementId();
+  const [effectiveId, setEffectiveId] = React.useState<string>("");
 
-  const [mounted, setMounted] = React.useState(false);
-  React.useEffect(() => setMounted(true), []);
-
+  // choose valid statement id; persist; mirror to URL (non-demo)
   React.useEffect(() => {
-    if (urlId && readCurrentId() !== urlId) writeCurrentId(urlId);
-  }, [urlId]);
+    const id = pickBestStatementId(selectedFromUrl, demoRoute);
+    if (!id) return;
+    if (id !== effectiveId) setEffectiveId(id);
+    if (id !== readCurrentId()) writeCurrentId(id);
+    if (!demoRoute && typeof window !== "undefined") {
+      const u = new URL(window.location.href);
+      u.searchParams.set("statement", id);
+      router.replace(u.pathname + "?" + u.searchParams.toString());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFromUrl, demoRoute]);
 
-  const selectedId: string = urlId ?? (mounted ? readCurrentId() : "") ?? "";
-
+  // reflect inputs for consistency
   const { setInputs } = useReconcilerSelectors();
   React.useEffect(() => {
-    if (!selectedId) return;
-    const s = readIndex()[selectedId];
+    if (!effectiveId) return;
+    const s = readIndex()[effectiveId];
     if (!s) return;
     setInputs({
       beginningBalance: s.inputs?.beginningBalance ?? 0,
       totalDeposits: s.inputs?.totalDeposits ?? 0,
       totalWithdrawals: s.inputs?.totalWithdrawals ?? 0,
     });
-  }, [selectedId, setInputs]);
+  }, [effectiveId, setInputs]);
+
+  // options for switcher
+  const options = React.useMemo(() => {
+    const idx = readIndex();
+    return Object.values(idx)
+      .map((s: any) => ({
+        id: s.id,
+        label: s.label,
+        year: s.stmtYear,
+        month: s.stmtMonth,
+      }))
+      .sort((a, b) => a.year - b.year || a.month - b.month);
+  }, [effectiveId]);
 
   const [period, setPeriod] = React.useState<Period>("CURRENT");
 
@@ -219,71 +335,60 @@ function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
     [CARD_TO_SPENDER]
   );
 
-  const viewRows = useRowsForSelection(period, selectedId, transactions);
+  // CURRENT/YTD rows derived directly from snapshots
+  const scopedAllRows = React.useMemo(() => {
+    if (!effectiveId) return [] as any[];
+    return period === "YTD"
+      ? buildRowsForYTD(effectiveId)
+      : buildRowsForCurrent(effectiveId);
+  }, [effectiveId, period]);
 
   const rows = React.useMemo(
     () =>
-      viewRows.filter(
+      scopedAllRows.filter(
         (r) => whoForRow(r).toLowerCase() === spender.toLowerCase()
       ),
-    [viewRows, spender, whoForRow]
+    [scopedAllRows, spender, whoForRow]
   );
 
-  const prevScopedRows = React.useMemo(() => {
-    if (period !== "CURRENT") return [] as typeof rows;
-    if (!selectedId) return [] as typeof rows;
+  // previous-month rows
+  const prevRowsAll = React.useMemo(() => {
+    if (period !== "CURRENT" || !effectiveId) return [] as any[];
+    const prevId = prevStatementId(effectiveId);
+    if (!prevId) return [] as any[];
+    return buildRowsForCurrent(prevId);
+  }, [period, effectiveId]);
 
-    const idx = readIndex();
-    const [y, m] = selectedId.split("-").map(Number);
-    if (!y || !m) return [] as typeof rows;
-
-    const pm = m === 1 ? 12 : m - 1;
-    const py = m === 1 ? y - 1 : y;
-    const prevId = `${String(py).padStart(4, "0")}-${String(pm).padStart(
-      2,
-      "0"
-    )}`;
-    const s = idx[prevId];
-    if (!s) return [] as typeof rows;
-
-    const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
-    const rules0 = readCatRules();
-    const reapplied = applyCategoryRulesTo(rules0, raw, applyAlias) as any[];
-    return reapplied.filter(
-      (r) => whoForRow(r).toLowerCase() === spender.toLowerCase()
-    );
-  }, [period, selectedId, spender, whoForRow]);
-
-  const total = React.useMemo(
-    () => rows.reduce((s, r) => s + Math.abs(r.amount < 0 ? r.amount : 0), 0),
-    [rows]
+  const prevScopedRows = React.useMemo(
+    () =>
+      prevRowsAll.filter(
+        (r) => whoForRow(r).toLowerCase() === spender.toLowerCase()
+      ),
+    [prevRowsAll, spender, whoForRow]
   );
 
-  type Agg = {
-    label: string;
-    amt: number;
-    prev: number;
-    logo: string | null;
-    iconOverride: string | null;
-    trend: ReturnType<typeof computeTrend>;
-    deltaMoney: string;
-  };
+  // merchant aggregation (logo detection; small normalization)
+  const byMerchant = React.useMemo(() => {
+    const normalizeLabel = (s: string) =>
+      (s || "")
+        .replace(/\s{2,}/g, " ")
+        .trim()
+        .toLowerCase()
+        .replace(/\b([a-z])/g, (mm) => mm.toUpperCase());
 
-  const byMerchant = React.useMemo<Agg[]>(() => {
     const sumBy = (arr: any[]) => {
       const m: Record<string, number> = {};
       for (const r of arr) {
         const spend = Math.abs(r.amount < 0 ? r.amount : 0);
         if (!spend) continue;
-        const label = (prettyDesc(r.description || r.merchant || "") || "")
-          .replace(/\s{2,}/g, " ")
-          .trim()
-          .toLowerCase()
-          .replace(/\b([a-z])/g, (mm) => mm.toUpperCase());
+        const label = normalizeLabel(
+          prettyDesc(r.description || r.merchant || "")
+        );
         m[label] = (m[label] ?? 0) + spend;
       }
       return m;
     };
+
     const curr = sumBy(rows);
     const prev = sumBy(prevScopedRows);
 
@@ -305,8 +410,8 @@ function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
         if (hit?.noLogo) {
           iconOverride = hit.icon || "generic";
         } else if (hit?.domain) {
-          logo = logoFor(hit.domain);
-        } else if (hit) {
+          logo = `https://logo.clearbit.com/${hit.domain}`;
+        } else if (hit?.name) {
           logo = logoFor(hit.name);
         } else {
           logo = logoFor(label);
@@ -329,10 +434,15 @@ function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
   }, [rows, prevScopedRows, detect, logoFor, rules, brandVersion]);
 
   const viewMeta = React.useMemo(() => {
-    if (!selectedId) return undefined;
+    if (!effectiveId) return undefined;
     const idx = readIndex();
-    return idx[selectedId];
-  }, [selectedId]);
+    return idx[effectiveId];
+  }, [effectiveId]);
+
+  const total = React.useMemo(
+    () => rows.reduce((s, r) => s + Math.abs(r.amount < 0 ? r.amount : 0), 0),
+    [rows]
+  );
 
   const accent = spenderAccent(spender);
 
@@ -361,19 +471,46 @@ function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
 
           <div className="ml-auto flex flex-wrap items-center gap-2">
             <span className="text-xs uppercase tracking-wide text-slate-400">
-              Period
+              Statement
             </span>
+            <StatementSwitcher
+              // @ts-ignore your component accepts value/onChange
+              value={effectiveId}
+              onChange={(id: string) => {
+                setEffectiveId(id);
+                writeCurrentId(id);
+                if (!demoRoute && typeof window !== "undefined") {
+                  const u = new URL(window.location.href);
+                  u.searchParams.set("statement", id);
+                  router.replace(u.pathname + "?" + u.searchParams.toString());
+                }
+              }}
+              available={Object.values(readIndex())
+                .map((s) => s.id)
+                .sort()}
+              showLabel={false}
+              size="sm"
+              className="w-44 sm:w-56"
+            />
+
+            <span className="text-sm">Period</span>
             <div className="inline-flex rounded-lg border border-slate-700 overflow-hidden">
               <button
-                className="px-3 py-1 text-sm hover:bg-slate-900"
-                aria-pressed={period === "CURRENT"}
+                className={`px-3 py-1 text-sm ${
+                  period === "CURRENT"
+                    ? "bg-emerald-600 text-white"
+                    : "hover:bg-slate-900"
+                }`}
                 onClick={() => setPeriod("CURRENT")}
               >
                 Current
               </button>
               <button
-                className="px-3 py-1 text-sm hover:bg-slate-900"
-                aria-pressed={period === "YTD"}
+                className={`px-3 py-1 text-sm ${
+                  period === "YTD"
+                    ? "bg-emerald-600 text-white"
+                    : "hover:bg-slate-900"
+                }`}
                 onClick={() => setPeriod("YTD")}
               >
                 YTD
@@ -389,7 +526,9 @@ function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
           <div className="flex items-center justify-between">
             <Link
               href={`${base}/dashboard${
-                !isDemo && selectedId ? `?statement=${selectedId}` : ""
+                effectiveId
+                  ? `?statement=${encodeURIComponent(effectiveId)}`
+                  : ""
               }`}
               aria-label="Back to Dashboard"
               title="Back to Dashboard"

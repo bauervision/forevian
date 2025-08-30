@@ -1,13 +1,29 @@
 "use client";
+
 import React from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import ProtectedRoute from "@/components/ProtectedRoute";
+import StatementSwitcher from "@/components/StatementSwitcher";
+import CategoryManagerDialog from "@/components/CategoryManagerDialog";
+import DemoCategoriesTips from "@/components/DemoCategoriesTips";
+
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
-import { currentStatementMeta, type Period } from "@/lib/period";
-import { readIndex, readCurrentId, writeCurrentId } from "@/lib/statements";
+import { Category, useCategories } from "@/app/providers/CategoriesProvider";
+
+import {
+  readIndex,
+  readCurrentId,
+  writeCurrentId,
+  type StatementSnapshot,
+} from "@/lib/statements";
 import { readCatRules, applyCategoryRulesTo } from "@/lib/categoryRules";
 import { applyAlias } from "@/lib/aliases";
-import StatementSwitcher from "@/components/StatementSwitcher";
+import { useSelectedStatementId } from "@/lib/useClientSearchParams";
+import { useSyncSelectedStatement } from "@/lib/useSyncSelectedStatement";
+import { catToSlug } from "@/lib/slug";
+import { demoCategoryHref } from "@/app/demo/slug-helpers";
+
 import {
   ShoppingCart,
   Utensils,
@@ -24,21 +40,6 @@ import {
   Sparkles,
   Pencil,
 } from "lucide-react";
-import CategoryManagerDialog from "@/components/CategoryManagerDialog";
-import { useRowsForSelection } from "@/helpers/useRowsForSelection";
-
-import { catToSlug } from "@/lib/slug";
-import ProtectedRoute from "@/components/ProtectedRoute";
-
-// NEW: pull in categories provider setters
-import { Category, useCategories } from "@/app/providers/CategoriesProvider";
-import { demoCategoryHref } from "@/app/demo/slug-helpers";
-import DemoCategoriesTips from "@/components/DemoCategoriesTips";
-import {
-  useClientSearchParam,
-  useSelectedStatementId,
-} from "@/lib/useClientSearchParams";
-import { useSyncSelectedStatement } from "@/lib/useSyncSelectedStatement";
 
 /* ---------------------------- helpers & hooks ---------------------------- */
 
@@ -47,18 +48,72 @@ function useIsDemo() {
   return p?.startsWith("/demo") ?? false;
 }
 
-/** Find the previous statement id for a given "YYYY-MM" that actually exists. */
-function prevStatementId(currentId?: string | null) {
-  if (!currentId) return null;
-  const [y, m] = currentId.split("-").map(Number);
+const fmtUSD = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+});
+const money = (n: number) => fmtUSD.format(n);
+
+function hasData(s?: StatementSnapshot) {
+  return !!(
+    (Array.isArray(s?.cachedTx) && s!.cachedTx.length > 0) ||
+    (Array.isArray(s?.pagesRaw) && s!.pagesRaw.length > 0)
+  );
+}
+
+function pickBestStatementId(
+  selectedFromUrl: string | null,
+  isDemo: boolean
+): string {
+  const idx = readIndex();
+  if (!isDemo && selectedFromUrl && idx[selectedFromUrl])
+    return selectedFromUrl;
+
+  const saved = readCurrentId();
+  if (saved && idx[saved]) return saved;
+
+  const sorted = Object.values(idx).sort(
+    (a, b) => b.stmtYear - a.stmtYear || b.stmtMonth - a.stmtMonth
+  );
+  const withData = sorted.filter(hasData);
+  return withData[0]?.id || sorted[0]?.id || "";
+}
+
+function buildRowsForCurrent(id: string) {
+  const idx = readIndex();
+  const cur = idx[id];
+  if (!cur) return [] as any[];
+  const rules = readCatRules();
+  const base = Array.isArray(cur.cachedTx) ? cur.cachedTx : [];
+  return applyCategoryRulesTo(rules, base, applyAlias);
+}
+
+function buildRowsForYTD(id: string) {
+  const idx = readIndex();
+  const cur = idx[id];
+  if (!cur) return [] as any[];
+  const rules = readCatRules();
+
+  const rows: any[] = [];
+  for (const s of Object.values(idx)) {
+    if (!s) continue;
+    if (s.stmtYear !== cur.stmtYear) continue;
+    if (s.stmtMonth > cur.stmtMonth) continue;
+    if (Array.isArray(s.cachedTx)) rows.push(...s.cachedTx);
+  }
+  return applyCategoryRulesTo(rules, rows, applyAlias);
+}
+
+/** Find the previous existing statement id relative to an id like "YYYY-MM". */
+function prevStatementId(fromId?: string | null) {
+  if (!fromId) return null;
+  const [y, m] = fromId.split("-").map(Number);
   if (!y || !m) return null;
   const pm = m === 1 ? 12 : m - 1;
   const py = m === 1 ? y - 1 : y;
-  const candidate = `${py.toString().padStart(4, "0")}-${pm
-    .toString()
-    .padStart(2, "0")}`;
+  const cand = `${String(py).padStart(4, "0")}-${String(pm).padStart(2, "0")}`;
   const idx = readIndex();
-  return idx[candidate] ? candidate : null;
+  return idx[cand] ? cand : null;
 }
 
 /** Simple MoM trend */
@@ -74,7 +129,6 @@ function computeTrend(curr: number, prev: number) {
     : { dir: "flat" as const, pct: 0, delta: 0 };
 }
 
-/** Tiny pill for trend */
 function TrendPill({
   dir,
   pct,
@@ -102,65 +156,6 @@ function TrendPill({
     </span>
   );
 }
-
-/** Keep options in sync with storage (reseed/reset) */
-function useStatementOptions() {
-  const [opts, setOpts] = React.useState<
-    Array<{ id: string; label: string; year: number; month: number }>
-  >([]);
-
-  React.useEffect(() => {
-    const refresh = () => {
-      const idx = readIndex();
-      const entries = Object.values(idx)
-        .map((s: any) => ({
-          id: s.id,
-          label: s.label,
-          year: s.stmtYear,
-          month: s.stmtMonth,
-        }))
-        .sort((a, b) => a.year - b.year || a.month - b.month);
-      setOpts(entries);
-    };
-    refresh();
-
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === "reconciler.statements.index.v2") refresh();
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
-
-  return opts;
-}
-
-function usePeriodRows(period: Period, liveRows: any[]) {
-  const meta = currentStatementMeta();
-  return React.useMemo(() => {
-    if (!meta || period === "CURRENT") return liveRows;
-    const idx = readIndex();
-    const rules = readCatRules();
-    const all: any[] = [];
-    for (const s of Object.values(idx)) {
-      if (!s) continue;
-      if (s.stmtYear !== meta.year) continue;
-      if (s.stmtMonth > meta.month) continue;
-      if (Array.isArray(s.cachedTx)) all.push(...s.cachedTx);
-      else {
-        const curId = readCurrentId();
-        if (curId && s.id === curId) all.push(...liveRows);
-      }
-    }
-    return applyCategoryRulesTo(rules, all, applyAlias) as typeof liveRows;
-  }, [period, liveRows, meta]);
-}
-
-const fmtUSD = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-});
-const money = (n: number) => fmtUSD.format(n);
-const toSlug = (s: string) => s.toLowerCase().replace(/\s+/g, "-");
 
 function iconFor(cat: string) {
   const c = cat.toLowerCase();
@@ -219,84 +214,92 @@ function accentFor(cat: string) {
 
 /* --------------------------------- page ---------------------------------- */
 
+type Period = "CURRENT" | "YTD";
+
 export default function ClientCategories() {
-  useSyncSelectedStatement(); // <- keep provider in sync for this page
+  useSyncSelectedStatement(); // keep cross-page cohesion
 
-  const selectedId = useSelectedStatementId() ?? "";
   const isDemo = useIsDemo();
-  const base = isDemo ? "/demo" : "";
+  const router = useRouter();
 
-  const { transactions, setInputs } = useReconcilerSelectors();
-  const { setAll, setCategories } = useCategories() as any; // NEW setters
+  const selectedFromUrl = useSelectedStatementId();
+  const [effectiveId, setEffectiveId] = React.useState<string>("");
 
-  // pull from provider (fallback to empty array just in case)
-  const { categories = [] } = useCategories() as { categories: Category[] };
+  // inputs for compute/consistency (some cards may use balances later)
+  const { setInputs } = useReconcilerSelectors();
 
-  const mgrKey = React.useMemo(
-    () =>
-      `mgr-${categories.length}-${categories
-        .map((c) => c.id || c.slug || c.name)
-        .join("|")}`,
-    [categories]
-  );
-
-  const options = useStatementOptions();
-  const [openMgr, setOpenMgr] = React.useState(false);
-
-  // URL-driven statement sync (only sync storage; keep demo URL clean)
-
-  const urlStatement = useClientSearchParam("statement");
+  // choose a valid id (most-recent WITH DATA)
   React.useEffect(() => {
-    if (!urlStatement) return;
-    if (readCurrentId() !== urlStatement) writeCurrentId(urlStatement);
+    const id = pickBestStatementId(selectedFromUrl, isDemo);
+    if (!id) return;
+    if (id !== effectiveId) setEffectiveId(id);
+
+    // persist + reflect in URL (non-demo)
+    if (id !== readCurrentId()) writeCurrentId(id);
+    if (!isDemo && typeof window !== "undefined") {
+      const u = new URL(window.location.href);
+      u.searchParams.set("statement", id);
+      router.replace(u.pathname + "?" + u.searchParams.toString());
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlStatement]);
+  }, [selectedFromUrl, isDemo]);
 
-  const [mounted, setMounted] = React.useState(false);
-  React.useEffect(() => setMounted(true), []);
-
-  // NEW: while in demo, derive categories from demo statements and push to provider
-
+  // ensure inputs reflect selected statement (if needed elsewhere)
   React.useEffect(() => {
-    if (!selectedId) return;
-    const s = readIndex()[selectedId];
+    if (!effectiveId) return;
+    const s = readIndex()[effectiveId];
     if (!s) return;
     setInputs({
       beginningBalance: s.inputs?.beginningBalance ?? 0,
       totalDeposits: s.inputs?.totalDeposits ?? 0,
       totalWithdrawals: s.inputs?.totalWithdrawals ?? 0,
     });
-  }, [selectedId, setInputs]);
+  }, [effectiveId, setInputs]);
 
+  // options for the switcher (show all statements; default selection logic already prefers data)
+  const options = React.useMemo(() => {
+    const idx = readIndex();
+    return Object.values(idx)
+      .map((s: any) => ({
+        id: s.id,
+        label: s.label,
+        year: s.stmtYear,
+        month: s.stmtMonth,
+      }))
+      .sort((a, b) => a.year - b.year || a.month - b.month);
+  }, [effectiveId]);
+
+  // categories from provider
+  const { categories = [] } = useCategories() as { categories: Category[] };
+
+  const [openMgr, setOpenMgr] = React.useState(false);
   const [period, setPeriod] = React.useState<Period>("CURRENT");
 
-  const viewRows = useRowsForSelection(period, selectedId, transactions);
+  // rows for CURRENT / YTD
+  const viewRows = React.useMemo(() => {
+    if (!effectiveId) return [] as any[];
+    return period === "YTD"
+      ? buildRowsForYTD(effectiveId)
+      : buildRowsForCurrent(effectiveId);
+  }, [effectiveId, period]);
 
-  // previous month rows (MoM)
+  // previous rows for trend (previous existing statement)
   const prevRows = React.useMemo(() => {
-    if (period !== "CURRENT") return [] as typeof viewRows;
-    const idx = readIndex();
-    const selected = (urlStatement ?? readCurrentId()) || "";
-    const prevId = prevStatementId(selected);
-    if (!prevId) return [];
-    const s = idx[prevId];
-    if (!s) return [];
-    const rules = readCatRules();
-    const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
-    return applyCategoryRulesTo(rules, raw, applyAlias) as typeof viewRows;
-  }, [period, urlStatement]);
+    if (period !== "CURRENT" || !effectiveId) return [] as any[];
+    const prevId = prevStatementId(effectiveId);
+    if (!prevId) return [] as any[];
+    return buildRowsForCurrent(prevId);
+  }, [period, effectiveId]);
 
-  // Viewing chip should reflect the selected statement
+  // selected statement meta for chip
   const viewMeta = React.useMemo(() => {
-    if (!selectedId) return undefined;
+    if (!effectiveId) return undefined;
     const idx = readIndex();
-    return selectedId ? idx[selectedId] : undefined;
-  }, [selectedId]);
+    return idx[effectiveId];
+  }, [effectiveId]);
 
-  // Build current + previous totals keyed by top-level category (group label)
-  // build totals by *leaf* category (categoryOverride ?? category)
+  // Build totals by category (aligned to provider categories via slug/name)
   const catCards = React.useMemo(() => {
-    // fast lookup maps
     const bySlug = new Map(
       categories.map((c) => [(c.slug || "").toLowerCase(), c] as const)
     );
@@ -307,7 +310,6 @@ export default function ClientCategories() {
       categories.find((c) => c.name.toLowerCase() === "uncategorized") ??
       categories[0];
 
-    // create a sum map for a given row set
     const makeSums = (rows: any[]) => {
       const sums = new Map<string, number>(); // key = provider slug (lowercase)
       for (const r of rows) {
@@ -322,7 +324,6 @@ export default function ClientCategories() {
           bySlug.get(slug) ||
           byName.get(rawName.toLowerCase()) ||
           uncategorized;
-
         const key = (cat.slug || "uncategorized").toLowerCase();
         sums.set(key, (sums.get(key) ?? 0) + amt);
       }
@@ -332,7 +333,6 @@ export default function ClientCategories() {
     const currentSums = makeSums(viewRows);
     const prevSums = makeSums(prevRows);
 
-    // union of all slugs we have (so trend is computed even if prev is 0)
     const allSlugs = new Set<string>([
       ...currentSums.keys(),
       ...prevSums.keys(),
@@ -340,10 +340,10 @@ export default function ClientCategories() {
 
     return Array.from(allSlugs)
       .map((slug) => {
-        const cat = bySlug.get(slug)!; // provider Category
+        const cat = bySlug.get(slug)!;
         const total = currentSums.get(slug) ?? 0;
         const prev = prevSums.get(slug) ?? 0;
-        const trend = computeTrend(total, prev); // {dir,pct,delta}
+        const trend = computeTrend(total, prev);
         return { cat, total, prev, trend };
       })
       .sort((a, b) => b.total - a.total);
@@ -354,6 +354,15 @@ export default function ClientCategories() {
     [catCards]
   );
 
+  // key for dialog to re-mount cleanly after structure changes
+  const mgrKey = React.useMemo(
+    () =>
+      `mgr-${categories.length}-${categories
+        .map((c) => c.id || c.slug || c.name)
+        .join("|")}`,
+    [categories]
+  );
+
   return (
     <ProtectedRoute>
       <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6">
@@ -361,7 +370,6 @@ export default function ClientCategories() {
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           <h1 className="text-2xl font-bold">Categories</h1>
 
-          {/* Edit Categories button */}
           <button
             type="button"
             onClick={() => setOpenMgr(true)}
@@ -372,8 +380,7 @@ export default function ClientCategories() {
             Edit Categories
           </button>
 
-          {/* Avoid server/client mismatch: only show dynamic chip after mount */}
-          {mounted && viewMeta && (
+          {viewMeta && (
             <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
               Viewing:{" "}
               {period === "CURRENT"
@@ -389,6 +396,18 @@ export default function ClientCategories() {
               Statement
             </span>
             <StatementSwitcher
+              // controlled selection so the switcher really switches this page
+              // @ts-ignore – supports both controlled/URL-driven in your implementation
+              value={effectiveId}
+              onChange={(id: string) => {
+                setEffectiveId(id);
+                writeCurrentId(id);
+                if (!isDemo && typeof window !== "undefined") {
+                  const u = new URL(window.location.href);
+                  u.searchParams.set("statement", id);
+                  router.replace(u.pathname + "?" + u.searchParams.toString());
+                }
+              }}
               available={options.length ? options.map((o) => o.id) : undefined}
               showLabel={false}
               size="sm"
@@ -422,26 +441,7 @@ export default function ClientCategories() {
         </div>
 
         {/* Cards grid */}
-        {!mounted ? (
-          <ul
-            className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4"
-            suppressHydrationWarning
-          >
-            {Array.from({ length: 10 }).map((_, i) => (
-              <li
-                key={i}
-                className="rounded-2xl border border-slate-700 bg-slate-900 p-4 animate-pulse"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="h-14 w-14 rounded-xl bg-slate-800" />
-                  <div className="h-4 w-28 bg-slate-800 rounded" />
-                </div>
-                <div className="h-6 w-24 bg-slate-800 rounded mt-3" />
-                <div className="h-4 w-20 bg-slate-800 rounded mt-2" />
-              </li>
-            ))}
-          </ul>
-        ) : catCards.length === 0 ? (
+        {catCards.length === 0 ? (
           <div className="rounded-2xl border border-slate-700 bg-slate-900 p-6 text-sm text-slate-400">
             No transactions for this scope.
           </div>
@@ -452,14 +452,13 @@ export default function ClientCategories() {
                 ? Math.round((total / grandTotal) * 100)
                 : 0;
               const accent = accentFor(cat.name);
-
-              const slug = catToSlug(cat.name); // <-- pass *unencoded* slug to the helper
+              const slug = catToSlug(cat.name);
 
               const href = isDemo
-                ? demoCategoryHref(slug, selectedId) // ✅ works for known + new slugs
+                ? demoCategoryHref(slug, effectiveId)
                 : `/dashboard/category/${encodeURIComponent(slug)}${
-                    urlStatement
-                      ? `?statement=${encodeURIComponent(urlStatement)}`
+                    effectiveId
+                      ? `?statement=${encodeURIComponent(effectiveId)}`
                       : ""
                   }`;
 
@@ -472,12 +471,10 @@ export default function ClientCategories() {
                         group-hover:-translate-y-0.5 group-hover:shadow-lg
                         bg-gradient-to-br ${accent}`}
                     >
-                      {/* Header row: icon + name (no amount here) */}
                       <div className="flex items-center gap-3">
                         <div className="h-14 w-14 rounded-xl bg-slate-950/60 border border-slate-700 flex items-center justify-center shrink-0">
                           {iconFor(cat.name)}
                         </div>
-
                         <div className="flex-1 min-w-0">
                           <div className="text-base font-semibold text-white truncate">
                             {cat.name}
@@ -488,7 +485,6 @@ export default function ClientCategories() {
                         </div>
                       </div>
 
-                      {/* Amount + trend row */}
                       <div className="mt-3 flex items-center justify-between">
                         <div className="text-lg sm:text-xl font-semibold">
                           {money(total)}
@@ -507,6 +503,7 @@ export default function ClientCategories() {
           </ul>
         )}
       </div>
+
       {openMgr && (
         <CategoryManagerDialog
           key={mgrKey}
@@ -514,6 +511,7 @@ export default function ClientCategories() {
           onClose={() => setOpenMgr(false)}
         />
       )}
+
       <DemoCategoriesTips />
     </ProtectedRoute>
   );
