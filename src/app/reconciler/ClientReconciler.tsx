@@ -31,61 +31,20 @@ import { useCategories } from "@/app/providers/CategoriesProvider";
 import { TxRow } from "@/lib/types";
 import { useSpenders } from "@/lib/spenders";
 
+import { useAuthUID } from "@/lib/fx";
 import DemoReconcilerTips from "../../components/DemoReconcilerTips";
 import { DEMO_MONTHS, DEMO_VERSION } from "@/app/demo/data";
+import { applyAlias } from "@/lib/aliases";
 
 import {
   useClientSearchParam,
   useSelectedStatementId,
 } from "@/lib/useClientSearchParams";
 import CategorySelect from "@/components/CategorySelect";
-// 🔻 removed resolveAliasNameToCategory import
+import { resolveAliasNameToCategory } from "@/lib/categories/aliases";
 import { catToSlug } from "@/lib/slug";
 
-/* --- helpers & small UI bits --- */
-
-// ensureCategoryExists — make this a strict, case-insensitive name check to avoid
-// creating a placeholder category that can clobber a user's icon choice.
-export function useEnsureCategoryExists() {
-  const pathname = usePathname();
-  const isDemo = pathname?.startsWith("/demo") ?? false;
-  const { categories, setAll } = useCategories(); // Category[]
-
-  return React.useCallback(
-    (label: string) => {
-      if (isDemo) return; // 🚫 never mutate global categories from demo rows
-
-      const name = (label || "").trim();
-      if (!name) return;
-
-      // Strict case-insensitive comparison by name
-      const exists = categories.some(
-        (c) => c.name.trim().toLowerCase() === name.toLowerCase()
-      );
-      if (exists) return;
-
-      // Create only if truly missing
-      const newCat = {
-        id:
-          crypto.randomUUID?.() ?? `cat-${Math.random().toString(36).slice(2)}`,
-        name,
-        icon: "🗂️",
-        color: "#475569",
-        hint: "",
-        slug: catToSlug(name),
-      };
-
-      setAll([...categories, newCat]);
-    },
-    [categories, setAll, pathname]
-  );
-}
-
-const inputsFromStmt = (s?: StatementSnapshot) => ({
-  beginningBalance: s?.inputs?.beginningBalance ?? 0,
-  totalDeposits: s?.inputs?.totalDeposits ?? 0,
-  totalWithdrawals: s?.inputs?.totalWithdrawals ?? 0,
-});
+/* --- tiny UI bits --- */
 
 function Panel(props: React.HTMLAttributes<HTMLDivElement>) {
   const { className = "", ...rest } = props;
@@ -121,7 +80,48 @@ const fmtUSD = new Intl.NumberFormat("en-US", {
 });
 const money = (n: number) => fmtUSD.format(n);
 
-// -------------- Demo Seeder ------------------
+/* ---------------- Safer merchant bulk-apply helpers ---------------- */
+
+const GENERIC_TOKENS = new Set([
+  "store",
+  "market",
+  "supermarket",
+  "mart",
+  "fuel",
+  "gas",
+  "station",
+  "pharmacy",
+  "shop",
+  "online",
+  "purchase",
+  "payment",
+  "services",
+  "service",
+  "llc",
+  "inc",
+  "the",
+]);
+
+function merchantTokenSet(desc: string) {
+  const alias = applyAlias(stripAuthAndCard(desc || ""));
+  const keys = candidateKeys(desc || "", alias);
+  const toks = new Set<string>();
+  for (const k of keys) {
+    if (!k.startsWith("tok:")) continue;
+    const tok = k.slice(4).toLowerCase();
+    if (tok.length <= 3) continue;
+    if (GENERIC_TOKENS.has(tok)) continue;
+    toks.add(tok);
+  }
+  return toks;
+}
+
+function anyIntersect(a: Set<string>, b: Set<string>) {
+  for (const x of a) if (b.has(x)) return true;
+  return false;
+}
+
+/* -------------- Demo Seeder ------------------ */
 
 const LS_IDX = "reconciler.statements.index.v2";
 const LS_CUR = "reconciler.statements.current.v2";
@@ -171,10 +171,9 @@ function payloadHash(): string {
 /** Seeds LS and the provider on /demo routes before other effects run. */
 function DemoSeeder() {
   const pathname = usePathname();
-  const { setTransactions, setInputs } = useReconcilerSelectors();
-  const { applyAlias } = useAliases();
-  const qp = useClientSearchParam("statement") || undefined;
 
+  const { setTransactions, setInputs } = useReconcilerSelectors();
+  const qp = useClientSearchParam("statement") || undefined;
   React.useLayoutEffect(() => {
     if (!pathname?.startsWith("/demo")) return;
 
@@ -191,7 +190,6 @@ function DemoSeeder() {
       const idx = buildDemoIndex();
       localStorage.setItem(LS_IDX, JSON.stringify(idx));
 
-      // Select statement: ?statement -> env -> latest -> first
       const envId =
         (process.env.NEXT_PUBLIC_DEMO_MONTH as string | undefined) || undefined;
       const latest = DEMO_MONTHS.at(-1)?.id;
@@ -207,7 +205,6 @@ function DemoSeeder() {
         localStorage.setItem(LS_CUR, sel);
         const s = idx[sel];
 
-        // Push into provider
         const rules = readCatRules();
         const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
         const withRules = applyCategoryRulesTo(rules, raw, applyAlias);
@@ -222,7 +219,6 @@ function DemoSeeder() {
           totalWithdrawals: s.inputs.totalWithdrawals ?? 0,
         });
 
-        // Mirror caches for any other readers
         localStorage.setItem(LS_TX, JSON.stringify(s.cachedTx));
         localStorage.setItem(
           LS_IN,
@@ -236,7 +232,6 @@ function DemoSeeder() {
 
       localStorage.setItem(LS_DEMO_HASH, current);
     } else {
-      // If already seeded, ensure provider has same data as LS
       try {
         const tx = JSON.parse(localStorage.getItem(LS_TX) || "[]");
         const rules2 = readCatRules();
@@ -249,17 +244,56 @@ function DemoSeeder() {
         if (inputs && typeof inputs === "object") setInputs(inputs);
       } catch {}
     }
-    // only on route entry
-    // eslint-disable-next-line react-hooks/exhaustive-comments
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 
   return null;
 }
 
+/* --- helpers --- */
+
+export function useEnsureCategoryExists() {
+  const pathname = usePathname();
+  const isDemo = pathname?.startsWith("/demo") ?? false;
+  const { categories, setAll } = useCategories(); // Category[]
+
+  return React.useCallback(
+    (label: string) => {
+      if (isDemo) return;
+
+      const existing = resolveAliasNameToCategory(label, categories);
+      if (existing) return;
+
+      const name = (label || "").trim();
+      if (!name) return;
+
+      const newCat = {
+        id:
+          crypto.randomUUID?.() ?? `cat-${Math.random().toString(36).slice(2)}`,
+        name,
+        icon: "🗂️",
+        color: "#475569",
+        hint: "",
+        slug: catToSlug(name),
+      };
+
+      setAll([...categories, newCat]);
+    },
+    [categories, setAll, pathname]
+  );
+}
+
+const inputsFromStmt = (s?: StatementSnapshot) => ({
+  beginningBalance: s?.inputs?.beginningBalance ?? 0,
+  totalDeposits: s?.inputs?.totalDeposits ?? 0,
+  totalWithdrawals: s?.inputs?.totalWithdrawals ?? 0,
+});
+
 /* --- page --- */
 
 export default function ReconcilerPage() {
-  const { categories } = useCategories();
+  const uid = useAuthUID();
+  const { categories, setAll, setCategories } = useCategories() as any;
   const pathname = usePathname();
   const isDemo = pathname?.startsWith("/demo") ?? false;
 
@@ -304,10 +338,10 @@ export default function ReconcilerPage() {
     }
   }
 
-  const { applyAlias } = useAliases();
+  const { applyAlias: applyAliasFromProvider } = useAliases();
   React.useEffect(() => {
-    (window as any).__applyAlias = applyAlias;
-  }, [applyAlias]);
+    (window as any).__applyAlias = applyAliasFromProvider;
+  }, [applyAliasFromProvider]);
 
   const { transactions, setTransactions, inputs, setInputs } =
     useReconcilerSelectors();
@@ -319,10 +353,9 @@ export default function ReconcilerPage() {
 
   const [openWizard, setOpenWizard] = React.useState(false);
 
-  // keep ?statement in URL
   const setStatementInUrl = React.useCallback(
     (nextId?: string) => {
-      if (isDemo) return; // no query param in demo
+      if (isDemo) return;
 
       const current =
         typeof window === "undefined" ? "" : window.location.search;
@@ -341,7 +374,6 @@ export default function ReconcilerPage() {
 
   const selectedId = useSelectedStatementId(); // string | null
 
-  // Run bootstrap exactly once, but only after we know the selectedId (or it's null)
   const bootstrapped = React.useRef(false);
 
   useEffect(() => {
@@ -353,7 +385,6 @@ export default function ReconcilerPage() {
 
     if (!Object.keys(idx).length) {
       if (!isDemo) {
-        // First-time user: don't create a shell — open the importer.
         setStatements({});
         setTransactions([]);
         setInputs({
@@ -365,7 +396,6 @@ export default function ReconcilerPage() {
         bootstrapped.current = true;
         return;
       } else {
-        // Seed demo months
         for (const m of DEMO_MONTHS) {
           upsertStatement({
             ...emptyStatement(m.id, m.label, m.stmtYear, m.stmtMonth),
@@ -378,10 +408,6 @@ export default function ReconcilerPage() {
       }
     }
 
-    // Make statements available to the switcher immediately
-    setStatements(idx);
-
-    // Prefer most recent WITH DATA
     const hasData = (s: any) =>
       (Array.isArray(s?.cachedTx) && s.cachedTx.length > 0) ||
       (Array.isArray(s?.pagesRaw) && s.pagesRaw.length > 0);
@@ -391,22 +417,20 @@ export default function ReconcilerPage() {
     );
     const withData = sorted.filter(hasData);
 
-    // Ignore stale saved id that doesn't exist anymore
     const saved = readCurrentId();
     const savedOk = saved && idx[saved];
 
     const cid =
-      selectedId || // URL (non-demo) / LS (demo) via hook
-      (savedOk ? saved : "") || // only if still present
-      withData[0]?.id || // most recent with data
+      selectedId ||
+      (savedOk ? saved : "") ||
+      withData[0]?.id ||
       sorted[0]?.id ||
-      ""; // otherwise most recent any
+      "";
 
     setCurrentId(cid);
     writeCurrentId(cid);
     if (!isDemo) setStatementInUrl(cid);
 
-    // Load data for cid
     const cur = idx[cid];
     setInputs(inputsFromStmt(cur));
 
@@ -430,7 +454,6 @@ export default function ReconcilerPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, isDemo]);
 
-  // React to later changes (dropdown -> URL) & back/forward (URL)
   useEffect(() => {
     const next = selectedId ?? "";
     if (!next || next === currentId) return;
@@ -438,7 +461,6 @@ export default function ReconcilerPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
-  // Load the selected statement any time currentId changes
   useEffect(() => {
     if (!currentId) return;
     const idx = readIndex();
@@ -446,7 +468,6 @@ export default function ReconcilerPage() {
 
     const cur = idx[currentId];
     if (!cur) {
-      // If the id vanished, pick a safe fallback
       const fallback = Object.keys(idx)[0] ?? "";
       setCurrentId(fallback);
       writeCurrentId(fallback);
@@ -474,13 +495,11 @@ export default function ReconcilerPage() {
       if (!isDemo) setOpenWizard(true);
     }
 
-    // Mirror selection to URL / persist it
     writeCurrentId(currentId);
     if (!isDemo) setStatementInUrl(currentId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentId, isDemo, applyAlias]);
 
-  // respond to URL changes (direct typing, internal links, etc.)
   const urlStatement = useClientSearchParam("statement") ?? "";
   React.useEffect(() => {
     if (!urlStatement) return;
@@ -546,7 +565,6 @@ export default function ReconcilerPage() {
     }
   }
 
-  // Parsed-only views
   const deposits = React.useMemo(
     () => transactions.filter((t) => (t.amount ?? 0) > 0),
     [transactions]
@@ -583,6 +601,8 @@ export default function ReconcilerPage() {
               Statement
             </span>
             <StatementSwitcher
+              value={currentId}
+              onChange={(id) => setCurrentId(id)}
               available={Object.values(statements)
                 .filter(hasData)
                 .sort(
@@ -648,10 +668,8 @@ export default function ReconcilerPage() {
                             t.categoryOverride ?? t.category ?? "Uncategorized"
                           }
                           onChange={(val) => {
-                            // Only create category if truly not present (prevents clobbering icon)
                             ensureCategoryExists(val);
 
-                            // Build keys for this row from raw + alias label
                             const aliasLabel = applyAlias(
                               stripAuthAndCard(t.description || "")
                             );
@@ -665,12 +683,11 @@ export default function ReconcilerPage() {
                               t.amount ?? 0
                             );
 
-                            // Persist explicit override for this row
+                            // Persist override & a strong token rule (when valid)
                             writeOverride(k, val);
-                            // Persist rules for future auto-categorization
                             upsertCategoryRules(keys, val);
 
-                            // BEFORE snapshot for flash detection
+                            // BEFORE snapshot (leaf categories)
                             const beforeById = new Map(
                               transactions.map((r) => [
                                 r.id,
@@ -678,35 +695,61 @@ export default function ReconcilerPage() {
                               ])
                             );
 
-                            // 1) Recompute categories with the updated rules
+                            // Recompute with rules
                             const rules = readCatRules();
-                            const recomputed = applyCategoryRulesTo(
+                            let updated = applyCategoryRulesTo(
                               rules,
                               transactions,
                               applyAlias
                             );
 
-                            // 2) BULK APPLY: any row whose keys intersect with the anchor keys
-                            const anchorKeySet = new Set(keys);
-                            const bulk = recomputed.map((r) => {
-                              const alias2 = applyAlias(
-                                stripAuthAndCard(r.description || "")
-                              );
-                              const rKeys = candidateKeys(
-                                r.description || "",
-                                alias2
-                              );
-                              const overlaps = rKeys.some((kk) =>
-                                anchorKeySet.has(kk)
-                              );
-                              if (overlaps) {
-                                return { ...r, categoryOverride: val };
-                              }
-                              return r;
-                            });
+                            // Always apply explicit override to the edited row
+                            updated = updated.map((r) =>
+                              r.id === t.id
+                                ? { ...r, categoryOverride: val }
+                                : r
+                            );
 
-                            // CHANGED ids (for highlight + aria-live)
-                            const changed = bulk.filter(
+                            // Carefully bulk-apply to same-merchant rows
+                            const anchorTokens = merchantTokenSet(
+                              t.description || ""
+                            );
+                            if (anchorTokens.size) {
+                              const allWithdrawals = updated.filter(
+                                (r) => (r.amount ?? 0) < 0
+                              );
+                              const candidates = allWithdrawals.filter(
+                                (r) =>
+                                  r.id !== t.id &&
+                                  (r.description || "").trim() &&
+                                  anyIntersect(
+                                    anchorTokens,
+                                    merchantTokenSet(r.description || "")
+                                  )
+                              );
+
+                              // Guardrails to avoid accidental mass relabel
+                              const MAX_BULK = 24;
+                              const MAX_SHARE = 0.5;
+                              const withinCap =
+                                candidates.length <= MAX_BULK &&
+                                candidates.length <=
+                                  Math.floor(allWithdrawals.length * MAX_SHARE);
+
+                              if (withinCap) {
+                                const ids = new Set(
+                                  candidates.map((r) => r.id)
+                                );
+                                updated = updated.map((r) =>
+                                  ids.has(r.id)
+                                    ? { ...r, categoryOverride: val }
+                                    : r
+                                );
+                              }
+                            }
+
+                            // CHANGED ids for highlighting/toast
+                            const changed = updated.filter(
                               (r) =>
                                 beforeById.get(r.id) !== effectiveCat(r as any)
                             );
@@ -714,8 +757,27 @@ export default function ReconcilerPage() {
                               changed.map((r) => r.id)
                             );
 
-                            setTransactions(bulk);
+                            setTransactions(updated);
 
+                            // Persist snapshot so changes "stick" on reload
+                            try {
+                              const idx = readIndex();
+                              const snap = idx[currentId];
+                              if (snap) {
+                                const nextSnap: StatementSnapshot = {
+                                  ...snap,
+                                  cachedTx: updated,
+                                  normalizerVersion: Math.max(
+                                    NORMALIZER_VERSION,
+                                    snap.normalizerVersion ?? 0
+                                  ),
+                                };
+                                upsertStatement(nextSnap);
+                                setStatements(readIndex());
+                              }
+                            } catch {}
+
+                            // Flash + aria-live toast
                             if (changedIds.size) {
                               setFlashIds(changedIds);
                               setLiveMsg(
