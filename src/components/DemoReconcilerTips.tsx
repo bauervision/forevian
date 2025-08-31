@@ -71,10 +71,11 @@ export default function DemoReconcilerTips() {
         title: "Create a brand-specific category",
         body: (
           <>
-            Scroll to the <b>Starbucks</b> transaction. Open the category menu,
-            choose <b>＋ Add Category…</b>, create a new category named{" "}
-            <b>Starbucks</b>, then select it for that transaction. This is handy
-            when you want to track specific merchants or sub-budgets precisely.
+            Scroll to the <b>Ultra Salon</b> transaction. Open the category
+            menu, choose <b>＋ Add Category…</b>, create a new category named{" "}
+            <b>Hair Appointments</b>, then select it for that transaction. This
+            is handy when you want to track specific merchants or sub-budgets
+            precisely.
           </>
         ),
       },

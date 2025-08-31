@@ -28,6 +28,7 @@ import StatementSwitcher from "@/components/StatementSwitcher";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import ImportStatementWizard from "@/components/ImportPagesDialog";
 import { useCategories } from "@/app/providers/CategoriesProvider";
+import { coerceToSlug } from "@/lib/categories/helpers";
 import { TxRow } from "@/lib/types";
 import { useSpenders } from "@/lib/spenders";
 
@@ -43,7 +44,7 @@ import {
 import CategorySelect from "@/components/CategorySelect";
 import { resolveAliasNameToCategory } from "@/lib/categories/aliases";
 import { catToSlug } from "@/lib/slug";
-
+import { AnimatePresence, motion } from "framer-motion";
 /* --- tiny UI bits --- */
 
 function Panel(props: React.HTMLAttributes<HTMLDivElement>) {
@@ -169,7 +170,6 @@ function payloadHash(): string {
 }
 
 /** Seeds LS and the provider on /demo routes before other effects run. */
-/** Seeds LS and the provider on /demo routes before other effects run. */
 function DemoSeeder() {
   const pathname = usePathname();
 
@@ -179,11 +179,8 @@ function DemoSeeder() {
   React.useLayoutEffect(() => {
     if (!pathname?.startsWith("/demo")) return;
 
-    // --- DEMO DEFAULT RULES -----------------------------------------------
-    // Give common brands a sensible default so demo imports aren't Uncategorized.
-    // Idempotent: upsertCategoryRules will overwrite/skip as needed.
+    // DEMO default token rules so big brands aren't Uncategorized
     upsertCategoryRules(["tok:starbucks", "tok:sbux"], "Dining", "token");
-    // ----------------------------------------------------------------------
 
     const current = payloadHash();
     const stored = localStorage.getItem(LS_DEMO_HASH);
@@ -194,12 +191,10 @@ function DemoSeeder() {
       !localStorage.getItem(LS_TX) ||
       !localStorage.getItem(LS_IN);
 
-    // Always (re)seed on payload change or missing keys
     if (needSeed) {
       const idx = buildDemoIndex();
       localStorage.setItem(LS_IDX, JSON.stringify(idx));
 
-      // Select statement: ?statement -> env -> latest -> first
       const envId =
         (process.env.NEXT_PUBLIC_DEMO_MONTH as string | undefined) || undefined;
       const latest = DEMO_MONTHS.at(-1)?.id;
@@ -215,7 +210,6 @@ function DemoSeeder() {
         localStorage.setItem(LS_CUR, sel);
         const s = idx[sel];
 
-        // Apply rules (now includes demo defaults) and push into provider
         const rules = readCatRules();
         const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
         const withRules = applyCategoryRulesTo(rules, raw, applyAlias);
@@ -230,7 +224,6 @@ function DemoSeeder() {
           totalWithdrawals: s.inputs.totalWithdrawals ?? 0,
         });
 
-        // Mirror caches for any other readers
         localStorage.setItem(LS_TX, JSON.stringify(s.cachedTx));
         localStorage.setItem(
           LS_IN,
@@ -244,8 +237,6 @@ function DemoSeeder() {
 
       localStorage.setItem(LS_DEMO_HASH, current);
     } else {
-      // If already seeded, ensure provider has same data as LS
-      // (Run the rule upsert above every time so a user refreshing demo gets the default)
       const rules2 = readCatRules();
       try {
         const tx = JSON.parse(localStorage.getItem(LS_TX) || "[]");
@@ -257,7 +248,6 @@ function DemoSeeder() {
         if (inputs && typeof inputs === "object") setInputs(inputs);
       } catch {}
     }
-    // only on route entry
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 
@@ -266,15 +256,12 @@ function DemoSeeder() {
 
 /* --- helpers --- */
 
+/** Allow category creation everywhere (Demo + non-Demo) */
 export function useEnsureCategoryExists() {
-  const pathname = usePathname();
-  const isDemo = pathname?.startsWith("/demo") ?? false;
   const { categories, setAll } = useCategories(); // Category[]
 
   return React.useCallback(
     (label: string) => {
-      if (isDemo) return;
-
       const existing = resolveAliasNameToCategory(label, categories);
       if (existing) return;
 
@@ -293,7 +280,7 @@ export function useEnsureCategoryExists() {
 
       setAll([...categories, newCat]);
     },
-    [categories, setAll, pathname]
+    [categories, setAll]
   );
 }
 
@@ -303,11 +290,76 @@ const inputsFromStmt = (s?: StatementSnapshot) => ({
   totalWithdrawals: s?.inputs?.totalWithdrawals ?? 0,
 });
 
+/** Recompute one statement with current rules (helper used during boot/switch) */
+function recomputeOneWithRules(s: StatementSnapshot) {
+  const rules = readCatRules();
+  let txs = s.cachedTx ?? [];
+  if ((!txs || !txs.length) && Array.isArray(s.pagesRaw) && s.pagesRaw.length) {
+    const pagesSanitized = (s.pagesRaw || []).map(normalizePageText);
+    const res = rebuildFromPages(pagesSanitized, s.stmtYear, applyAlias);
+    txs = res.txs;
+  }
+  const withRules = applyCategoryRulesTo(rules, txs, applyAlias);
+  const nextSnap: StatementSnapshot = {
+    ...s,
+    cachedTx: withRules,
+    normalizerVersion: Math.max(NORMALIZER_VERSION, s.normalizerVersion ?? 0),
+  };
+  upsertStatement(nextSnap);
+  return nextSnap;
+}
+
+/** NEW: brute-force override across ALL statements that match merchant tokens */
+function bulkApplyOverrideAcrossAllStatements(
+  anchorDesc: string,
+  label: string
+) {
+  const anchorTokens = merchantTokenSet(anchorDesc || "");
+  if (!anchorTokens.size) return;
+
+  const idx = readIndex();
+  const rules = readCatRules();
+
+  for (const id of Object.keys(idx)) {
+    const s = idx[id];
+
+    // Start from rules-applied snapshot to stay in sync with current rules
+    const snap = recomputeOneWithRules(s);
+    const txs = Array.isArray(snap.cachedTx) ? snap.cachedTx : [];
+
+    // Find candidates in this statement by token intersection
+    const candidates = txs.filter(
+      (r) =>
+        (r.amount ?? 0) < 0 &&
+        (r.description || "").trim() &&
+        anyIntersect(anchorTokens, merchantTokenSet(r.description || ""))
+    );
+
+    if (!candidates.length) continue;
+
+    const idSet = new Set(candidates.map((r) => r.id));
+    const updated = txs.map((r) =>
+      idSet.has(r.id) ? { ...r, categoryOverride: label } : r
+    );
+
+    const nextSnap: StatementSnapshot = {
+      ...snap,
+      cachedTx: updated,
+      normalizerVersion: Math.max(
+        NORMALIZER_VERSION,
+        snap.normalizerVersion ?? 0
+      ),
+    };
+    upsertStatement(nextSnap);
+  }
+}
+
 /* --- page --- */
 
 export default function ReconcilerPage() {
   const uid = useAuthUID();
-  const { categories, setAll, setCategories } = useCategories() as any;
+  const { categories, findBySlug, findByNameCI } = useCategories() as any;
+
   const pathname = usePathname();
   const isDemo = pathname?.startsWith("/demo") ?? false;
 
@@ -677,137 +729,171 @@ export default function ReconcilerPage() {
                     >
                       <td className="p-2">{prettyDesc(t.description)}</td>
                       <td className="p-2">
-                        <CategorySelect
-                          value={
-                            t.categoryOverride ?? t.category ?? "Uncategorized"
-                          }
-                          onChange={(val) => {
-                            ensureCategoryExists(val);
+                        {(() => {
+                          const currentSlug = coerceToSlug(
+                            t.categoryOverride ?? t.category ?? "Uncategorized",
+                            categories,
+                            findBySlug,
+                            findByNameCI
+                          );
 
-                            const aliasLabel = applyAlias(
-                              stripAuthAndCard(t.description || "")
-                            );
-                            const keys = candidateKeys(
-                              t.description || "",
-                              aliasLabel
-                            );
-                            const k = keyForTx(
-                              t.date || "",
-                              t.description || "",
-                              t.amount ?? 0
-                            );
+                          return (
+                            <CategorySelect
+                              value={currentSlug}
+                              onChange={(slug) => {
+                                const picked = findBySlug(slug);
+                                const label = picked?.name ?? "Uncategorized";
 
-                            // Persist override & a strong token rule (when valid)
-                            writeOverride(k, val);
-                            upsertCategoryRules(keys, val);
+                                // Ensure category exists globally
+                                ensureCategoryExists(label);
 
-                            // BEFORE snapshot (leaf categories)
-                            const beforeById = new Map(
-                              transactions.map((r) => [
-                                r.id,
-                                effectiveCat(r as any),
-                              ])
-                            );
-
-                            // Recompute with rules
-                            const rules = readCatRules();
-                            let updated = applyCategoryRulesTo(
-                              rules,
-                              transactions,
-                              applyAlias
-                            );
-
-                            // Always apply explicit override to the edited row
-                            updated = updated.map((r) =>
-                              r.id === t.id
-                                ? { ...r, categoryOverride: val }
-                                : r
-                            );
-
-                            // Carefully bulk-apply to same-merchant rows
-                            const anchorTokens = merchantTokenSet(
-                              t.description || ""
-                            );
-                            if (anchorTokens.size) {
-                              const allWithdrawals = updated.filter(
-                                (r) => (r.amount ?? 0) < 0
-                              );
-                              const candidates = allWithdrawals.filter(
-                                (r) =>
-                                  r.id !== t.id &&
-                                  (r.description || "").trim() &&
-                                  anyIntersect(
-                                    anchorTokens,
-                                    merchantTokenSet(r.description || "")
-                                  )
-                              );
-
-                              // Guardrails to avoid accidental mass relabel
-                              const MAX_BULK = 24;
-                              const MAX_SHARE = 0.5;
-                              const withinCap =
-                                candidates.length <= MAX_BULK &&
-                                candidates.length <=
-                                  Math.floor(allWithdrawals.length * MAX_SHARE);
-
-                              if (withinCap) {
-                                const ids = new Set(
-                                  candidates.map((r) => r.id)
+                                // Stable merchant keys from description
+                                const aliasLabel = applyAlias(
+                                  stripAuthAndCard(t.description || "")
                                 );
+                                const keys = candidateKeys(
+                                  t.description || "",
+                                  aliasLabel
+                                );
+                                const tokenKeys = keys.filter((k) =>
+                                  k.startsWith("tok:")
+                                );
+
+                                // Persist a per-tx override for this one row
+                                const k = keyForTx(
+                                  t.date || "",
+                                  t.description || "",
+                                  t.amount ?? 0
+                                );
+                                writeOverride(k, label);
+
+                                // Save TOKEN rules (still useful)
+                                if (tokenKeys.length) {
+                                  upsertCategoryRules(
+                                    tokenKeys,
+                                    label,
+                                    "token"
+                                  );
+                                }
+
+                                // BEFORE snapshot for highlight
+                                const beforeById = new Map(
+                                  transactions.map((r) => [
+                                    r.id,
+                                    effectiveCat(r as any),
+                                  ])
+                                );
+
+                                // Re-run current table first for instant feedback
+                                const rules = readCatRules();
+                                let updated = applyCategoryRulesTo(
+                                  rules,
+                                  transactions,
+                                  applyAlias
+                                );
+
+                                // Apply explicit override for this clicked row in the view
                                 updated = updated.map((r) =>
-                                  ids.has(r.id)
-                                    ? { ...r, categoryOverride: val }
+                                  r.id === t.id
+                                    ? { ...r, categoryOverride: label }
                                     : r
                                 );
-                              }
-                            }
 
-                            // CHANGED ids for highlighting/toast
-                            const changed = updated.filter(
-                              (r) =>
-                                beforeById.get(r.id) !== effectiveCat(r as any)
-                            );
-                            const changedIds = new Set(
-                              changed.map((r) => r.id)
-                            );
+                                // Bulk apply same-merchant within *this* view (nice UX)
+                                const anchorTokens = merchantTokenSet(
+                                  t.description || ""
+                                );
+                                if (anchorTokens.size) {
+                                  const allWithdrawals = updated.filter(
+                                    (r) => (r.amount ?? 0) < 0
+                                  );
+                                  const candidates = allWithdrawals.filter(
+                                    (r) =>
+                                      r.id !== t.id &&
+                                      (r.description || "").trim() &&
+                                      anyIntersect(
+                                        anchorTokens,
+                                        merchantTokenSet(r.description || "")
+                                      )
+                                  );
 
-                            setTransactions(updated);
+                                  const MAX_BULK = 24;
+                                  const MAX_SHARE = 0.5;
+                                  const withinCap =
+                                    candidates.length <= MAX_BULK &&
+                                    candidates.length <=
+                                      Math.floor(
+                                        allWithdrawals.length * MAX_SHARE
+                                      );
 
-                            // Persist snapshot so changes "stick" on reload
-                            try {
-                              const idx = readIndex();
-                              const snap = idx[currentId];
-                              if (snap) {
-                                const nextSnap: StatementSnapshot = {
-                                  ...snap,
-                                  cachedTx: updated,
-                                  normalizerVersion: Math.max(
-                                    NORMALIZER_VERSION,
-                                    snap.normalizerVersion ?? 0
-                                  ),
-                                };
-                                upsertStatement(nextSnap);
-                                setStatements(readIndex());
-                              }
-                            } catch {}
+                                  if (withinCap) {
+                                    const ids = new Set(
+                                      candidates.map((r) => r.id)
+                                    );
+                                    updated = updated.map((r) =>
+                                      ids.has(r.id)
+                                        ? { ...r, categoryOverride: label }
+                                        : r
+                                    );
+                                  }
+                                }
 
-                            // Flash + aria-live toast
-                            if (changedIds.size) {
-                              setFlashIds(changedIds);
-                              setLiveMsg(
-                                `Applied “${val}” to ${
-                                  changedIds.size
-                                } transaction${changedIds.size > 1 ? "s" : ""}.`
-                              );
-                              window.setTimeout(
-                                () => setFlashIds(new Set()),
-                                1200
-                              );
-                              window.setTimeout(() => setLiveMsg(""), 2500);
-                            }
-                          }}
-                        />
+                                const changed = updated.filter(
+                                  (r) =>
+                                    beforeById.get(r.id) !==
+                                    effectiveCat(r as any)
+                                );
+                                const changedIds = new Set(
+                                  changed.map((r) => r.id)
+                                );
+
+                                setTransactions(updated);
+
+                                // Persist current statement snapshot
+                                try {
+                                  const idx = readIndex();
+                                  const snap = idx[currentId];
+                                  if (snap) {
+                                    const nextSnap: StatementSnapshot = {
+                                      ...snap,
+                                      cachedTx: updated,
+                                      normalizerVersion: Math.max(
+                                        NORMALIZER_VERSION,
+                                        snap.normalizerVersion ?? 0
+                                      ),
+                                    };
+                                    upsertStatement(nextSnap);
+                                    setStatements(readIndex());
+                                  }
+                                } catch {}
+
+                                // **THE FIX**: hard-stamp overrides across ALL statements now
+                                bulkApplyOverrideAcrossAllStatements(
+                                  t.description || "",
+                                  label
+                                );
+
+                                if (changedIds.size) {
+                                  setFlashIds(changedIds);
+                                  setLiveMsg(
+                                    `Applied “${label}” to ${
+                                      changedIds.size
+                                    } transaction${
+                                      changedIds.size > 1 ? "s" : ""
+                                    } (this view).`
+                                  );
+                                  window.setTimeout(
+                                    () => setFlashIds(new Set()),
+                                    1200
+                                  );
+                                  window.setTimeout(() => setLiveMsg(""), 2500);
+                                }
+                              }}
+                            />
+                          );
+                        })()}
                       </td>
+
                       {showUserCol && (
                         <td className="p-2">
                           {t.user ??
@@ -833,7 +919,7 @@ export default function ReconcilerPage() {
           {deposits.length === 0 ? (
             <div className="text-sm text-slate-400">No deposits.</div>
           ) : (
-            <table className="w-full text-sm min-w-[420px]">
+            <table className="w-full text-sm min-w={[420].toString()}">
               <thead className="bg-slate-800/60">
                 <tr>
                   <th className="text-left p-2 w-20">Date</th>
@@ -883,16 +969,31 @@ export default function ReconcilerPage() {
         {liveMsg}
       </div>
 
-      {/* optional lightweight toast */}
-      {liveMsg && (
-        <div
-          className="fixed bottom-4 left-1/2 -translate-x-1/2
-                  px-3 py-1.5 rounded-lg border border-emerald-500/40
-                  bg-emerald-900/40 text-emerald-100 text-sm shadow-lg"
-        >
-          {liveMsg}
-        </div>
-      )}
+      {/* toast: animated, top-right */}
+      <AnimatePresence>
+        {liveMsg && (
+          <div className="fixed top-4 right-4 z-50 pointer-events-none">
+            <motion.div
+              key={liveMsg}
+              initial={{ opacity: 0, x: 64 }} // start off-screen to the right
+              animate={{ opacity: 1, x: 0 }} // slide in to position
+              exit={{ opacity: 0, x: 64 }} // slide back out to the right
+              transition={{
+                type: "spring",
+                stiffness: 420,
+                damping: 32,
+                mass: 0.7,
+              }}
+              className="pointer-events-auto px-3 py-1.5 rounded-lg border border-emerald-500/40
+                   bg-emerald-900/40 text-emerald-100 text-sm shadow-lg"
+              role="status"
+              aria-live="polite"
+            >
+              {liveMsg}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </ProtectedRoute>
   );
 }

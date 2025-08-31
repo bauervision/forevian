@@ -1,7 +1,9 @@
-export function normalizeToCanonical(name?: string): string {
+export function normalizeToCanonical(
+  name?: string,
+  opts?: { isDemo?: boolean }
+): string {
   const s = (name || "").trim();
   if (!s) return "Uncategorized";
-
   // Exact canonical pass-through
   const canon = new Set([
     "Fast Food",
@@ -24,17 +26,40 @@ export function normalizeToCanonical(name?: string): string {
     "Subscriptions",
     "Cash Back",
     "Uncategorized",
+    "Starbucks",
+    "Allowance",
+    "Vehicle/City Related",
   ]);
   if (canon.has(s)) return s;
 
   const low = s.toLowerCase();
+  const isDemo = !!opts?.isDemo;
+
+  if (low.includes("starbucks")) return "Starbucks";
 
   // Common vendor → bucket
-  if (low.includes("starbucks")) return "Dining";
   if (
+    low.includes("lone star") ||
+    low.includes("cracker barrell") ||
+    low.includes("texas roadhouse")
+  )
+    return "Dining";
+  if (
+    low.includes("zaxby") ||
+    low.includes("taco bell") ||
+    low.includes("dairy queen") ||
+    low.includes("cava") ||
+    low.includes("taste") ||
+    low.includes("pizza hut") ||
+    low.includes("dominos") ||
+    low.includes("papa john") ||
+    low.includes("burger king") ||
+    low.includes("hardee") ||
     low.includes("wendy") ||
+    low.includes("sonic drive") ||
+    low.includes("5guys") ||
     low.includes("mcdonald") ||
-    low.includes("chick")
+    low.includes("chick-fil-a")
   )
     return "Fast Food";
   if (
@@ -54,6 +79,8 @@ export function normalizeToCanonical(name?: string): string {
     low.includes("prime video") ||
     low.includes("netflix") ||
     low.includes("hulu") ||
+    low.includes("peacock") ||
+    low.includes("discovery+") ||
     low.includes("max") ||
     low.includes("disney") ||
     low.includes("spotify") ||

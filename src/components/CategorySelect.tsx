@@ -1,104 +1,62 @@
+"use client";
 import * as React from "react";
 import {
   useCategories,
   type Category,
 } from "@/app/providers/CategoriesProvider";
-import CategoryManagerDialog from "@/components/CategoryManagerDialog"; // assuming this path
+import CategoryManagerDialog from "@/components/CategoryManagerDialog";
 
-function CategorySelect({
-  value,
-  onChange,
-  disabled = false,
-}: {
-  value: string; // category NAME (legacy-friendly)
-  onChange: (v: string) => void;
+type Props = {
+  /** Category identity should be the slug */
+  value: string; // slug
+  onChange: (slug: string) => void;
   disabled?: boolean;
-}) {
-  const { categories } = useCategories(); // Category[]
+};
+
+function CategorySelect({ value, onChange, disabled = false }: Props) {
+  const { categories, findBySlug, findByNameCI } = useCategories();
   const [openMgr, setOpenMgr] = React.useState(false);
   const selectRef = React.useRef<HTMLSelectElement>(null);
-
-  // Track pre-open list (names) so we can detect what was added
-  const beforeCatsRef = React.useRef<string[] | null>(null);
+  const beforeSlugsRef = React.useRef<string[] | null>(null);
   const [awaitingNew, setAwaitingNew] = React.useState(false);
 
-  // Utility: get list of names (case-insensitive Set helper)
-  const namesCI = React.useMemo(() => {
-    return categories.map((c) => c.name).filter(Boolean);
+  const list = React.useMemo(() => {
+    const arr = [...categories];
+    arr.sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+    );
+    const i = arr.findIndex((c) => c.name.toLowerCase() === "uncategorized");
+    if (i >= 0) {
+      const [u] = arr.splice(i, 1);
+      arr.push(u);
+    }
+    return arr;
   }, [categories]);
 
-  const sortedNames = React.useMemo(() => {
-    const set = new Set(
-      namesCI.map((n) => n.trim()).filter((n) => n.length > 0)
-    );
-
-    const inList = categories.some((c) => c.name === value);
-    if (value && !inList) {
-      // In demo, do not inject legacy label into the dropdown.
-      // Outside demo, you can keep the old behavior if you like.
-      const path =
-        typeof window !== "undefined" ? window.location.pathname : "";
-      const isDemo = path.startsWith("/demo");
-      if (!isDemo) set.add(value);
-    }
-
-    const list = Array.from(set).sort((a, b) =>
-      a.localeCompare(b, undefined, { sensitivity: "base" })
-    );
-    // Keep “Uncategorized” last
-    const i = list.findIndex((x) => x.toLowerCase() === "uncategorized");
-    if (i >= 0) {
-      const [u] = list.splice(i, 1);
-      list.push(u === "Uncategorized" ? u : "Uncategorized");
-    }
-    return list;
-  }, [namesCI, value]);
-
-  // after the manager closes, detect newly-added label & apply it
   React.useEffect(() => {
-    if (openMgr) return; // wait until dialog is closed
-    if (!awaitingNew) return; // only if we opened via ＋ Add
+    if (!value || findBySlug(value)) return;
+    const legacy = findByNameCI(value);
+    if (legacy) onChange(legacy.slug);
+  }, [value, findBySlug, findByNameCI, onChange]);
 
+  React.useEffect(() => {
+    if (openMgr || !awaitingNew) return;
     setAwaitingNew(false);
 
-    const before = (beforeCatsRef.current ?? []).map((x) => x.toLowerCase());
-    beforeCatsRef.current = null;
+    const before = new Set(beforeSlugsRef.current ?? []);
+    beforeSlugsRef.current = null;
 
-    const now = namesCI;
-    const added = now.filter((n) => !before.includes(n.toLowerCase()));
-
+    const added = list.filter((c) => !before.has(c.slug));
     if (added.length > 0) {
-      // Heuristic: pick the first non-"Uncategorized", else the first
       const pick =
-        added.find((c) => c.toLowerCase() !== "uncategorized") ?? added[0];
-      onChange(pick); // ✅ auto-assign the new category
-      // re-focus select for UX
+        added.find((c) => c.name.toLowerCase() !== "uncategorized") ?? added[0];
+      onChange(pick.slug);
       selectRef.current?.focus();
     }
-  }, [openMgr, awaitingNew, namesCI, onChange]);
+  }, [openMgr, awaitingNew, list, onChange]);
 
-  // Helper to render label with icon/hint (best-effort; <option> has limited styling)
-  const renderOptionText = (name: string) => {
-    const c = categories.find(
-      (x) => x.name.toLowerCase() === name.toLowerCase()
-    );
-    if (!c) return name;
-    const parts = [];
-    if (c.icon) parts.push(`${c.icon} `);
-    parts.push(c.name);
-    return parts.join("");
-  };
-
-  // stable key for dialog re-mount on changes (avoid .join on objects)
-  const mgrKey = React.useMemo(
-    () =>
-      `mgr-${categories.length}-` +
-      categories
-        .map((c) => c.name)
-        .sort()
-        .join("|"),
-    [categories]
-  );
+  const renderLabel = (c: Category) =>
+    c.icon ? `${c.icon} ${c.name}` : c.name;
 
   return (
     <>
@@ -110,8 +68,7 @@ function CategorySelect({
           onChange={(e) => {
             const v = e.target.value;
             if (v === "__ADD__") {
-              // snapshot the list so we can diff later
-              beforeCatsRef.current = [...namesCI];
+              beforeSlugsRef.current = list.map((c) => c.slug);
               setAwaitingNew(true);
               setOpenMgr(true);
               return;
@@ -120,9 +77,9 @@ function CategorySelect({
           }}
           className="bg-slate-900 text-slate-100 border border-slate-700 rounded-2xl px-2 py-1"
         >
-          {sortedNames.map((opt) => (
-            <option key={opt} value={opt}>
-              {renderOptionText(opt)}
+          {list.map((c) => (
+            <option key={c.slug} value={c.slug}>
+              {renderLabel(c)}
             </option>
           ))}
           <option value="__ADD__">＋ Add Category…</option>
@@ -131,12 +88,10 @@ function CategorySelect({
 
       {openMgr && (
         <CategoryManagerDialog
-          key={mgrKey}
           open
           onClose={() => setOpenMgr(false)}
           onAdded={(cat) => {
-            onChange(cat.name); // ✅ auto-assign newly added
-            // minor UX: re-focus the select so keyboard users can keep going
+            onChange(cat.slug);
             setTimeout(() => selectRef.current?.focus(), 0);
           }}
         />

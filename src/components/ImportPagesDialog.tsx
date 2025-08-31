@@ -353,9 +353,13 @@ export default function ImportStatementWizard({
       const rules = readCatRules();
       const withRules = applyCategoryRulesTo(rules, res.txs, applyAlias);
 
+      const isDemo =
+        typeof window !== "undefined" &&
+        window.location.pathname.startsWith("/demo");
+
       const cleaned = withRules.map((t) => ({
         ...t,
-        category: normalizeToCanonical(t.category),
+        category: normalizeToCanonical(t.category, { isDemo }),
         cardLast4: last4OrNull(t.cardLast4) ?? undefined,
       }));
       setTxs(cleaned);
