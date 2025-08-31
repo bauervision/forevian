@@ -169,13 +169,21 @@ function payloadHash(): string {
 }
 
 /** Seeds LS and the provider on /demo routes before other effects run. */
+/** Seeds LS and the provider on /demo routes before other effects run. */
 function DemoSeeder() {
   const pathname = usePathname();
 
   const { setTransactions, setInputs } = useReconcilerSelectors();
   const qp = useClientSearchParam("statement") || undefined;
+
   React.useLayoutEffect(() => {
     if (!pathname?.startsWith("/demo")) return;
+
+    // --- DEMO DEFAULT RULES -----------------------------------------------
+    // Give common brands a sensible default so demo imports aren't Uncategorized.
+    // Idempotent: upsertCategoryRules will overwrite/skip as needed.
+    upsertCategoryRules(["tok:starbucks", "tok:sbux"], "Dining", "token");
+    // ----------------------------------------------------------------------
 
     const current = payloadHash();
     const stored = localStorage.getItem(LS_DEMO_HASH);
@@ -186,10 +194,12 @@ function DemoSeeder() {
       !localStorage.getItem(LS_TX) ||
       !localStorage.getItem(LS_IN);
 
+    // Always (re)seed on payload change or missing keys
     if (needSeed) {
       const idx = buildDemoIndex();
       localStorage.setItem(LS_IDX, JSON.stringify(idx));
 
+      // Select statement: ?statement -> env -> latest -> first
       const envId =
         (process.env.NEXT_PUBLIC_DEMO_MONTH as string | undefined) || undefined;
       const latest = DEMO_MONTHS.at(-1)?.id;
@@ -205,6 +215,7 @@ function DemoSeeder() {
         localStorage.setItem(LS_CUR, sel);
         const s = idx[sel];
 
+        // Apply rules (now includes demo defaults) and push into provider
         const rules = readCatRules();
         const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
         const withRules = applyCategoryRulesTo(rules, raw, applyAlias);
@@ -219,6 +230,7 @@ function DemoSeeder() {
           totalWithdrawals: s.inputs.totalWithdrawals ?? 0,
         });
 
+        // Mirror caches for any other readers
         localStorage.setItem(LS_TX, JSON.stringify(s.cachedTx));
         localStorage.setItem(
           LS_IN,
@@ -232,18 +244,20 @@ function DemoSeeder() {
 
       localStorage.setItem(LS_DEMO_HASH, current);
     } else {
+      // If already seeded, ensure provider has same data as LS
+      // (Run the rule upsert above every time so a user refreshing demo gets the default)
+      const rules2 = readCatRules();
       try {
         const tx = JSON.parse(localStorage.getItem(LS_TX) || "[]");
-        const rules2 = readCatRules();
         const withRules2 = Array.isArray(tx)
           ? applyCategoryRulesTo(rules2, tx, applyAlias)
           : [];
         setTransactions(withRules2);
         const inputs = JSON.parse(localStorage.getItem(LS_IN) || "{}");
-
         if (inputs && typeof inputs === "object") setInputs(inputs);
       } catch {}
     }
+    // only on route entry
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 

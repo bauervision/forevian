@@ -14,14 +14,24 @@ export function candidateKeys(
   aliasLabel?: string | null
 ): string[] {
   const keys: string[] = [];
-  // alias key if we have a resolved label
+
+  const raw = String(desc || "");
+  const lower = raw.toLowerCase();
+
+  // --------- 1) alias key if we have a resolved label (strongest) ----------
   if (aliasLabel && aliasLabel.trim()) {
     keys.push(`alias:${aliasLabel.trim().toLowerCase()}`);
   }
 
-  // token keys (first 2 meaningful tokens; also single token fallback)
-  const toks = normalizeTokens(desc); // already in your file
-  const phrase2 = vendorPhrase(toks); // e.g., "chick_fil" or "home_depot"
+  // --------- 2) specific banking/payment patterns (strong) -----------------
+  // Prefer these before any generic tokens so "online pmt" ≠ "transfer"
+  const bankKeys = specificBankingKeys(lower);
+  keys.push(...bankKeys);
+
+  // --------- 3) token keys (phrase → unigram fallback) ---------------------
+  // Use normalized tokens (stopwords removed) so we don't emit tok:capital_one
+  const toks = normalizeTokens(raw);
+  const phrase2 = vendorPhrase(toks); // e.g., "home_depot", "prime_video"
   if (phrase2) keys.push(`tok:${phrase2}`);
   if (toks[0]) keys.push(`tok:${toks[0]}`); // unigram fallback (less preferred)
 
@@ -35,7 +45,7 @@ export function writeCatRules(rules: CategoryRule[]) {
   } catch {}
 }
 
-// --- NEW: stopwords + normalizer ---
+// --- stopwords + normalizer ---
 const STOP = new Set([
   "the",
   "a",
@@ -66,12 +76,15 @@ const STOP = new Set([
   "co",
   "corp",
   "company",
-  "online",
+  "online", // kept as stopword for generic tokens; we add a specific key separately
   "xfer",
-  "payment",
   "epay",
   "thank",
   "you",
+  // bank-brand generics that created over-broad keys:
+  "capital",
+  "one",
+
   // common city/state/usps bits we often see
   "va",
   "nc",
@@ -165,23 +178,61 @@ function vendorPhrase(tokens: string[]): string {
   return take.join("_");
 }
 
+// --- Specific banking/payment detectors (return ordered strong keys) -------
+function specificBankingKeys(lowerDesc: string): string[] {
+  const out: string[] = [];
+  // Online Payment (multiple phrasings to a single strong token)
+  if (/\bonline\s+(?:pmt|payment|pymt)\b/.test(lowerDesc)) {
+    out.push("tok:online_pmt");
+  }
+  // Balance Transfer
+  if (/\bbalance\s+transfer\b/.test(lowerDesc)) {
+    out.push("tok:balance_transfer");
+  }
+  // External Transfer
+  if (/\bexternal\s+transfer\b/.test(lowerDesc)) {
+    out.push("tok:external_transfer");
+  }
+  // Generic Transfer (keep last so specific keys win)
+  if (/\btransfer\b/.test(lowerDesc)) {
+    out.push("tok:transfer");
+  }
+  return out;
+}
+
 // --- derive the key we store for a row you changed ---
 export function deriveKeyFromDescription(
   desc: string,
   aliasLabel?: string | null
 ): { key: string; source: CategoryRule["source"] } {
+  // 1) Prefer alias if provided
   if (aliasLabel && aliasLabel.trim()) {
     return { key: `alias:${aliasLabel.trim().toLowerCase()}`, source: "alias" };
   }
-  const toks = normalizeTokens(desc);
-  const phrase = vendorPhrase(toks) || (toks[0] ?? "");
 
-  // fallback safety
-  const body = phrase || "misc";
+  const raw = String(desc || "");
+  const lower = raw.toLowerCase();
+
+  // 2) Prefer specific banking/payment keys so Online Pmt ≠ Transfer
+  const bankKeys = specificBankingKeys(lower);
+  if (bankKeys.length) {
+    return { key: bankKeys[0], source: "token" };
+  }
+
+  // 3) Fall back to normalized vendor phrase
+  const toks = normalizeTokens(raw);
+  const phrase = vendorPhrase(toks);
+  if (phrase && phrase.includes("_")) {
+    return { key: `tok:${phrase}`, source: "token" };
+  }
+
+  // 4) Finally: unigram fallback if it's not weak
+  const unigram = toks[0] ?? "";
+  const body = unigram || "misc";
   return { key: `tok:${body}`, source: "token" };
 }
 
-// --- NEW: prune weak/ambiguous rules (like tok:the) ---
+// --- prune weak/ambiguous rules (like tok:the) ---
 function pruneWeakRules(rules: CategoryRule[]): CategoryRule[] {
   const res: CategoryRule[] = [];
   for (const r of rules) {
