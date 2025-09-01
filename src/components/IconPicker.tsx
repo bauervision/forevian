@@ -115,6 +115,15 @@ export default function IconPicker({
       insurance: ["🛡️", "🛡"],
       shield: ["🛡️", "🛡"],
       misc: ["🎲", "⭐", "🔥", "✅", "❌", "❓"],
+
+      // NEW: hair/salon keywords
+      hair: ["💇‍♀️", "💇‍♂️", "✂️", "💈", "🧴"],
+      salon: ["💇‍♀️", "💇‍♂️", "✂️", "💅", "🧴"],
+      barber: ["💈", "✂️", "💇‍♂️"],
+      beauty: ["💅", "🧴", "💇‍♀️"],
+      nails: ["💅"],
+      spa: ["🧴", "💅"],
+      grooming: ["💇‍♂️", "💇‍♀️", "✂️"],
     };
     const hits = new Set<string>();
     Object.entries(dict).forEach(([k, vals]) => {

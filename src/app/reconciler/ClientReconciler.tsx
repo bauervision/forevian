@@ -45,6 +45,7 @@ import CategorySelect from "@/components/CategorySelect";
 import { resolveAliasNameToCategory } from "@/lib/categories/aliases";
 import { catToSlug } from "@/lib/slug";
 import { AnimatePresence, motion } from "framer-motion";
+
 /* --- tiny UI bits --- */
 
 function Panel(props: React.HTMLAttributes<HTMLDivElement>) {
@@ -83,6 +84,7 @@ const money = (n: number) => fmtUSD.format(n);
 
 /* ---------------- Safer merchant bulk-apply helpers ---------------- */
 
+/** Tokens we ignore for matching “same merchant” so we don’t over-apply. */
 const GENERIC_TOKENS = new Set([
   "store",
   "market",
@@ -101,7 +103,57 @@ const GENERIC_TOKENS = new Set([
   "llc",
   "inc",
   "the",
+  // Added to avoid transfer/bank collisions
+  "transfer",
+  "bank",
+  "banking",
+  "account",
+  "ref",
 ]);
+
+/** Tokens we *never* want to write rules for (too generic → causes collisions). */
+const RULE_STOP_TOKENS = new Set([
+  "transfer",
+  "online",
+  "bank",
+  "banking",
+  "account",
+  "payment",
+  "services",
+  "service",
+  "ref",
+  "transaction",
+  "to",
+  "from",
+]);
+
+/** High-signal phrase keys to disambiguate brands that collide via short tokens */
+function buildDisambiguatorPhrases(desc: string, alias: string): string[] {
+  const out: string[] = [];
+  const d = desc || "";
+  const a = alias || "";
+
+  // Club Pilates (exact merchant phrase)
+  if (/\bclub\s*pilates\b/i.test(d) || /\bclub\s*pilates\b/i.test(a)) {
+    out.push("str:club pilates");
+  }
+
+  // BP fuel transactions often appear as "BP#12345 ..." (gas station)
+  if (/\bbp\s*#\s*\d+/i.test(d) || /\bbp\s*#\s*\d+/i.test(a)) {
+    out.push("str:bp#"); // very specific; won't match "club pilates"
+  }
+
+  // Optional: if you want extra guardrails for banks (helps other cases too)
+  if (/\bcapital\s+one\b/i.test(d) || /\bcapital\s+one\b/i.test(a)) {
+    out.push("str:capital one");
+  }
+  if (/\bwells\s+fargo\b/i.test(d) || /\bwells\s+fargo\b/i.test(a)) {
+    out.push("str:wells fargo");
+  }
+
+  // de-dupe & cap
+  return Array.from(new Set(out)).slice(0, 8);
+}
 
 function merchantTokenSet(desc: string) {
   const alias = applyAlias(stripAuthAndCard(desc || ""));
@@ -115,6 +167,19 @@ function merchantTokenSet(desc: string) {
     toks.add(tok);
   }
   return toks;
+}
+
+function filterSafeTokenRules(rawKeys: string[]): string[] {
+  // Only keep token keys, drop any that are too generic, and de-dupe.
+  const out = new Set<string>();
+  for (const k of rawKeys) {
+    if (!k.startsWith("tok:")) continue;
+    const tok = k.slice(4).toLowerCase();
+    if (tok.length <= 3) continue;
+    if (RULE_STOP_TOKENS.has(tok)) continue;
+    out.add(k);
+  }
+  return Array.from(out);
 }
 
 function anyIntersect(a: Set<string>, b: Set<string>) {
@@ -663,9 +728,6 @@ export default function ReconcilerPage() {
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-bold">Reconciler</h1>
           <div className="ml-auto flex items-center gap-2">
-            <span className="text-xs uppercase tracking-wide text-slate-400">
-              Statement
-            </span>
             <StatementSwitcher
               value={currentId}
               onChange={(id) => setCurrentId(id)}
@@ -748,15 +810,22 @@ export default function ReconcilerPage() {
                                 ensureCategoryExists(label);
 
                                 // Stable merchant keys from description
-                                const aliasLabel = applyAlias(
-                                  stripAuthAndCard(t.description || "")
-                                );
-                                const keys = candidateKeys(
+                                const aliasLabel =
+                                  applyAlias(
+                                    stripAuthAndCard(t.description || "")
+                                  ) ?? "";
+                                const rawKeys = candidateKeys(
                                   t.description || "",
                                   aliasLabel
                                 );
-                                const tokenKeys = keys.filter((k) =>
-                                  k.startsWith("tok:")
+
+                                // 1) Keep only safe token keys (no generic collisions)
+                                const tokenKeys = filterSafeTokenRules(rawKeys);
+
+                                // 2) Add brand-specific phrase keys for disambiguation
+                                const phraseKeys = buildDisambiguatorPhrases(
+                                  t.description || "",
+                                  aliasLabel
                                 );
 
                                 // Persist a per-tx override for this one row
@@ -767,14 +836,15 @@ export default function ReconcilerPage() {
                                 );
                                 writeOverride(k, label);
 
-                                // Save TOKEN rules (still useful)
-                                if (tokenKeys.length) {
+                                // Save rules: tokens (tagged), plus phrases (untyped = phrase/auto)
+                                if (tokenKeys.length)
                                   upsertCategoryRules(
                                     tokenKeys,
                                     label,
                                     "token"
                                   );
-                                }
+                                if (phraseKeys.length)
+                                  upsertCategoryRules(phraseKeys, label);
 
                                 // BEFORE snapshot for highlight
                                 const beforeById = new Map(
@@ -867,7 +937,7 @@ export default function ReconcilerPage() {
                                   }
                                 } catch {}
 
-                                // **THE FIX**: hard-stamp overrides across ALL statements now
+                                // Also stamp overrides across ALL statements for this merchant
                                 bulkApplyOverrideAcrossAllStatements(
                                   t.description || "",
                                   label
@@ -919,7 +989,7 @@ export default function ReconcilerPage() {
           {deposits.length === 0 ? (
             <div className="text-sm text-slate-400">No deposits.</div>
           ) : (
-            <table className="w-full text-sm min-w={[420].toString()}">
+            <table className="w-full text-sm min-w-[420px]">
               <thead className="bg-slate-800/60">
                 <tr>
                   <th className="text-left p-2 w-20">Date</th>

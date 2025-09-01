@@ -20,7 +20,57 @@ import { NORMALIZER_VERSION } from "@/lib/textNormalizer";
 import { useSpenders } from "@/lib/spenders";
 import { normalizeToCanonical } from "@/lib/categories/normalization";
 
+// NEW: import the persistent rules API
+import {
+  readPolarityRules,
+  upsertPolarityRule,
+  removePolarityRule,
+  applyPolarityRulesTo,
+  makePatternFromDesc,
+  type PolarityRule,
+} from "@/lib/polarityRules";
+
 /* ---------- local UI helpers ---------- */
+
+function tokenize(desc: string): string[] {
+  return (desc || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean);
+}
+
+// token sets we consider "deposit-ish" when co-occuring
+const DEPOSIT_AND_SETS: string[][] = [
+  ["DIRECT", "DEPOSIT"],
+  ["DIR", "DEP"],
+  ["ACH", "CREDIT"],
+  ["PPD", "CREDIT"],
+  ["PAYROLL", "DEPOSIT"],
+  ["ADP", "PAYROLL"],
+  ["INTUIT", "PAYROLL"],
+  ["IBM", "PAYMENTS"],
+  ["PAYROLL"],
+  ["SALARY"],
+  ["WAGES"],
+  ["STIMULUS"],
+  ["TREAS", "COMPENSATION"],
+];
+
+// allow any single-strong token too (but only as a *suspect* signal)
+const STRONG_DEPOSIT_SINGLE = new Set([
+  "EDEPOSIT",
+  "REFUND",
+  "RETURN",
+  "REVERSAL",
+  "INTEREST",
+  "TREAS",
+  "COMPENSATION",
+  "BENEFIT",
+  "PAYCHECK",
+]);
 
 function last4OrNull(v: any): string | null {
   const s = String(v ?? "")
@@ -115,8 +165,87 @@ function prevMonth(year: number, month: number) {
 }
 
 function isUserStatement(s: any) {
-  // treat undefined/new snapshots as user unless explicitly tagged demo
   return !s?.source || s.source !== "demo";
+}
+
+/* ---------- polarity suspicion heuristics (same as before) ---------- */
+
+function sigFromDesc(desc: string): string {
+  // normalize by removing digits and sorting tokens
+  const toks = tokenize(desc).filter((w) => !/^\d+$/.test(w));
+  return toks.join(" ");
+}
+
+function learnDominantSigns(
+  past: Array<{ description?: string; amount?: number }>
+) {
+  const map = new Map<string, { pos: number; neg: number }>();
+  for (const t of past) {
+    const s = sigFromDesc(t.description || "");
+    if (!s) continue;
+    const entry = map.get(s) || { pos: 0, neg: 0 };
+    (t.amount ?? 0) >= 0 ? entry.pos++ : entry.neg++;
+    map.set(s, entry);
+  }
+  return map; // lookup sig -> {pos,neg}
+}
+
+function suspectPolarity(t: { description: string; amount: number }) {
+  const amt = +(t.amount ?? 0);
+  const d = (t.description || "").toUpperCase();
+
+  // old keyword hints (kept)
+  const depositHints = [
+    "DEPOSIT",
+    "EDEPOSIT",
+    "BRANCH",
+    "PURCHASE RETURN",
+    "RETURN AUTHORIZED",
+    "REFUND",
+    "PAYPAL TRANSFER",
+    "PAYPAL CASHBACK",
+    "VAC",
+    "VACP",
+    "TREAS",
+    "ACH CREDIT",
+    "WT",
+    "WIRE",
+    "FED#",
+    "PAYING AGENT",
+    "HOLDINGPMT",
+    "INTEREST",
+    "VA COMPENSATION",
+  ];
+  const withdrawalHints = [
+    "PAYMENT TO",
+    "ACH DEBIT",
+    "WITHDRAWAL",
+    "CASH APP PAYMENT",
+    "ZELLE PAYMENT",
+    "CARD PURCHASE",
+  ];
+  const isDepositishOld = depositHints.some((h) => d.includes(h));
+  const isWithdrawalishOld = withdrawalHints.some((h) => d.includes(h));
+
+  // NEW: token co-occurrence (AND-sets)
+  const toks = tokenize(d);
+  const hasToken = (x: string) => toks.includes(x);
+  const matchesAndSet = DEPOSIT_AND_SETS.some((set) => set.every(hasToken));
+  const hasStrongSingle = toks.some((t) => STRONG_DEPOSIT_SINGLE.has(t));
+
+  const depositish = isDepositishOld || matchesAndSet || hasStrongSingle;
+
+  if (amt > 0 && isWithdrawalishOld)
+    return "Positive but reads like withdrawal";
+  if (amt < 0 && depositish) return "Negative but reads like deposit (tokens)";
+  if (depositish && amt < 0) return "Deposit keywords with negative sign";
+  if (d.includes("RETURN") && amt < 0) return "Return/refund usually credit";
+
+  return null;
+}
+
+function flipAmountSign(n: number) {
+  return +(n * -1).toFixed(2);
 }
 
 /* ---------- component ---------- */
@@ -128,15 +257,26 @@ export default function ImportStatementWizard({
   seedYear,
   seedMonth,
 }: WizardProps) {
-  // We only READ spender state here (step 4 is confirmation-only)
   const { map: spenderMap, singleUser, ready: spendersReady } = useSpenders();
   const { profile } = useImportProfile();
   const { applyAlias } = useAliases();
 
+  // NEW: choose a scope key for this user's rules (stable across sessions)
+  // Prefer a stable profile id/uid if you have one; fall back to "default".
+  const scopedKey = React.useMemo(() => {
+    // try common fields if present; adjust to your profile shape
+    const pid =
+      (profile as any)?.id ||
+      (profile as any)?.uid ||
+      (profile as any)?.email ||
+      (profile as any)?.name;
+    return typeof pid === "string" && pid.trim() ? `user:${pid}` : "default";
+  }, [profile]);
+
   const now = new Date();
   const [step, setStep] = React.useState<1 | 2 | 3 | 4>(1);
 
-  // Step 1 state
+  // Step 1
   const [stmtYear, setStmtYear] = React.useState<number>(
     seedYear ?? now.getFullYear()
   );
@@ -149,6 +289,12 @@ export default function ImportStatementWizard({
     totalWithdrawals: 0,
   });
 
+  // PERSISTENT RULES (loaded from LS) + session-only overrides
+  const [polarityRules, setPolarityRules] = React.useState<PolarityRule[]>([]);
+  const [polarityOverrides, setPolarityOverrides] = React.useState<
+    Record<string, "deposit" | "withdrawal">
+  >({});
+
   const step1Ending = React.useMemo(
     () =>
       +(
@@ -159,8 +305,6 @@ export default function ImportStatementWizard({
     [inputs]
   );
 
-  // Step 1 — check if a previous statement exists; controls the “Use previous…” button
-
   const hasPrev = React.useMemo(() => {
     const { year: py, month: pm } = prevMonth(stmtYear, stmtMonth);
     const prev = readIndex()[makeId(py, pm)];
@@ -170,12 +314,12 @@ export default function ImportStatementWizard({
     );
   }, [stmtYear, stmtMonth]);
 
-  // Step 2 state – page-by-page paste
+  // Step 2
   const [pages, setPages] = React.useState<string[]>([]);
   const [currentDraft, setCurrentDraft] = React.useState<string>("");
   const [editingIndex, setEditingIndex] = React.useState<number | null>(null);
 
-  // Step 3 state (computed)
+  // Step 3
   const [busy, setBusy] = React.useState(false);
   const [txs, setTxs] = React.useState<
     import("@/app/providers/ReconcilerProvider").Transaction[]
@@ -191,10 +335,8 @@ export default function ImportStatementWizard({
     return Array.from(s);
   }, [txs]);
 
-  // Do we show the read-only confirmation step?
   const needsUserConfirmation = uniqueCards.length > 0;
 
-  // dynamic header steps
   const headerSteps = React.useMemo(
     () =>
       needsUserConfirmation
@@ -212,7 +354,7 @@ export default function ImportStatementWizard({
     [needsUserConfirmation]
   );
 
-  // reset when opened
+  // Reset on open + load persistent rules for this user/profile
   React.useEffect(() => {
     if (!open) return;
     setStep(1);
@@ -221,7 +363,14 @@ export default function ImportStatementWizard({
     setEditingIndex(null);
     setTxs([]);
     setParseErr(null);
-  }, [open]);
+    setPolarityOverrides({});
+    // load persistent rules
+    try {
+      setPolarityRules(readPolarityRules(scopedKey));
+    } catch {
+      setPolarityRules([]);
+    }
+  }, [open, scopedKey]);
 
   /* ---------- derived ---------- */
   const deposits = React.useMemo(
@@ -263,6 +412,56 @@ export default function ImportStatementWizard({
     txs.length > 0 &&
     !parseErr;
 
+  // Pull past cached transactions (last 12 statements) to learn the usual sign
+  const learned = React.useMemo(() => {
+    const idx = readIndex();
+    // gather recent statements' txs
+    const pastTx: Array<{ description?: string; amount?: number }> = [];
+    const ids = Object.keys(idx).sort().slice(-12); // last 12 entries by id order
+    for (const id of ids) {
+      const snap = idx[id];
+      const rows = Array.isArray(snap?.cachedTx) ? snap.cachedTx : [];
+      pastTx.push(...rows);
+    }
+    return learnDominantSigns(pastTx);
+  }, []);
+
+  const suspect = React.useMemo(() => {
+    return txs
+      .map((t, i) => {
+        const reason1 = suspectPolarity(t);
+        // learned deviation
+        const sig = sigFromDesc(t.description || "");
+        let reason2: string | null = null;
+        if (sig) {
+          const hist = learned.get(sig);
+          if (hist && (hist.pos >= 3 || hist.neg >= 3)) {
+            // require a tiny support
+            const dominant = hist.pos >= hist.neg ? "pos" : "neg";
+            const nowIsPos = (t.amount ?? 0) >= 0;
+            if (
+              (dominant === "pos" && !nowIsPos) ||
+              (dominant === "neg" && nowIsPos)
+            ) {
+              reason2 = `Sign deviates from history (${hist.pos}× + / ${hist.neg}× −)`;
+            }
+          }
+        }
+        const reason = reason1 || reason2;
+        return reason ? { ...t, _idx: i, _reason: reason } : null;
+      })
+      .filter(Boolean) as any[];
+  }, [txs, learned]);
+
+  const deltaAbs = Math.abs(depDelta);
+  const suspectSorted = React.useMemo(() => {
+    return suspect.slice().sort((a: any, b: any) => {
+      const da = Math.abs(Math.abs(a.amount ?? 0) - deltaAbs);
+      const db = Math.abs(Math.abs(b.amount ?? 0) - deltaAbs);
+      return da - db;
+    });
+  }, [suspect, depDelta]);
+
   /* ---------- actions ---------- */
 
   function useParsedTotals() {
@@ -279,7 +478,6 @@ export default function ImportStatementWizard({
     const idx = readIndex();
     const prev = idx[prevId];
     if (!prev) return;
-
     const prevRows = Array.isArray(prev.cachedTx) ? prev.cachedTx : [];
     const prevBegin = prev.inputs?.beginningBalance ?? 0;
     const prevDeposits = +prevRows
@@ -295,16 +493,11 @@ export default function ImportStatementWizard({
   function addOrSavePage() {
     const cleaned = normalizePageText(currentDraft || "");
     if (!cleaned.trim()) return;
-
-    setPages((ps) => {
-      if (editingIndex === null) {
-        return [...ps, cleaned];
-      } else {
-        const next = ps.slice();
-        next[editingIndex] = cleaned;
-        return next;
-      }
-    });
+    setPages((ps) =>
+      editingIndex === null
+        ? [...ps, cleaned]
+        : Object.assign(ps.slice(), { [editingIndex]: cleaned })
+    );
     setCurrentDraft("");
     setEditingIndex(null);
   }
@@ -333,7 +526,7 @@ export default function ImportStatementWizard({
   async function runParsing(explicitPages?: string[]) {
     setBusy(true);
     setParseErr(null);
-    await new Promise((r) => setTimeout(r, 0)); // let "Parsing…" paint
+    await new Promise((r) => setTimeout(r, 0));
 
     try {
       if (!profile) {
@@ -362,9 +555,23 @@ export default function ImportStatementWizard({
         category: normalizeToCanonical(t.category, { isDemo }),
         cardLast4: last4OrNull(t.cardLast4) ?? undefined,
       }));
-      setTxs(cleaned);
 
-      setTxs(cleaned);
+      // 1) Apply PERSISTENT polarity rules
+      const persistedApplied = applyPolarityRulesTo(polarityRules, cleaned);
+
+      // 2) Apply per-row session overrides
+      const withOverrides = persistedApplied.map((t) => {
+        const key = t.id ?? `${t.date}|${t.amount}|${t.description}`;
+        const ov = polarityOverrides[key];
+        if (!ov) return t;
+        const amt = t.amount ?? 0;
+        if (ov === "deposit" && amt < 0) return { ...t, amount: Math.abs(amt) };
+        if (ov === "withdrawal" && amt > 0)
+          return { ...t, amount: -Math.abs(amt) };
+        return t;
+      });
+
+      setTxs(withOverrides);
     } catch (e: any) {
       setParseErr(e?.message || "Failed to parse pages.");
     } finally {
@@ -407,11 +614,11 @@ export default function ImportStatementWizard({
         cardLast4: last4OrNull(t.cardLast4) ?? undefined,
       })),
       normalizerVersion: NORMALIZER_VERSION,
+      // NOTE: We do NOT store rules in the snapshot; they persist globally via /lib/polarityRules.ts
     };
 
     upsertStatement(snap);
-    writeCurrentId(id); // <— keep it selected globally
-    // Optional: nudge any listeners that don’t watch LS keys:
+    writeCurrentId(id);
     try {
       window.dispatchEvent(
         new StorageEvent("storage", {
@@ -424,7 +631,48 @@ export default function ImportStatementWizard({
     onDone?.(id);
   }
 
-  /* ---------- render ---------- */
+  // Row-level actions
+  function flipRowPolarity(idx: number) {
+    setTxs((rows) => {
+      const next = rows.slice();
+      next[idx] = {
+        ...next[idx],
+        amount: flipAmountSign(next[idx].amount ?? 0),
+      };
+      return next;
+    });
+  }
+
+  function overrideRowPolarity(idx: number, as: "deposit" | "withdrawal") {
+    setTxs((rows) => {
+      const next = rows.slice();
+      const t = next[idx];
+      const amt = t.amount ?? 0;
+      next[idx] = {
+        ...t,
+        amount: as === "deposit" ? Math.abs(amt) : -Math.abs(amt),
+      };
+      const key = t.id ?? `${t.date}|${t.amount}|${t.description}`;
+      setPolarityOverrides((m) => ({ ...m, [key]: as }));
+      return next;
+    });
+  }
+
+  function createPolarityRuleFromRow(
+    idx: number,
+    as: "deposit" | "withdrawal"
+  ) {
+    const t = txs[idx];
+    const patt = makePatternFromDesc(t.description || "");
+    // persist immediately
+    const nextRules = upsertPolarityRule({ pattern: patt, as }, scopedKey);
+    setPolarityRules(nextRules);
+  }
+
+  function removeRule(i: number) {
+    const next = removePolarityRule(i, scopedKey);
+    setPolarityRules(next);
+  }
 
   if (!open) return null;
 
@@ -549,6 +797,7 @@ export default function ImportStatementWizard({
                   </ToolbarButton>
                 )}
               </div>
+
               {/* Deposits */}
               <div>
                 <label className="text-xs block mb-1 text-slate-400">
@@ -587,7 +836,7 @@ export default function ImportStatementWizard({
                 />
               </div>
 
-              {/* NEW: Ending Balance (calculated) */}
+              {/* Ending Balance (calculated) */}
               <div className="rounded-2xl border border-slate-700 bg-slate-900 p-3">
                 <div className="text-xs text-slate-400">
                   Ending Balance (calculated)
@@ -815,6 +1064,135 @@ export default function ImportStatementWizard({
                     Try “Use parsed totals” if your entered totals were manual.
                   </li>
                 </ul>
+              </div>
+            )}
+
+            {suspectSorted.length > 0 && (
+              <div className="rounded-2xl border border-cyan-600/60 bg-cyan-600/10 p-3 mt-2">
+                <div className="text-sm font-semibold text-cyan-200 mb-2">
+                  Polarity Troubleshooter
+                </div>
+                <div className="text-xs text-slate-300 mb-3">
+                  We found transactions whose description suggests a different
+                  sign than the parsed amount. Flip individual rows, or create a
+                  rule so similar lines are auto-fixed on re-parse.
+                </div>
+                <div className="rounded-xl border border-slate-700 overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-800/60">
+                      <tr>
+                        <th className="text-left p-2 w-[88px]">Date</th>
+                        <th className="text-left p-2">Description</th>
+                        <th className="text-right p-2 w-[120px]">Amount</th>
+                        <th className="text-left p-2 w-[120px]">Interpreted</th>
+                        <th className="text-left p-2">Reason</th>
+                        <th className="text-left p-2 w-[320px]">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {suspect.map((t: any) => {
+                        const isDeposit = (t.amount ?? 0) > 0;
+                        return (
+                          <tr
+                            key={`${t._idx}-${t.amount}-${t.description}`}
+                            className="border-t border-slate-800 align-top"
+                          >
+                            <td className="p-2 text-slate-300">{t.date}</td>
+                            <td className="p-2">
+                              <div className="text-slate-100">
+                                {t.description}
+                              </div>
+                            </td>
+                            <td className="p-2 text-right font-mono">
+                              {money(Math.abs(t.amount ?? 0))}
+                            </td>
+                            <td className="p-2">
+                              <span
+                                className={`inline-block rounded-md px-2 py-0.5 text-xs border ${
+                                  isDeposit
+                                    ? "text-emerald-300 border-emerald-500/70 bg-emerald-500/10"
+                                    : "text-rose-300 border-rose-500/70 bg-rose-500/10"
+                                }`}
+                              >
+                                {isDeposit ? "Deposit" : "Withdrawal"}
+                              </span>
+                            </td>
+                            <td className="p-2 text-xs text-amber-300">
+                              {t._reason}
+                            </td>
+                            <td className="p-2">
+                              <div className="flex flex-wrap gap-2">
+                                <ToolbarButton
+                                  onClick={() => flipRowPolarity(t._idx!)}
+                                >
+                                  Flip sign
+                                </ToolbarButton>
+                                <ToolbarButton
+                                  onClick={() =>
+                                    overrideRowPolarity(t._idx!, "deposit")
+                                  }
+                                >
+                                  Set as Deposit
+                                </ToolbarButton>
+                                <ToolbarButton
+                                  onClick={() =>
+                                    overrideRowPolarity(t._idx!, "withdrawal")
+                                  }
+                                >
+                                  Set as Withdrawal
+                                </ToolbarButton>
+                                <ToolbarButton
+                                  onClick={() =>
+                                    createPolarityRuleFromRow(
+                                      t._idx!,
+                                      "deposit"
+                                    )
+                                  }
+                                  className="sm:w-auto"
+                                >
+                                  Always Deposit (rule)
+                                </ToolbarButton>
+                                <ToolbarButton
+                                  onClick={() =>
+                                    createPolarityRuleFromRow(
+                                      t._idx!,
+                                      "withdrawal"
+                                    )
+                                  }
+                                  className="sm:w-auto"
+                                >
+                                  Always Withdrawal (rule)
+                                </ToolbarButton>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {polarityRules.length > 0 && (
+                  <div className="mt-3 text-xs text-slate-300">
+                    <div className="font-semibold mb-1">
+                      Active polarity rules
+                    </div>
+                    <ul className="list-disc pl-5 space-y-1">
+                      {polarityRules.map((r, i) => (
+                        <li key={i}>
+                          <code className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700">{`/${r.pattern}/i`}</code>{" "}
+                          → <span className="text-cyan-300">{r.as}</span>
+                          <button
+                            className="ml-2 text-rose-300 hover:underline"
+                            onClick={() => removeRule(i)}
+                          >
+                            remove
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             )}
 

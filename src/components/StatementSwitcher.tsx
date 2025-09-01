@@ -1,3 +1,4 @@
+// components/StatementSwitcher.tsx
 "use client";
 import { useMemo } from "react";
 import dayjs from "dayjs";
@@ -8,7 +9,8 @@ export default function StatementSwitcher({
   value,
   onChange,
   available,
-  fallbackMonths = 6,
+  // kept for API compatibility but no longer used:
+  // fallbackMonths = 6,
   label = "Statement",
   showLabel = true,
   size = "md",
@@ -18,28 +20,27 @@ export default function StatementSwitcher({
   value?: string;
   /** called when user picks a different statement id */
   onChange?: (id: string) => void;
-  /** ids to show (YYYY-MM), newest→oldest or any order */
+  /** ids to show (YYYY-MM), any order; component hides if this is empty */
   available?: string[];
-  /** used only when `available` is empty; shows N recent months */
+  /** deprecated: ignored; we no longer fabricate months */
   fallbackMonths?: number;
   label?: string;
   showLabel?: boolean;
   size?: "sm" | "md";
   className?: string;
 }) {
-  // Build candidate ids (newest → oldest)
-  const allIds = useMemo(() => {
-    const base = (
-      available?.length
-        ? Array.from(new Set(available))
-        : Array.from({ length: fallbackMonths }, (_, i) =>
-            dayjs().startOf("month").subtract(i, "month").format("YYYY-MM")
-          )
-    ).sort((a, b) => (a > b ? -1 : 1));
-    return base;
-  }, [available, fallbackMonths]);
+  // If no real data, hide entirely (prevents phantom months like "August")
+  const hasData = !!(available && available.length);
+  if (!hasData) return null;
 
-  // Ensure the selected id is present in the menu (in case parent passes one not in `available`)
+  // Build candidate ids (newest → oldest) from provided data only
+  const allIds = useMemo(() => {
+    const uniq = Array.from(new Set(available ?? []));
+    uniq.sort((a, b) => (a > b ? -1 : 1)); // descending YYYY-MM
+    return uniq;
+  }, [available]);
+
+  // Ensure the selected id is present in the menu (defensive)
   const idsForSelect = useMemo(() => {
     if (!value) return allIds;
     return allIds.includes(value) ? allIds : [value, ...allIds];
@@ -57,10 +58,9 @@ export default function StatementSwitcher({
   );
 
   const h = size === "sm" ? "h-9 text-sm" : "h-10";
-  const wrapperW = className || "sm:w-56";
 
   return (
-    <div className={`w-full ${wrapperW}`}>
+    <div className={`w-full ${className || "sm:w-56"}`}>
       {showLabel && (
         <label className="block text-xs uppercase tracking-wide text-slate-400 mb-1">
           {label}

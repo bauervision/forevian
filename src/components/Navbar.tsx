@@ -106,8 +106,9 @@ export default function Navbar() {
                 />
               </div>
               <span className="font-semibold tracking-tight text-white">
-                Forevian<span className="text-cyan-400"> Finance</span>
+                Forevian<span className="text-cyan-400"> Finance </span>
               </span>
+              <span className="text-xs text-cyan-900">v0.0.2</span>
             </Link>
 
             {/* Desktop nav */}
