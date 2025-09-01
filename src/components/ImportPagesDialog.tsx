@@ -552,7 +552,14 @@ export default function ImportStatementWizard({
 
       const cleaned = withRules.map((t) => ({
         ...t,
-        category: normalizeToCanonical(t.category, { isDemo }),
+        category: normalizeToCanonical(t.category, {
+          isDemo,
+          description: t.description,
+          // include these if you have them on your tx object:
+          merchant: (t as any).merchant || undefined,
+          mcc: (t as any).mcc || undefined,
+        }),
+
         cardLast4: last4OrNull(t.cardLast4) ?? undefined,
       }));
 
