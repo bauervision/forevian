@@ -17,6 +17,135 @@ import IconPicker from "@/components/IconPicker";
 
 /* ---------------- helpers ---------------- */
 
+/** --- Fallback parsing helpers when learning fails --- */
+
+function findMoneyTokens(s: string) {
+  // $, commas, optional parens or leading minus
+  const tokens =
+    s.match(
+      /\(?-?\$?\d{1,3}(?:,\d{3})*(?:\.\d+)?\)?|\(?-?\$?\d+(?:\.\d+)?\)?/g
+    ) || [];
+  return tokens.map((raw) => {
+    const isParenNeg = /^\(.*\)$/.test(raw);
+    const cleaned = raw.replace(/[(),$]/g, "").replace(/,/g, "");
+    const n = Number(cleaned);
+    const val = isParenNeg ? -Math.abs(n) : n;
+    return { raw, val };
+  });
+}
+
+function chooseAmount(tokens: { raw: string; val: number }[]) {
+  if (tokens.length === 0)
+    return { raw: "", amount: NaN, balanceRaw: "", balance: NaN };
+  if (tokens.length === 1)
+    return {
+      raw: tokens[0].raw,
+      amount: tokens[0].val,
+      balanceRaw: "",
+      balance: NaN,
+    };
+
+  // Consider just the last two; bank lines usually end with [amount, balance]
+  const a = tokens[tokens.length - 2];
+  const b = tokens[tokens.length - 1];
+
+  // If one is negative and the other positive → the signed one is amount
+  if (a.val < 0 && b.val >= 0)
+    return { raw: a.raw, amount: a.val, balanceRaw: b.raw, balance: b.val };
+  if (b.val < 0 && a.val >= 0)
+    return { raw: b.raw, amount: b.val, balanceRaw: a.raw, balance: a.val };
+
+  // Otherwise both same sign → the smaller magnitude is the amount, larger is balance
+  const amt = Math.abs(a.val) <= Math.abs(b.val) ? a : b;
+  const bal = amt === a ? b : a;
+  return {
+    raw: amt.raw,
+    amount: amt.val,
+    balanceRaw: bal.raw,
+    balance: bal.val,
+  };
+}
+
+function findFirstDateToken(s: string) {
+  // Matches 8/1, 08/01, 8-1, 08-01, with optional /YYYY or -YYYY
+  const m = s.match(/\b(\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)\b/);
+  return m ? m[1] : "";
+}
+
+function guessDateFmtFromToken(tok: string): "MM/DD" | "MM/DD/YYYY" {
+  // If token has 4-digit year, treat as MM/DD/YYYY, else MM/DD
+  if (/\d{4}\b/.test(tok)) return "MM/DD/YYYY";
+  return "MM/DD";
+}
+
+function findLastNumberAsAmount(s: string) {
+  // Find the last numeric-token (allows commas, optional leading -)
+  const matches = s.match(/-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?/g);
+  if (!matches || matches.length === 0) return { raw: "", amount: NaN };
+  const raw = matches[matches.length - 1];
+  const amount = Number(raw.replace(/,/g, ""));
+  return { raw, amount };
+}
+
+function stripOnce(haystack: string, needle: string) {
+  if (!needle) return haystack;
+  const i = haystack.indexOf(needle);
+  if (i === -1) return haystack;
+  return (haystack.slice(0, i) + haystack.slice(i + needle.length))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function naiveParseLine(line: string) {
+  const dateTok = findFirstDateToken(line);
+  const tokens = findMoneyTokens(line);
+  const pick = chooseAmount(tokens);
+
+  // Build description by stripping chosen amount and the date; leave balance alone
+  let desc = line;
+  if (dateTok) desc = stripOnce(desc, dateTok);
+  if (pick.raw) desc = stripOnce(desc, pick.raw);
+  desc = desc.replace(/\s{2,}/g, " ").trim();
+
+  // Try last-4 hints like "Card 5280" or "CHK 1078"
+  const l4 =
+    line.match(/\b(?:Card|CARD)\s+(\d{4})\b/)?.[1] ||
+    line.match(/\b(?:CHK|Check|Acct)\s+(\d{3,4})\b/)?.[1] ||
+    "";
+
+  return {
+    date: dateTok || "",
+    description: desc || "",
+    amount: pick.amount,
+    cardLast4: l4 ? canon(l4) : "",
+  };
+}
+
+function fallbackPreviewRows(withdrawal: string, deposit: string) {
+  const w = naiveParseLine(withdrawal);
+  const d = naiveParseLine(deposit);
+  return [
+    {
+      line: "Withdrawal sample",
+      fields: {
+        date: w.date,
+        description: w.description,
+        amount: w.amount,
+        last4: "",
+      },
+    },
+    {
+      line: "Deposit sample",
+      fields: {
+        date: d.date,
+        description: d.description,
+        amount: d.amount,
+        last4: "",
+      },
+    },
+  ] as PreviewRow[];
+}
+
 const canon = (l4: string | number) =>
   String(l4 ?? "")
     .replace(/\D/g, "")
@@ -193,6 +322,8 @@ export default function Onboarding() {
     null
   );
 
+  const [usedFallback, setUsedFallback] = React.useState(false);
+
   // welcome modal gating
   const WELCOME_KEY = `ui.import.onboard.welcome::${uid ?? "anon"}`;
   const [showWelcome, setShowWelcome] = React.useState(false);
@@ -267,9 +398,36 @@ export default function Onboarding() {
       }
       const { profile: learned } = learnFromSamples([w, d]);
       if (!learned) {
-        setErr(
-          "Couldn't confidently detect a pattern. Paste the full lines exactly as shown on your statement."
+        // --- NEW: naive fallback path ---
+        const rows = fallbackPreviewRows(w, d);
+        // If we couldn’t even find amounts, show an error; otherwise proceed with fallback.
+        const okEnough = rows.every(
+          (r) =>
+            r.fields.date &&
+            r.fields.description &&
+            typeof r.fields.amount === "number" &&
+            !Number.isNaN(r.fields.amount)
         );
+        if (!okEnough) {
+          setErr(
+            "Couldn't detect a pattern automatically. Try pasting one clean line per example with a date and an amount visible."
+          );
+          return;
+        }
+
+        // Guess dateFmt from the first date we saw
+        const fmtGuess = guessDateFmtFromToken(
+          rows[0].fields.date || rows[1].fields.date || ""
+        );
+        const partial: Partial<ImportProfile> = {
+          dateFmt: fmtGuess,
+          unifiedRegex: "", // explicit “no regex”; importer will use simple token rules
+        };
+
+        setProposal(partial);
+        setPreview(rows as any);
+        setUsedFallback(true);
+        setStep(2);
         return;
       }
       const partial = toPartialProfile(learned);
@@ -611,6 +769,14 @@ FANG 3141 Payroll Jul 15 TRN*1*9000852321
       {step === 2 && proposal && (
         <section className="rounded-2xl border border-slate-700 bg-slate-900 p-4 space-y-4">
           <h3 className="font-semibold">2) Review match</h3>
+          {usedFallback && (
+            <div className="rounded-xl border border-amber-500/70 bg-amber-500/10 text-amber-100 p-3 text-sm">
+              We couldn’t autodetect a statement pattern, so a simple fallback
+              parser was used. Make sure the date, description, and amount look
+              correct. You can continue if they do.
+            </div>
+          )}
+
           <StatusRow />
           <div className="text-sm text-slate-300">
             <div className="mb-1">
