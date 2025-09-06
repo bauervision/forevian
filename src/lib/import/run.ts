@@ -12,8 +12,27 @@ export type ParsedTx = {
 
 /* ---------------- helpers ---------------- */
 
+const IMPORT_DEBUG = false; // set true to stream debug events to the browser
+
+// Emit browser CustomEvents for debug (wizard listens to "forevian-import-debug")
+function emitDebug(type: string, data: any) {
+  if (!IMPORT_DEBUG || typeof window === "undefined") return;
+  try {
+    window.dispatchEvent(
+      new CustomEvent("forevian-import-debug", { detail: { type, data } })
+    );
+  } catch {}
+}
+
+// Optional fingerprint so you can verify the module loaded
+if (typeof window !== "undefined") {
+  // visible on window for quick sanity check
+  (window as any).__forevian_import_run = "v3";
+  emitDebug("module.ready", { version: "v3" });
+}
+
 // Treat non-breaking / thin spaces as normal spaces
-function normalizeSpaces(s: string) {
+export function normalizeSpaces(s: string) {
   return s.replace(/[\u00A0\u2007\u202F]+/g, " ");
 }
 
@@ -43,7 +62,7 @@ function pickAmountFromEOL(s: string) {
   return { raw: m[1], amount: left, balanceRaw: m[2], balance: right };
 }
 
-function moneyTokens(s: string) {
+export function moneyTokens(s: string) {
   const line = normalizeSpaces(s);
 
   // 1) Strict money tokens: must include cents (most banks do)
@@ -67,14 +86,17 @@ function moneyTokens(s: string) {
 }
 
 /** Prefer explicit 2-column tail; else decide from the last two numeric tokens. */
-function pickAmount(tokens: { raw: string; val: number }[], line?: string) {
+export function pickAmount(
+  tokens: { raw: string; val: number }[],
+  line?: string
+) {
   // 1) Strong preference: explicit 2-column tail (amount, balance)
   if (line) {
     const eol = pickAmountFromEOL(line);
     if (eol) return eol;
   }
 
-  // 2) Heuristic: use the last two *money* tokens (strict first, already handled in moneyTokens)
+  // 2) Heuristic: use the last two *money* tokens
   if (tokens.length === 0)
     return { raw: "", amount: NaN, balanceRaw: "", balance: NaN };
   if (tokens.length === 1)
@@ -105,7 +127,7 @@ function pickAmount(tokens: { raw: string; val: number }[], line?: string) {
   };
 }
 
-function stripOnce(hay: string, needle: string) {
+export function stripOnce(hay: string, needle: string) {
   if (!needle) return hay;
   const i = hay.indexOf(needle);
   if (i === -1) return hay;
@@ -114,7 +136,7 @@ function stripOnce(hay: string, needle: string) {
     .trim();
 }
 
-function findFirstDateToken(s: string) {
+export function findFirstDateToken(s: string) {
   // 8/1, 08/01, 8-1, 08-01, with optional /YYYY or -YYYY
   const m = s.match(/\b(\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)\b/);
   return m ? m[1] : "";
@@ -144,7 +166,23 @@ export function parseWithProfile(
       const dateTok = (findFirstDateToken(line) || "").trim();
       const tokens = moneyTokens(line);
       const pick = pickAmount(tokens, line);
-      if (!dateTok || Number.isNaN(pick.amount)) return;
+
+      emitDebug("pick", {
+        where: "no-profile",
+        line,
+        date: dateTok,
+        picked: { raw: pick.raw, amount: pick.amount },
+        tokens,
+      });
+
+      if (!dateTok) {
+        emitDebug("skip.no-date", { where: "no-profile", line });
+        return;
+      }
+      if (Number.isNaN(pick.amount)) {
+        emitDebug("skip.no-amount", { where: "no-profile", line });
+        return;
+      }
 
       let desc = line;
       desc = stripOnce(desc, dateTok);
@@ -153,12 +191,22 @@ export function parseWithProfile(
       const last4 = extractLast4FromLine(line);
       const amt = pick.amount;
 
-      out.push({
+      const row: ParsedTx = {
         id: `tx-${i}-${dateTok}-${Math.abs(amt).toFixed(2)}`,
         date: dateTok,
         description: desc,
         amount: amt,
-        cardLast4: last4 || undefined,
+        cardLast4: (last4 || undefined) as any,
+      };
+
+      out.push(row);
+      emitDebug("push", {
+        where: "no-profile",
+        id: row.id,
+        date: row.date,
+        desc: row.description,
+        amount: row.amount,
+        last4: row.cardLast4 || "",
       });
     });
     return out;
@@ -176,7 +224,23 @@ export function parseWithProfile(
       const dateTok = (findFirstDateToken(line) || "").trim();
       const tokens = moneyTokens(line);
       const picked = pickAmount(tokens, line);
-      if (!dateTok || Number.isNaN(picked.amount)) return;
+
+      emitDebug("pick", {
+        where: "regex-fallback",
+        line,
+        date: dateTok,
+        picked: { raw: picked.raw, amount: picked.amount },
+        tokens,
+      });
+
+      if (!dateTok) {
+        emitDebug("skip.no-date", { where: "regex-fallback", line });
+        return;
+      }
+      if (Number.isNaN(picked.amount)) {
+        emitDebug("skip.no-amount", { where: "regex-fallback", line });
+        return;
+      }
 
       let desc = line;
       desc = stripOnce(desc, dateTok);
@@ -184,18 +248,28 @@ export function parseWithProfile(
 
       const last4 = extractLast4FromLine(line);
 
-      out.push({
+      const row: ParsedTx = {
         id: `tx-${i}-${dateTok}-${Math.abs(picked.amount).toFixed(2)}`,
         date: dateTok,
         description: desc,
         amount: picked.amount,
-        cardLast4: last4 || undefined,
+        cardLast4: (last4 || undefined) as any,
+      };
+      out.push(row);
+
+      emitDebug("push", {
+        where: "regex-fallback",
+        id: row.id,
+        date: row.date,
+        desc: row.description,
+        amount: row.amount,
+        last4: row.cardLast4 || "",
       });
       return;
     }
 
     // prefer named captures; fall back to index if needed
-    // @ts-ignore - TS can't type named groups on RegExpMatchArray well
+    // @ts-ignore
     const g = m.groups || {};
     const date = (g.date || m[1] || "").trim();
     let description = (g.description || m[2] || "").trim();
@@ -227,14 +301,26 @@ export function parseWithProfile(
       description = desc;
     }
 
-    out.push({
+    const row: ParsedTx = {
       id: `tx-${i}-${date}-${Math.abs(amount).toFixed(2)}`,
       date,
       description,
       amount,
-      cardLast4: last4 || undefined,
+      cardLast4: (last4 || undefined) as any,
+    };
+    out.push(row);
+
+    emitDebug("push", {
+      where: "regex",
+      id: row.id,
+      date: row.date,
+      desc: row.description,
+      amount: row.amount,
+      last4: row.cardLast4 || "",
     });
   });
 
   return out;
 }
+
+export default parseWithProfile;

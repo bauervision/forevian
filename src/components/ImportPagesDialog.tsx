@@ -20,7 +20,7 @@ import { NORMALIZER_VERSION } from "@/lib/textNormalizer";
 import { useSpenders } from "@/lib/spenders";
 import { normalizeToCanonical } from "@/lib/categories/normalization";
 
-// NEW: import the persistent rules API
+// polarity rules
 import {
   readPolarityRules,
   upsertPolarityRule,
@@ -29,6 +29,15 @@ import {
   makePatternFromDesc,
   type PolarityRule,
 } from "@/lib/polarityRules";
+
+// DEBUG + repair helpers: import from parser module
+import {
+  parseWithProfile,
+  findFirstDateToken,
+  moneyTokens,
+  pickAmount,
+  stripOnce,
+} from "@/lib/import/run";
 
 /* ---------- local UI helpers ---------- */
 
@@ -164,10 +173,6 @@ function prevMonth(year: number, month: number) {
     : { year, month: month - 1 };
 }
 
-function isUserStatement(s: any) {
-  return !s?.source || s.source !== "demo";
-}
-
 /* ---------- polarity suspicion heuristics (same as before) ---------- */
 
 function sigFromDesc(desc: string): string {
@@ -261,10 +266,37 @@ export default function ImportStatementWizard({
   const { profile } = useImportProfile();
   const { applyAlias } = useAliases();
 
-  // NEW: choose a scope key for this user's rules (stable across sessions)
-  // Prefer a stable profile id/uid if you have one; fall back to "default".
+  // DEBUG: browser-side stream of import events emitted by parseWithProfile
+  const [debugEvents, setDebugEvents] = React.useState<any[]>([]);
+  React.useEffect(() => {
+    if (!open) return;
+    setDebugEvents([]);
+    function onDbg(e: any) {
+      const ev = e?.detail;
+      if (!ev) return;
+      setDebugEvents((prev) => {
+        const next = [...prev, ev];
+        return next.length > 500 ? next.slice(next.length - 500) : next;
+      });
+    }
+    window.addEventListener("forevian-import-debug", onDbg as any);
+    return () =>
+      window.removeEventListener("forevian-import-debug", onDbg as any);
+  }, [open]);
+
+  // DEBUG: baseline vs final compare
+  const [debugCompare, setDebugCompare] = React.useState<null | {
+    baselineDeposits: number;
+    baselineWithdrawals: number;
+    finalDeposits: number;
+    finalWithdrawals: number;
+    missing: any[];
+    extra: any[];
+    signFlips: any[];
+  }>(null);
+
+  // scope key for polarity rules
   const scopedKey = React.useMemo(() => {
-    // try common fields if present; adjust to your profile shape
     const pid =
       (profile as any)?.id ||
       (profile as any)?.uid ||
@@ -276,7 +308,7 @@ export default function ImportStatementWizard({
   const now = new Date();
   const [step, setStep] = React.useState<1 | 2 | 3 | 4>(1);
 
-  // Step 1
+  // Step 1 fields
   const [stmtYear, setStmtYear] = React.useState<number>(
     seedYear ?? now.getFullYear()
   );
@@ -289,7 +321,7 @@ export default function ImportStatementWizard({
     totalWithdrawals: 0,
   });
 
-  // PERSISTENT RULES (loaded from LS) + session-only overrides
+  // Persistent rules + per-session overrides
   const [polarityRules, setPolarityRules] = React.useState<PolarityRule[]>([]);
   const [polarityOverrides, setPolarityOverrides] = React.useState<
     Record<string, "deposit" | "withdrawal">
@@ -354,7 +386,7 @@ export default function ImportStatementWizard({
     [needsUserConfirmation]
   );
 
-  // Reset on open + load persistent rules for this user/profile
+  // Reset on open + load rules
   React.useEffect(() => {
     if (!open) return;
     setStep(1);
@@ -364,7 +396,7 @@ export default function ImportStatementWizard({
     setTxs([]);
     setParseErr(null);
     setPolarityOverrides({});
-    // load persistent rules
+    setDebugCompare(null);
     try {
       setPolarityRules(readPolarityRules(scopedKey));
     } catch {
@@ -412,12 +444,11 @@ export default function ImportStatementWizard({
     txs.length > 0 &&
     !parseErr;
 
-  // Pull past cached transactions (last 12 statements) to learn the usual sign
+  // learn dominant signs from past statements
   const learned = React.useMemo(() => {
     const idx = readIndex();
-    // gather recent statements' txs
     const pastTx: Array<{ description?: string; amount?: number }> = [];
-    const ids = Object.keys(idx).sort().slice(-12); // last 12 entries by id order
+    const ids = Object.keys(idx).sort().slice(-12);
     for (const id of ids) {
       const snap = idx[id];
       const rows = Array.isArray(snap?.cachedTx) ? snap.cachedTx : [];
@@ -430,13 +461,11 @@ export default function ImportStatementWizard({
     return txs
       .map((t, i) => {
         const reason1 = suspectPolarity(t);
-        // learned deviation
         const sig = sigFromDesc(t.description || "");
         let reason2: string | null = null;
         if (sig) {
           const hist = learned.get(sig);
           if (hist && (hist.pos >= 3 || hist.neg >= 3)) {
-            // require a tiny support
             const dominant = hist.pos >= hist.neg ? "pos" : "neg";
             const nowIsPos = (t.amount ?? 0) >= 0;
             if (
@@ -542,6 +571,47 @@ export default function ImportStatementWizard({
       }
 
       const sanitized = base.map((p) => normalizePageText(p));
+
+      // ---- DEBUG BASELINE: run raw parser directly to emit events + capture baseline rows ----
+      const allLines = sanitized.flatMap((p) => p.split(/\r?\n/));
+      const baseline = parseWithProfile(profile, allLines);
+
+      // helper sums + keys for compare
+      const sumPos = (rows: any[]) =>
+        +rows
+          .filter((r) => (r.amount ?? 0) > 0)
+          .reduce((s, r) => s + (r.amount ?? 0), 0)
+          .toFixed(2);
+      const sumNegAbs = (rows: any[]) =>
+        +rows
+          .filter((r) => (r.amount ?? 0) < 0)
+          .reduce((s, r) => s + Math.abs(r.amount ?? 0), 0)
+          .toFixed(2);
+
+      const keyOf = (t: any) => {
+        const d = (t.date || "").trim();
+        const a = Math.abs(+(t.amount ?? 0));
+        const desc = (t.description || "")
+          .slice(0, 40)
+          .replace(/\s+/g, " ")
+          .trim()
+          .toUpperCase();
+        return `${d}|${a.toFixed(2)}|${desc}`;
+      };
+      const byDateAmt = (arr: any[]) => {
+        const m = new Map<string, any[]>();
+        for (const t of arr) {
+          const key = `${(t.date || "").trim()}|${Math.abs(+t.amount).toFixed(
+            2
+          )}`;
+          if (!m.has(key)) m.set(key, []);
+          m.get(key)!.push(t);
+        }
+        return m;
+      };
+      // ---- END DEBUG BASELINE ----
+
+      // Pipeline: rebuild → category rules → polarity rules → session overrides
       const res = rebuildFromPages(sanitized, stmtYear, applyAlias);
       const rules = readCatRules();
       const withRules = applyCategoryRulesTo(rules, res.txs, applyAlias);
@@ -555,11 +625,9 @@ export default function ImportStatementWizard({
         category: normalizeToCanonical(t.category, {
           isDemo,
           description: t.description,
-          // include these if you have them on your tx object:
           merchant: (t as any).merchant || undefined,
           mcc: (t as any).mcc || undefined,
         }),
-
         cardLast4: last4OrNull(t.cardLast4) ?? undefined,
       }));
 
@@ -578,7 +646,85 @@ export default function ImportStatementWizard({
         return t;
       });
 
-      setTxs(withOverrides);
+      /* ---------- REPAIR PASS (bridges rebuildFromPages bugs) ---------- */
+      function repairTx(t: any) {
+        let date = (t.date || "").trim();
+        let desc = (t.description || "").trim();
+
+        // If date missing, try to extract from the start of the description
+        if (!date) {
+          const tok = findFirstDateToken(desc);
+          if (tok) {
+            date = tok;
+            desc = stripOnce(desc, tok);
+          }
+        }
+
+        // Reconstruct a raw line and re-pick amount like the baseline parser would
+        const line = `${date ? date + " " : ""}${desc}`
+          .replace(/\s+/g, " ")
+          .trim();
+        const tokens = moneyTokens(line);
+        const picked = pickAmount(tokens, line);
+
+        // If we found a reliable amount, adopt it and strip it from desc
+        if (!Number.isNaN(picked.amount)) {
+          const newDesc = stripOnce(desc, picked.raw);
+          return {
+            ...t,
+            date,
+            description: newDesc,
+            amount: picked.amount,
+          };
+        }
+
+        return { ...t, date, description: desc };
+      }
+
+      const repaired = withOverrides.map(repairTx);
+      /* ---------- END REPAIR PASS ---------- */
+
+      // ---- DEBUG COMPARE: baseline vs repaired ----
+      try {
+        const baselineKeys = new Map(baseline.map((t) => [keyOf(t), t]));
+        const finalKeys = new Map(repaired.map((t) => [keyOf(t), t]));
+
+        const missing: any[] = [];
+        for (const [k, t] of baselineKeys)
+          if (!finalKeys.has(k)) missing.push(t);
+
+        const extra: any[] = [];
+        for (const [k, t] of finalKeys) if (!baselineKeys.has(k)) extra.push(t);
+
+        const baseBy = byDateAmt(baseline);
+        const finalBy = byDateAmt(repaired);
+        const signFlips: any[] = [];
+        for (const [k, baseList] of baseBy) {
+          const finals = finalBy.get(k) || [];
+          for (const b of baseList) {
+            for (const f of finals) {
+              if ((b.amount ?? 0) * (f.amount ?? 0) < 0) {
+                signFlips.push({ baseline: b, final: f });
+              }
+            }
+          }
+        }
+
+        setDebugCompare({
+          baselineDeposits: sumPos(baseline),
+          baselineWithdrawals: sumNegAbs(baseline),
+          finalDeposits: sumPos(repaired),
+          finalWithdrawals: sumNegAbs(repaired),
+          missing,
+          extra,
+          signFlips,
+        });
+      } catch {
+        // ignore compare errors
+      }
+      // ---- END DEBUG COMPARE ----
+
+      setTxs(repaired);
     } catch (e: any) {
       setParseErr(e?.message || "Failed to parse pages.");
     } finally {
@@ -621,7 +767,6 @@ export default function ImportStatementWizard({
         cardLast4: last4OrNull(t.cardLast4) ?? undefined,
       })),
       normalizerVersion: NORMALIZER_VERSION,
-      // NOTE: We do NOT store rules in the snapshot; they persist globally via /lib/polarityRules.ts
     };
 
     upsertStatement(snap);
@@ -671,7 +816,6 @@ export default function ImportStatementWizard({
   ) {
     const t = txs[idx];
     const patt = makePatternFromDesc(t.description || "");
-    // persist immediately
     const nextRules = upsertPolarityRule({ pattern: patt, as }, scopedKey);
     setPolarityRules(nextRules);
   }
@@ -700,7 +844,20 @@ export default function ImportStatementWizard({
         {/* header */}
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-sm">
-            {headerSteps.map((s) => (
+            {[
+              ...(needsUserConfirmation
+                ? [
+                    { n: 1 as const, label: "Statement Info" },
+                    { n: 2 as const, label: "Paste Pages" },
+                    { n: 3 as const, label: "Parse & Verify" },
+                    { n: 4 as const, label: "Users" },
+                  ]
+                : [
+                    { n: 1 as const, label: "Statement Info" },
+                    { n: 2 as const, label: "Paste Pages" },
+                    { n: 3 as const, label: "Parse & Verify" },
+                  ]),
+            ].map((s) => (
               <div key={s.n} className="flex items-center gap-2">
                 <div
                   className={[
@@ -721,7 +878,7 @@ export default function ImportStatementWizard({
                 >
                   {s.label}
                 </div>
-                {s.n !== headerSteps[headerSteps.length - 1].n && (
+                {s.n !== (needsUserConfirmation ? 4 : 3) && (
                   <div className="w-8 h-px bg-slate-700" />
                 )}
               </div>
@@ -1051,6 +1208,135 @@ export default function ImportStatementWizard({
               </div>
             </div>
 
+            {/* DEBUG: baseline vs final (repaired) compare 
+            {debugCompare && (
+              <div className="rounded-2xl border border-slate-700 bg-slate-900 p-3 text-xs mt-2">
+                <div className="text-slate-200 font-semibold mb-2">
+                  Parser vs Pipeline (debug)
+                </div>
+                <div className="grid md:grid-cols-2 gap-3 mb-2">
+                  <div className="rounded-xl border border-slate-700 p-2">
+                    <div className="text-slate-400">Baseline (raw parser)</div>
+                    <div>
+                      Deposits:{" "}
+                      <span className="font-mono">
+                        {money(debugCompare.baselineDeposits)}
+                      </span>
+                    </div>
+                    <div>
+                      Withdrawals:{" "}
+                      <span className="font-mono">
+                        {money(debugCompare.baselineWithdrawals)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-slate-700 p-2">
+                    <div className="text-slate-400">
+                      Final (after rebuild + rules + repair)
+                    </div>
+                    <div>
+                      Deposits:{" "}
+                      <span className="font-mono">
+                        {money(debugCompare.finalDeposits)}
+                      </span>
+                    </div>
+                    <div>
+                      Withdrawals:{" "}
+                      <span className="font-mono">
+                        {money(debugCompare.finalWithdrawals)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <details className="mb-2">
+                  <summary className="cursor-pointer text-slate-300">
+                    Missing from final ({debugCompare.missing.length})
+                  </summary>
+                  <div className="mt-2 grid gap-1">
+                    {debugCompare.missing.slice(0, 50).map((t, i) => (
+                      <div
+                        key={i}
+                        className="rounded border border-slate-800 p-2"
+                      >
+                        <div>
+                          <b>{t.date}</b> —{" "}
+                          <span className="font-mono">{money(t.amount)}</span>
+                        </div>
+                        <div className="text-slate-300">{t.description}</div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+
+                <details className="mb-2">
+                  <summary className="cursor-pointer text-slate-300">
+                    Extra in final ({debugCompare.extra.length})
+                  </summary>
+                  <div className="mt-2 grid gap-1">
+                    {debugCompare.extra.slice(0, 50).map((t, i) => (
+                      <div
+                        key={i}
+                        className="rounded border border-slate-800 p-2"
+                      >
+                        <div>
+                          <b>{t.date}</b> —{" "}
+                          <span className="font-mono">{money(t.amount)}</span>
+                        </div>
+                        <div className="text-slate-300">{t.description}</div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+
+                <details>
+                  <summary className="cursor-pointer text-slate-300">
+                    Sign flips ({debugCompare.signFlips.length})
+                  </summary>
+                  <div className="mt-2 grid gap-1">
+                    {debugCompare.signFlips.slice(0, 50).map((p, i) => (
+                      <div
+                        key={i}
+                        className="rounded border border-slate-800 p-2"
+                      >
+                        <div className="mb-1">
+                          <b>{p.baseline.date}</b> —{" "}
+                          <span className="font-mono">
+                            {money(Math.abs(p.baseline.amount))}
+                          </span>
+                        </div>
+                        <div className="text-slate-300">
+                          Baseline: {p.baseline.description}{" "}
+                          <span className="font-mono">
+                            {p.baseline.amount > 0 ? "➕" : "➖"}
+                          </span>
+                        </div>
+                        <div className="text-slate-300">
+                          Final: {p.final.description}{" "}
+                          <span className="font-mono">
+                            {p.final.amount > 0 ? "➕" : "➖"}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              </div>
+            )}
+           
+            <details className="mt-2 text-xs text-slate-300">
+              <summary className="cursor-pointer text-slate-400 hover:text-slate-200">
+                Debug: import events ({debugEvents.length})
+              </summary>
+              <div className="mt-2 max-h-48 overflow-auto rounded border border-slate-700 p-2 bg-slate-900">
+                {debugEvents.slice(-100).map((e, idx) => (
+                  <pre key={idx} className="whitespace-pre-wrap break-words">
+                    {JSON.stringify(e, null, 2)}
+                  </pre>
+                ))}
+              </div>
+            </details>*/}
+
             {/* Assistance */}
             {!(depDelta === 0 && wdrDelta === 0) && (
               <div className="rounded-xl border border-amber-500/60 bg-amber-500/10 p-3 text-sm">
@@ -1097,7 +1383,7 @@ export default function ImportStatementWizard({
                       </tr>
                     </thead>
                     <tbody>
-                      {suspect.map((t: any) => {
+                      {suspectSorted.map((t: any) => {
                         const isDeposit = (t.amount ?? 0) > 0;
                         return (
                           <tr
@@ -1237,7 +1523,7 @@ export default function ImportStatementWizard({
                 Loading your user labels…
               </div>
             ) : singleUser ? (
-              <div className="rounded-xl border border-emerald-500/60 bg-emerald-500/10 p-3 text-sm text-emerald-200">
+              <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 p-3 text-sm text-emerald-200">
                 Single-user mode is active. We won’t show a “User” column in the
                 Reconciler.
               </div>
