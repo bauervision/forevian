@@ -1,11 +1,16 @@
-// Firestore Rules
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    /* ---------------- helpers ---------------- */
     function isSignedIn() { return request.auth != null; }
     function isOwner(uid) { return isSignedIn() && request.auth.uid == uid; }
+    function notExpired(data) {
+      return !('expiresAt' in data) || request.time < data.expiresAt;
+    }
 
+    /* ---------------- private user space ---------------- */
+    // Includes users/{uid}/summaries/{yyyy-MM} (owner-only)
     match /users/{uid} {
       allow read, write: if isOwner(uid);
 
@@ -13,5 +18,37 @@ service cloud.firestore {
         allow read, write: if isOwner(uid);
       }
     }
+
+    /* ---------------- public shares ---------------- */
+match /shares/{id} {
+  function notExpired(data) {
+    return !('expiresAt' in data) || request.time < data.expiresAt;
+  }
+
+  allow read: if resource.data.disabled != true && notExpired(resource.data);
+
+  // Create: must be owner; monthId shape; expiresAt within ~31 days ahead.
+  allow create: if isSignedIn()
+    && request.resource.data.ownerUid == request.auth.uid
+    && request.resource.data.monthId.matches('^\\d{4}-\\d{2}$')
+    && ('expiresAt' in request.resource.data)
+    && request.resource.data.expiresAt is timestamp
+    // no long-lived links: max 31 days from now
+    && request.resource.data.expiresAt <= request.time + duration.value(31, 'd')
+    // optional: also require not in the past
+    && request.resource.data.expiresAt > request.time
+    // disabled is a bool if present
+    && (!('disabled' in request.resource.data) || request.resource.data.disabled is bool);
+
+  // Update/Delete: only owner; expiresAt is immutable; allow toggling disabled.
+  allow update, delete: if isSignedIn()
+    && resource.data.ownerUid == request.auth.uid
+    && request.resource.data.ownerUid == resource.data.ownerUid
+    && request.resource.data.monthId == resource.data.monthId
+    // lock expiresAt after creation (no extending)
+    && (!('expiresAt' in request.resource.data) || request.resource.data.expiresAt == resource.data.expiresAt)
+    && (!('disabled' in request.resource.data) || request.resource.data.disabled is bool);
+}
+
   }
 }

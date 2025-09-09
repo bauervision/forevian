@@ -13,10 +13,9 @@ import {
   type StatementSnapshot,
   writeCurrentId,
 } from "@/lib/statements";
-import { normalizePageText } from "@/lib/textNormalizer";
+import { normalizePageText, NORMALIZER_VERSION } from "@/lib/textNormalizer";
 import { rebuildFromPages } from "@/lib/import/reconcile";
 import { readCatRules, applyCategoryRulesTo } from "@/lib/categoryRules";
-import { NORMALIZER_VERSION } from "@/lib/textNormalizer";
 import { useSpenders } from "@/lib/spenders";
 import { normalizeToCanonical } from "@/lib/categories/normalization";
 
@@ -29,10 +28,10 @@ import {
   makePatternFromDesc,
   type PolarityRule,
 } from "@/lib/polarityRules";
-
-// DEBUG + repair helpers: import from parser module
+import { useCategories } from "@/app/providers/CategoriesProvider";
+import { catToSlug } from "@/lib/slug";
+import { ensureCategoryRulesSeededOnce } from "@/lib/categoryRules/seed";
 import {
-  parseWithProfile,
   findFirstDateToken,
   moneyTokens,
   pickAmount,
@@ -40,6 +39,35 @@ import {
 } from "@/lib/import/run";
 
 /* ---------- local UI helpers ---------- */
+
+// tiny ensure function here as well (local mirror)
+function useEnsureCategoryExistsLocal() {
+  const { categories, setAll } = useCategories();
+  return React.useCallback(
+    (label: string) => {
+      const name = (label || "").trim();
+      if (!name) return;
+      const exists = categories.some(
+        (c) => c.name.toLowerCase() === name.toLowerCase()
+      );
+      if (exists) return;
+      setAll([
+        ...categories,
+        {
+          id:
+            crypto.randomUUID?.() ??
+            `cat-${Math.random().toString(36).slice(2)}`,
+          name,
+          icon: "🗂️",
+          color: "#475569",
+          hint: "",
+          slug: catToSlug(name),
+        },
+      ]);
+    },
+    [categories, setAll]
+  );
+}
 
 function tokenize(desc: string): string[] {
   return (desc || "")
@@ -51,7 +79,6 @@ function tokenize(desc: string): string[] {
     .filter(Boolean);
 }
 
-// token sets we consider "deposit-ish" when co-occuring
 const DEPOSIT_AND_SETS: string[][] = [
   ["DIRECT", "DEPOSIT"],
   ["DIR", "DEP"],
@@ -68,7 +95,6 @@ const DEPOSIT_AND_SETS: string[][] = [
   ["TREAS", "COMPENSATION"],
 ];
 
-// allow any single-strong token too (but only as a *suspect* signal)
 const STRONG_DEPOSIT_SINGLE = new Set([
   "EDEPOSIT",
   "REFUND",
@@ -173,10 +199,9 @@ function prevMonth(year: number, month: number) {
     : { year, month: month - 1 };
 }
 
-/* ---------- polarity suspicion heuristics (same as before) ---------- */
+/* ---------- polarity suspicion heuristics ---------- */
 
 function sigFromDesc(desc: string): string {
-  // normalize by removing digits and sorting tokens
   const toks = tokenize(desc).filter((w) => !/^\d+$/.test(w));
   return toks.join(" ");
 }
@@ -192,14 +217,13 @@ function learnDominantSigns(
     (t.amount ?? 0) >= 0 ? entry.pos++ : entry.neg++;
     map.set(s, entry);
   }
-  return map; // lookup sig -> {pos,neg}
+  return map;
 }
 
 function suspectPolarity(t: { description: string; amount: number }) {
   const amt = +(t.amount ?? 0);
   const d = (t.description || "").toUpperCase();
 
-  // old keyword hints (kept)
   const depositHints = [
     "DEPOSIT",
     "EDEPOSIT",
@@ -232,7 +256,6 @@ function suspectPolarity(t: { description: string; amount: number }) {
   const isDepositishOld = depositHints.some((h) => d.includes(h));
   const isWithdrawalishOld = withdrawalHints.some((h) => d.includes(h));
 
-  // NEW: token co-occurrence (AND-sets)
   const toks = tokenize(d);
   const hasToken = (x: string) => toks.includes(x);
   const matchesAndSet = DEPOSIT_AND_SETS.some((set) => set.every(hasToken));
@@ -266,34 +289,11 @@ export default function ImportStatementWizard({
   const { profile } = useImportProfile();
   const { applyAlias } = useAliases();
 
-  // DEBUG: browser-side stream of import events emitted by parseWithProfile
-  const [debugEvents, setDebugEvents] = React.useState<any[]>([]);
+  const ensureLocal = useEnsureCategoryExistsLocal();
   React.useEffect(() => {
     if (!open) return;
-    setDebugEvents([]);
-    function onDbg(e: any) {
-      const ev = e?.detail;
-      if (!ev) return;
-      setDebugEvents((prev) => {
-        const next = [...prev, ev];
-        return next.length > 500 ? next.slice(next.length - 500) : next;
-      });
-    }
-    window.addEventListener("forevian-import-debug", onDbg as any);
-    return () =>
-      window.removeEventListener("forevian-import-debug", onDbg as any);
+    ensureCategoryRulesSeededOnce();
   }, [open]);
-
-  // DEBUG: baseline vs final compare
-  const [debugCompare, setDebugCompare] = React.useState<null | {
-    baselineDeposits: number;
-    baselineWithdrawals: number;
-    finalDeposits: number;
-    finalWithdrawals: number;
-    missing: any[];
-    extra: any[];
-    signFlips: any[];
-  }>(null);
 
   // scope key for polarity rules
   const scopedKey = React.useMemo(() => {
@@ -321,22 +321,7 @@ export default function ImportStatementWizard({
     totalWithdrawals: 0,
   });
 
-  // Persistent rules + per-session overrides
-  const [polarityRules, setPolarityRules] = React.useState<PolarityRule[]>([]);
-  const [polarityOverrides, setPolarityOverrides] = React.useState<
-    Record<string, "deposit" | "withdrawal">
-  >({});
-
-  const step1Ending = React.useMemo(
-    () =>
-      +(
-        (inputs.beginningBalance || 0) +
-        (inputs.totalDeposits || 0) -
-        (inputs.totalWithdrawals || 0)
-      ).toFixed(2),
-    [inputs]
-  );
-
+  // NEW: show the “Use previous ending as beginning” button only when previous month exists with data
   const hasPrev = React.useMemo(() => {
     const { year: py, month: pm } = prevMonth(stmtYear, stmtMonth);
     const prev = readIndex()[makeId(py, pm)];
@@ -345,6 +330,12 @@ export default function ImportStatementWizard({
       ((prev.cachedTx?.length ?? 0) > 0 || (prev.pagesRaw?.length ?? 0) > 0)
     );
   }, [stmtYear, stmtMonth]);
+
+  // Persistent rules + per-session overrides
+  const [polarityRules, setPolarityRules] = React.useState<PolarityRule[]>([]);
+  const [polarityOverrides, setPolarityOverrides] = React.useState<
+    Record<string, "deposit" | "withdrawal">
+  >({});
 
   // Step 2
   const [pages, setPages] = React.useState<string[]>([]);
@@ -358,6 +349,7 @@ export default function ImportStatementWizard({
   >([]);
   const [parseErr, setParseErr] = React.useState<string | null>(null);
 
+  // Cards on statement
   const uniqueCards = React.useMemo(() => {
     const s = new Set<string>();
     for (const t of txs) {
@@ -369,23 +361,6 @@ export default function ImportStatementWizard({
 
   const needsUserConfirmation = uniqueCards.length > 0;
 
-  const headerSteps = React.useMemo(
-    () =>
-      needsUserConfirmation
-        ? [
-            { n: 1 as const, label: "Statement Info" },
-            { n: 2 as const, label: "Paste Pages" },
-            { n: 3 as const, label: "Parse & Verify" },
-            { n: 4 as const, label: "Users" },
-          ]
-        : [
-            { n: 1 as const, label: "Statement Info" },
-            { n: 2 as const, label: "Paste Pages" },
-            { n: 3 as const, label: "Parse & Verify" },
-          ],
-    [needsUserConfirmation]
-  );
-
   // Reset on open + load rules
   React.useEffect(() => {
     if (!open) return;
@@ -396,7 +371,6 @@ export default function ImportStatementWizard({
     setTxs([]);
     setParseErr(null);
     setPolarityOverrides({});
-    setDebugCompare(null);
     try {
       setPolarityRules(readPolarityRules(scopedKey));
     } catch {
@@ -405,6 +379,19 @@ export default function ImportStatementWizard({
   }, [open, scopedKey]);
 
   /* ---------- derived ---------- */
+
+  // Step 1: Ending balance should be calculated from *user inputs*
+  const step1Ending = React.useMemo(
+    () =>
+      +(
+        (inputs.beginningBalance || 0) +
+        (inputs.totalDeposits || 0) -
+        (inputs.totalWithdrawals || 0)
+      ).toFixed(2),
+    [inputs]
+  );
+
+  // Step 3: derived from parsed txs (used in the Parse step tiles)
   const deposits = React.useMemo(
     () => txs.filter((t) => (t.amount ?? 0) > 0),
     [txs]
@@ -572,46 +559,7 @@ export default function ImportStatementWizard({
 
       const sanitized = base.map((p) => normalizePageText(p));
 
-      // ---- DEBUG BASELINE: run raw parser directly to emit events + capture baseline rows ----
-      const allLines = sanitized.flatMap((p) => p.split(/\r?\n/));
-      const baseline = parseWithProfile(profile, allLines);
-
-      // helper sums + keys for compare
-      const sumPos = (rows: any[]) =>
-        +rows
-          .filter((r) => (r.amount ?? 0) > 0)
-          .reduce((s, r) => s + (r.amount ?? 0), 0)
-          .toFixed(2);
-      const sumNegAbs = (rows: any[]) =>
-        +rows
-          .filter((r) => (r.amount ?? 0) < 0)
-          .reduce((s, r) => s + Math.abs(r.amount ?? 0), 0)
-          .toFixed(2);
-
-      const keyOf = (t: any) => {
-        const d = (t.date || "").trim();
-        const a = Math.abs(+(t.amount ?? 0));
-        const desc = (t.description || "")
-          .slice(0, 40)
-          .replace(/\s+/g, " ")
-          .trim()
-          .toUpperCase();
-        return `${d}|${a.toFixed(2)}|${desc}`;
-      };
-      const byDateAmt = (arr: any[]) => {
-        const m = new Map<string, any[]>();
-        for (const t of arr) {
-          const key = `${(t.date || "").trim()}|${Math.abs(+t.amount).toFixed(
-            2
-          )}`;
-          if (!m.has(key)) m.set(key, []);
-          m.get(key)!.push(t);
-        }
-        return m;
-      };
-      // ---- END DEBUG BASELINE ----
-
-      // Pipeline: rebuild → category rules → polarity rules → session overrides
+      // Pipeline: rebuild → category rules → (safe) polarity rules → session overrides
       const res = rebuildFromPages(sanitized, stmtYear, applyAlias);
       const rules = readCatRules();
       const withRules = applyCategoryRulesTo(rules, res.txs, applyAlias);
@@ -628,14 +576,31 @@ export default function ImportStatementWizard({
           merchant: (t as any).merchant || undefined,
           mcc: (t as any).mcc || undefined,
         }),
+        // normalize last-4 to digits or undefined
         cardLast4: last4OrNull(t.cardLast4) ?? undefined,
       }));
 
-      // 1) Apply PERSISTENT polarity rules
-      const persistedApplied = applyPolarityRulesTo(polarityRules, cleaned);
+      // 1) Apply PERSISTENT polarity rules, but bail out if they would flip too many rows.
+      let rows = cleaned;
+      try {
+        const beforeSigns = cleaned.map((t) => ((t.amount ?? 0) >= 0 ? 1 : -1));
+        const applied = applyPolarityRulesTo(polarityRules, cleaned);
+        const afterSigns = applied.map((t) => ((t.amount ?? 0) >= 0 ? 1 : -1));
 
-      // 2) Apply per-row session overrides
-      const withOverrides = persistedApplied.map((t) => {
+        const flips = beforeSigns.reduce(
+          (n, s, i) => n + (s !== afterSigns[i] ? 1 : 0),
+          0
+        );
+        const tooManyFlips =
+          flips > Math.max(10, Math.floor(cleaned.length * 0.5));
+        rows = tooManyFlips ? cleaned : applied;
+      } catch {
+        // if anything goes sideways, keep cleaned rows
+        rows = cleaned;
+      }
+
+      // 2) Apply per-row session overrides (explicit user actions only)
+      rows = rows.map((t) => {
         const key = t.id ?? `${t.date}|${t.amount}|${t.description}`;
         const ov = polarityOverrides[key];
         if (!ov) return t;
@@ -646,85 +611,7 @@ export default function ImportStatementWizard({
         return t;
       });
 
-      /* ---------- REPAIR PASS (bridges rebuildFromPages bugs) ---------- */
-      function repairTx(t: any) {
-        let date = (t.date || "").trim();
-        let desc = (t.description || "").trim();
-
-        // If date missing, try to extract from the start of the description
-        if (!date) {
-          const tok = findFirstDateToken(desc);
-          if (tok) {
-            date = tok;
-            desc = stripOnce(desc, tok);
-          }
-        }
-
-        // Reconstruct a raw line and re-pick amount like the baseline parser would
-        const line = `${date ? date + " " : ""}${desc}`
-          .replace(/\s+/g, " ")
-          .trim();
-        const tokens = moneyTokens(line);
-        const picked = pickAmount(tokens, line);
-
-        // If we found a reliable amount, adopt it and strip it from desc
-        if (!Number.isNaN(picked.amount)) {
-          const newDesc = stripOnce(desc, picked.raw);
-          return {
-            ...t,
-            date,
-            description: newDesc,
-            amount: picked.amount,
-          };
-        }
-
-        return { ...t, date, description: desc };
-      }
-
-      const repaired = withOverrides.map(repairTx);
-      /* ---------- END REPAIR PASS ---------- */
-
-      // ---- DEBUG COMPARE: baseline vs repaired ----
-      try {
-        const baselineKeys = new Map(baseline.map((t) => [keyOf(t), t]));
-        const finalKeys = new Map(repaired.map((t) => [keyOf(t), t]));
-
-        const missing: any[] = [];
-        for (const [k, t] of baselineKeys)
-          if (!finalKeys.has(k)) missing.push(t);
-
-        const extra: any[] = [];
-        for (const [k, t] of finalKeys) if (!baselineKeys.has(k)) extra.push(t);
-
-        const baseBy = byDateAmt(baseline);
-        const finalBy = byDateAmt(repaired);
-        const signFlips: any[] = [];
-        for (const [k, baseList] of baseBy) {
-          const finals = finalBy.get(k) || [];
-          for (const b of baseList) {
-            for (const f of finals) {
-              if ((b.amount ?? 0) * (f.amount ?? 0) < 0) {
-                signFlips.push({ baseline: b, final: f });
-              }
-            }
-          }
-        }
-
-        setDebugCompare({
-          baselineDeposits: sumPos(baseline),
-          baselineWithdrawals: sumNegAbs(baseline),
-          finalDeposits: sumPos(repaired),
-          finalWithdrawals: sumNegAbs(repaired),
-          missing,
-          extra,
-          signFlips,
-        });
-      } catch {
-        // ignore compare errors
-      }
-      // ---- END DEBUG COMPARE ----
-
-      setTxs(repaired);
+      setTxs(rows);
     } catch (e: any) {
       setParseErr(e?.message || "Failed to parse pages.");
     } finally {
@@ -827,6 +714,19 @@ export default function ImportStatementWizard({
 
   if (!open) return null;
 
+  const headerSteps = needsUserConfirmation
+    ? [
+        { n: 1 as const, label: "Statement Info" },
+        { n: 2 as const, label: "Paste Pages" },
+        { n: 3 as const, label: "Parse & Verify" },
+        { n: 4 as const, label: "Users" },
+      ]
+    : [
+        { n: 1 as const, label: "Statement Info" },
+        { n: 2 as const, label: "Paste Pages" },
+        { n: 3 as const, label: "Parse & Verify" },
+      ];
+
   return (
     <div
       className="fixed inset-0 z-50 grid place-items-center"
@@ -844,27 +744,14 @@ export default function ImportStatementWizard({
         {/* header */}
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-sm">
-            {[
-              ...(needsUserConfirmation
-                ? [
-                    { n: 1 as const, label: "Statement Info" },
-                    { n: 2 as const, label: "Paste Pages" },
-                    { n: 3 as const, label: "Parse & Verify" },
-                    { n: 4 as const, label: "Users" },
-                  ]
-                : [
-                    { n: 1 as const, label: "Statement Info" },
-                    { n: 2 as const, label: "Paste Pages" },
-                    { n: 3 as const, label: "Parse & Verify" },
-                  ]),
-            ].map((s) => (
+            {headerSteps.map((s) => (
               <div key={s.n} className="flex items-center gap-2">
                 <div
                   className={[
                     "w-6 h-6 rounded-full grid place-items-center border",
-                    step === (s.n as any)
+                    step === s.n
                       ? "bg-cyan-500 text-slate-900 border-cyan-400"
-                      : step > (s.n as any)
+                      : step > s.n
                       ? "bg-emerald-500 text-white border-emerald-400"
                       : "bg-slate-800 border-slate-700 text-slate-300",
                   ].join(" ")}
@@ -872,13 +759,11 @@ export default function ImportStatementWizard({
                   {s.n}
                 </div>
                 <div
-                  className={
-                    step === (s.n as any) ? "font-semibold" : "text-slate-300"
-                  }
+                  className={step === s.n ? "font-semibold" : "text-slate-300"}
                 >
                   {s.label}
                 </div>
-                {s.n !== (needsUserConfirmation ? 4 : 3) && (
+                {s.n !== headerSteps[headerSteps.length - 1].n && (
                   <div className="w-8 h-px bg-slate-700" />
                 )}
               </div>
@@ -950,7 +835,7 @@ export default function ImportStatementWizard({
                 />
               </div>
 
-              {/* Contextual helper column */}
+              {/* helper */}
               <div className="flex flex-wrap gap-2">
                 {hasPrev && (
                   <ToolbarButton
@@ -1000,7 +885,7 @@ export default function ImportStatementWizard({
                 />
               </div>
 
-              {/* Ending Balance (calculated) */}
+              {/* Ending Balance (calculated from USER INPUTS) */}
               <div className="rounded-2xl border border-slate-700 bg-slate-900 p-3">
                 <div className="text-xs text-slate-400">
                   Ending Balance (calculated)
@@ -1035,7 +920,6 @@ export default function ImportStatementWizard({
             <p className="text-sm text-slate-300">
               Paste <strong>one page at a time</strong>, then click{" "}
               <em>{editingIndex === null ? "Add page" : "Save changes"}</em>.
-              Repeat for each page.
             </p>
 
             <textarea
@@ -1190,11 +1074,7 @@ export default function ImportStatementWizard({
                     endDelta === 0 ? "text-emerald-400" : "text-rose-400"
                   }`}
                 >
-                  {money(
-                    (inputs.beginningBalance ?? 0) +
-                      parsedDeposits -
-                      parsedWithdrawals
-                  )}
+                  {money(endingBalance)}
                 </div>
                 <div className="text-xs text-slate-400 mt-1">
                   User:{" "}
@@ -1207,135 +1087,6 @@ export default function ImportStatementWizard({
                 </div>
               </div>
             </div>
-
-            {/* DEBUG: baseline vs final (repaired) compare 
-            {debugCompare && (
-              <div className="rounded-2xl border border-slate-700 bg-slate-900 p-3 text-xs mt-2">
-                <div className="text-slate-200 font-semibold mb-2">
-                  Parser vs Pipeline (debug)
-                </div>
-                <div className="grid md:grid-cols-2 gap-3 mb-2">
-                  <div className="rounded-xl border border-slate-700 p-2">
-                    <div className="text-slate-400">Baseline (raw parser)</div>
-                    <div>
-                      Deposits:{" "}
-                      <span className="font-mono">
-                        {money(debugCompare.baselineDeposits)}
-                      </span>
-                    </div>
-                    <div>
-                      Withdrawals:{" "}
-                      <span className="font-mono">
-                        {money(debugCompare.baselineWithdrawals)}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="rounded-xl border border-slate-700 p-2">
-                    <div className="text-slate-400">
-                      Final (after rebuild + rules + repair)
-                    </div>
-                    <div>
-                      Deposits:{" "}
-                      <span className="font-mono">
-                        {money(debugCompare.finalDeposits)}
-                      </span>
-                    </div>
-                    <div>
-                      Withdrawals:{" "}
-                      <span className="font-mono">
-                        {money(debugCompare.finalWithdrawals)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <details className="mb-2">
-                  <summary className="cursor-pointer text-slate-300">
-                    Missing from final ({debugCompare.missing.length})
-                  </summary>
-                  <div className="mt-2 grid gap-1">
-                    {debugCompare.missing.slice(0, 50).map((t, i) => (
-                      <div
-                        key={i}
-                        className="rounded border border-slate-800 p-2"
-                      >
-                        <div>
-                          <b>{t.date}</b> —{" "}
-                          <span className="font-mono">{money(t.amount)}</span>
-                        </div>
-                        <div className="text-slate-300">{t.description}</div>
-                      </div>
-                    ))}
-                  </div>
-                </details>
-
-                <details className="mb-2">
-                  <summary className="cursor-pointer text-slate-300">
-                    Extra in final ({debugCompare.extra.length})
-                  </summary>
-                  <div className="mt-2 grid gap-1">
-                    {debugCompare.extra.slice(0, 50).map((t, i) => (
-                      <div
-                        key={i}
-                        className="rounded border border-slate-800 p-2"
-                      >
-                        <div>
-                          <b>{t.date}</b> —{" "}
-                          <span className="font-mono">{money(t.amount)}</span>
-                        </div>
-                        <div className="text-slate-300">{t.description}</div>
-                      </div>
-                    ))}
-                  </div>
-                </details>
-
-                <details>
-                  <summary className="cursor-pointer text-slate-300">
-                    Sign flips ({debugCompare.signFlips.length})
-                  </summary>
-                  <div className="mt-2 grid gap-1">
-                    {debugCompare.signFlips.slice(0, 50).map((p, i) => (
-                      <div
-                        key={i}
-                        className="rounded border border-slate-800 p-2"
-                      >
-                        <div className="mb-1">
-                          <b>{p.baseline.date}</b> —{" "}
-                          <span className="font-mono">
-                            {money(Math.abs(p.baseline.amount))}
-                          </span>
-                        </div>
-                        <div className="text-slate-300">
-                          Baseline: {p.baseline.description}{" "}
-                          <span className="font-mono">
-                            {p.baseline.amount > 0 ? "➕" : "➖"}
-                          </span>
-                        </div>
-                        <div className="text-slate-300">
-                          Final: {p.final.description}{" "}
-                          <span className="font-mono">
-                            {p.final.amount > 0 ? "➕" : "➖"}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              </div>
-            )}
-           
-            <details className="mt-2 text-xs text-slate-300">
-              <summary className="cursor-pointer text-slate-400 hover:text-slate-200">
-                Debug: import events ({debugEvents.length})
-              </summary>
-              <div className="mt-2 max-h-48 overflow-auto rounded border border-slate-700 p-2 bg-slate-900">
-                {debugEvents.slice(-100).map((e, idx) => (
-                  <pre key={idx} className="whitespace-pre-wrap break-words">
-                    {JSON.stringify(e, null, 2)}
-                  </pre>
-                ))}
-              </div>
-            </details>*/}
 
             {/* Assistance */}
             {!(depDelta === 0 && wdrDelta === 0) && (
@@ -1492,7 +1243,7 @@ export default function ImportStatementWizard({
             <div className="flex justify-between">
               <ToolbarButton onClick={() => setStep(2)}>← Back</ToolbarButton>
               <div className="flex gap-2">
-                <ToolbarButton onClick={runParsing} disabled={busy}>
+                <ToolbarButton onClick={() => runParsing()} disabled={busy}>
                   {busy ? "Parsing…" : "Re-run parsing"}
                 </ToolbarButton>
                 <ToolbarButton onClick={useParsedTotals}>

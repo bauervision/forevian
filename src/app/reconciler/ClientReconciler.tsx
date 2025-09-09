@@ -45,8 +45,57 @@ import CategorySelect from "@/components/CategorySelect";
 import { resolveAliasNameToCategory } from "@/lib/categories/aliases";
 import { catToSlug } from "@/lib/slug";
 import { AnimatePresence, motion } from "framer-motion";
+import { writeSummary, type Summary } from "@/lib/summaries";
+
+// *** CANON ***
+import { normalizeToCanonical } from "@/lib/categories/normalization";
+import { ensureCategoryRulesSeededOnce } from "@/lib/categoryRules/seed";
 
 /* --- tiny UI bits --- */
+
+// NEW: Build a compact monthly Summary from current tx + inputs
+function summarizeMonth(
+  monthId: string,
+  txs: TxRow[],
+  inputs: {
+    beginningBalance?: number;
+    totalDeposits?: number;
+    totalWithdrawals?: number;
+  }
+): Summary {
+  const deposits = txs.filter((t) => (t.amount ?? 0) > 0);
+  const withdrawals = txs.filter((t) => (t.amount ?? 0) < 0);
+
+  const depositsTotal = +deposits
+    .reduce((s, r) => s + (r.amount ?? 0), 0)
+    .toFixed(2);
+  const withdrawalsAbs = +withdrawals
+    .reduce((s, r) => s + Math.abs(r.amount ?? 0), 0)
+    .toFixed(2);
+
+  // Prefer live-calculated totals; fall back to inputs if needed
+  const d = depositsTotal || +(inputs.totalDeposits ?? 0);
+  const w = withdrawalsAbs || +(inputs.totalWithdrawals ?? 0);
+
+  const begin = +(inputs.beginningBalance ?? 0);
+  const endingBalance = +(begin + d - w).toFixed(2);
+
+  // Spend by category (withdrawals only)
+  const spendByCategory: Record<string, number> = {};
+  for (const t of withdrawals) {
+    const label = (t.categoryOverride ?? t.category ?? "Uncategorized").trim();
+    const amt = Math.abs(t.amount ?? 0);
+    spendByCategory[label] = +((spendByCategory[label] ?? 0) + amt).toFixed(2);
+  }
+
+  return {
+    monthId,
+    currency: "USD",
+    totals: { deposits: d, withdrawals: w, endingBalance },
+    spendByCategory,
+    source: "reconciled",
+  };
+}
 
 function Panel(props: React.HTMLAttributes<HTMLDivElement>) {
   const { className = "", ...rest } = props;
@@ -81,6 +130,66 @@ const fmtUSD = new Intl.NumberFormat("en-US", {
   currency: "USD",
 });
 const money = (n: number) => fmtUSD.format(n);
+
+// *** CANON *** helper: apply canonicalization everywhere we set/persist tx
+function withCanonicalCategories(txs: TxRow[], opts: { isDemo: boolean }) {
+  const { isDemo } = opts;
+  return txs.map((t) => ({
+    ...t,
+    category: normalizeToCanonical(t.category, {
+      isDemo,
+      description: t.description,
+      merchant: (t as any).merchant,
+      mcc: (t as any).mcc,
+    }),
+  }));
+}
+
+// Compute monthly totals from current tx list
+function computeParsedTotals(txs: TxRow[]) {
+  const dep = +txs
+    .filter((t) => (t.amount ?? 0) > 0)
+    .reduce((s, t) => s + (t.amount ?? 0), 0)
+    .toFixed(2);
+  const wdl = +txs
+    .filter((t) => (t.amount ?? 0) < 0)
+    .reduce((s, t) => s + Math.abs(t.amount ?? 0), 0)
+    .toFixed(2);
+  return { deposits: dep, withdrawals: wdl };
+}
+
+// If inputs look fresh/empty or drift wildly from parsed, coerce to parsed
+function maybeAutoFixInputs(
+  snap: StatementSnapshot,
+  txs: TxRow[],
+  onFixed: (next: StatementSnapshot) => void
+) {
+  const { deposits: depParsed, withdrawals: wdlParsed } =
+    computeParsedTotals(txs);
+  const depUser = +(snap.inputs?.totalDeposits ?? 0);
+  const wdlUser = +(snap.inputs?.totalWithdrawals ?? 0);
+
+  const looksFresh = depUser === 0 && wdlUser === 0;
+  const depDrift = depUser > 0 ? Math.abs(depUser - depParsed) / depUser : 1;
+  const wdlDrift = wdlUser > 0 ? Math.abs(wdlUser - wdlParsed) / wdlUser : 1;
+
+  // Heuristics: auto-fix if new/empty, or >40% drift (catches YTD/typo cases)
+  const shouldFix = looksFresh || depDrift > 0.4 || wdlDrift > 0.4;
+  if (!shouldFix) return;
+
+  const next: StatementSnapshot = {
+    ...snap,
+    inputs: {
+      ...(snap.inputs ?? {}),
+      totalDeposits: depParsed,
+      totalWithdrawals: wdlParsed,
+      // keep existing beginningBalance if present
+      beginningBalance: +(snap.inputs?.beginningBalance ?? 0),
+    },
+  };
+  upsertStatement(next);
+  onFixed(next);
+}
 
 /* ---------------- Safer merchant bulk-apply helpers ---------------- */
 
@@ -244,6 +353,7 @@ function DemoSeeder() {
   React.useLayoutEffect(() => {
     if (!pathname?.startsWith("/demo")) return;
 
+    ensureCategoryRulesSeededOnce();
     // DEMO default token rules so big brands aren't Uncategorized
     upsertCategoryRules(["tok:starbucks", "tok:sbux"], "Dining", "token");
 
@@ -278,9 +388,12 @@ function DemoSeeder() {
         const rules = readCatRules();
         const raw = Array.isArray(s.cachedTx) ? s.cachedTx : [];
         const withRules = applyCategoryRulesTo(rules, raw, applyAlias);
-        setTransactions(withRules);
+        const normalized = withCanonicalCategories(withRules, {
+          isDemo: true,
+        }); // *** CANON ***
+        setTransactions(normalized);
         try {
-          localStorage.setItem("reconciler.tx.v1", JSON.stringify(withRules));
+          localStorage.setItem("reconciler.tx.v1", JSON.stringify(normalized));
         } catch {}
 
         setInputs({
@@ -308,7 +421,10 @@ function DemoSeeder() {
         const withRules2 = Array.isArray(tx)
           ? applyCategoryRulesTo(rules2, tx, applyAlias)
           : [];
-        setTransactions(withRules2);
+        const normalized2 = withCanonicalCategories(withRules2, {
+          isDemo: true,
+        }); // *** CANON ***
+        setTransactions(normalized2);
         const inputs = JSON.parse(localStorage.getItem(LS_IN) || "{}");
         if (inputs && typeof inputs === "object") setInputs(inputs);
       } catch {}
@@ -356,7 +472,7 @@ const inputsFromStmt = (s?: StatementSnapshot) => ({
 });
 
 /** Recompute one statement with current rules (helper used during boot/switch) */
-function recomputeOneWithRules(s: StatementSnapshot) {
+function recomputeOneWithRules(s: StatementSnapshot, isDemo: boolean) {
   const rules = readCatRules();
   let txs = s.cachedTx ?? [];
   if ((!txs || !txs.length) && Array.isArray(s.pagesRaw) && s.pagesRaw.length) {
@@ -365,9 +481,10 @@ function recomputeOneWithRules(s: StatementSnapshot) {
     txs = res.txs;
   }
   const withRules = applyCategoryRulesTo(rules, txs, applyAlias);
+  const normalized = withCanonicalCategories(withRules, { isDemo }); // *** CANON ***
   const nextSnap: StatementSnapshot = {
     ...s,
-    cachedTx: withRules,
+    cachedTx: normalized,
     normalizerVersion: Math.max(NORMALIZER_VERSION, s.normalizerVersion ?? 0),
   };
   upsertStatement(nextSnap);
@@ -377,19 +494,20 @@ function recomputeOneWithRules(s: StatementSnapshot) {
 /** NEW: brute-force override across ALL statements that match merchant tokens */
 function bulkApplyOverrideAcrossAllStatements(
   anchorDesc: string,
-  label: string
+  label: string,
+  isDemo: boolean
 ) {
   const anchorTokens = merchantTokenSet(anchorDesc || "");
   if (!anchorTokens.size) return;
 
   const idx = readIndex();
-  const rules = readCatRules();
+  readCatRules(); // ensure rules loaded
 
   for (const id of Object.keys(idx)) {
     const s = idx[id];
 
-    // Start from rules-applied snapshot to stay in sync with current rules
-    const snap = recomputeOneWithRules(s);
+    // Start from rules-applied + canonicalized snapshot
+    const snap = recomputeOneWithRules(s, isDemo); // *** CANON inside ***
     const txs = Array.isArray(snap.cachedTx) ? snap.cachedTx : [];
 
     // Find candidates in this statement by token intersection
@@ -409,7 +527,7 @@ function bulkApplyOverrideAcrossAllStatements(
 
     const nextSnap: StatementSnapshot = {
       ...snap,
-      cachedTx: updated,
+      cachedTx: updated, // overrides don't change base cat, so no need to re-canon here
       normalizerVersion: Math.max(
         NORMALIZER_VERSION,
         snap.normalizerVersion ?? 0
@@ -427,6 +545,11 @@ export default function ReconcilerPage() {
 
   const pathname = usePathname();
   const isDemo = pathname?.startsWith("/demo") ?? false;
+
+  // NEW: seed baseline rules at bootstrap for non-demo as well
+  React.useEffect(() => {
+    ensureCategoryRulesSeededOnce();
+  }, []);
 
   const ensureCategoryExists = useEnsureCategoryExists();
 
@@ -446,23 +569,38 @@ export default function ReconcilerPage() {
   );
 
   async function ensureUpToDateParse(s: StatementSnapshot) {
+    // Already up to date → no work
     if ((s.normalizerVersion ?? 0) >= NORMALIZER_VERSION) return s;
+
+    // No raw pages → nothing to reparse
+    if (!Array.isArray(s.pagesRaw) || s.pagesRaw.length === 0) return s;
+
+    // SAFETY: If we already have cachedTx, don't auto-reparse a reconciled month
+    if (Array.isArray(s.cachedTx) && s.cachedTx.length > 0) return s;
 
     setHeaderBusy(true);
     try {
       const pagesSanitized = (s.pagesRaw || []).map(normalizePageText);
       const res = rebuildFromPages(pagesSanitized, s.stmtYear, applyAlias);
+
       const rules = readCatRules();
       const withRules = applyCategoryRulesTo(rules, res.txs, applyAlias);
+      const normalized = withCanonicalCategories(withRules, { isDemo }); // *** CANON ***
 
       const updated: StatementSnapshot = {
         ...s,
-        cachedTx: withRules,
+        cachedTx: normalized,
         normalizerVersion: NORMALIZER_VERSION,
       };
       upsertStatement(updated);
       setStatements(readIndex());
-      setTransactions(withRules);
+      setTransactions(normalized); // *** CANON ***
+
+      // Align inputs if the header scrape was YTD/garbage on fresh imports
+      maybeAutoFixInputs(updated, normalized, (next) =>
+        setInputs(inputsFromStmt(next))
+      );
+
       return updated;
     } finally {
       setHeaderBusy(false);
@@ -483,6 +621,39 @@ export default function ReconcilerPage() {
   const [currentId, setCurrentId] = React.useState<string>("");
 
   const [openWizard, setOpenWizard] = React.useState(false);
+
+  // debounce write to avoid spamming Firestore while user is editing
+  const writeTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const queueSummaryWrite = React.useCallback(() => {
+    if (!uid || isDemo || !currentId) return; // only for real users, not demo
+    if (!transactions?.length) return; // nothing to persist
+    const idx = readIndex();
+    if (!idx[currentId]) return; // safety
+
+    if (writeTimer.current) clearTimeout(writeTimer.current);
+
+    // helper
+    const pad2 = (n: number) => String(n).padStart(2, "0");
+    writeTimer.current = setTimeout(async () => {
+      try {
+        const idx = readIndex();
+        const snap = idx[currentId];
+        if (!snap) return;
+
+        const monthId = `${snap.stmtYear}-${pad2(snap.stmtMonth)}`; // <-- normalized key
+
+        const summary = summarizeMonth(monthId, transactions, inputs);
+        await writeSummary(uid, monthId, summary);
+      } catch (e) {
+        console.warn("writeSummary failed", e);
+      }
+    }, 600);
+  }, [uid, isDemo, currentId, transactions, inputs]);
+
+  React.useEffect(() => {
+    queueSummaryWrite();
+  }, [queueSummaryWrite]);
 
   const setStatementInUrl = React.useCallback(
     (nextId?: string) => {
@@ -567,14 +738,22 @@ export default function ReconcilerPage() {
 
     if (Array.isArray(cur?.cachedTx) && cur.cachedTx.length) {
       const rules = readCatRules();
-      const txWithRules = applyCategoryRulesTo(rules, cur.cachedTx, applyAlias);
-      setTransactions(txWithRules);
+      const withRules = applyCategoryRulesTo(rules, cur.cachedTx, applyAlias);
+      const normalized = withCanonicalCategories(withRules, { isDemo }); // *** CANON ***
+      setTransactions(normalized);
+      maybeAutoFixInputs(cur, normalized, (next) =>
+        setInputs(inputsFromStmt(next))
+      );
     } else if (Array.isArray(cur?.pagesRaw) && cur.pagesRaw.length) {
       const pagesSanitized = (cur.pagesRaw || []).map(normalizePageText);
       const res = rebuildFromPages(pagesSanitized, cur.stmtYear, applyAlias);
       const rules = readCatRules();
-      const txWithRules = applyCategoryRulesTo(rules, res.txs, applyAlias);
-      setTransactions(txWithRules);
+      const withRules = applyCategoryRulesTo(rules, res.txs, applyAlias);
+      const normalized = withCanonicalCategories(withRules, { isDemo }); // *** CANON ***
+      setTransactions(normalized);
+      maybeAutoFixInputs(cur, normalized, (next) =>
+        setInputs(inputsFromStmt(next))
+      );
       if (!isDemo) ensureUpToDateParse(cur);
     } else {
       setTransactions([]);
@@ -584,13 +763,6 @@ export default function ReconcilerPage() {
     bootstrapped.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, isDemo]);
-
-  useEffect(() => {
-    const next = selectedId ?? "";
-    if (!next || next === currentId) return;
-    onSwitchStatement(next);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId]);
 
   useEffect(() => {
     if (!currentId) return;
@@ -612,14 +784,16 @@ export default function ReconcilerPage() {
 
     if (cur?.cachedTx?.length) {
       const rules = readCatRules();
-      const txWithRules = applyCategoryRulesTo(rules, cur.cachedTx, applyAlias);
-      setTransactions(txWithRules);
+      const withRules = applyCategoryRulesTo(rules, cur.cachedTx, applyAlias);
+      const normalized = withCanonicalCategories(withRules, { isDemo }); // *** CANON ***
+      setTransactions(normalized);
     } else if (cur?.pagesRaw?.length) {
       const pagesSanitized = (cur.pagesRaw || []).map(normalizePageText);
       const res = rebuildFromPages(pagesSanitized, cur.stmtYear, applyAlias);
       const rules = readCatRules();
-      const txWithRules = applyCategoryRulesTo(rules, res.txs, applyAlias);
-      setTransactions(txWithRules);
+      const withRules = applyCategoryRulesTo(rules, res.txs, applyAlias);
+      const normalized = withCanonicalCategories(withRules, { isDemo }); // *** CANON ***
+      setTransactions(normalized);
       if (!isDemo) ensureUpToDateParse(cur);
     } else {
       setTransactions([]);
@@ -650,14 +824,19 @@ export default function ReconcilerPage() {
 
     if (s?.cachedTx?.length) {
       const rules = readCatRules();
-      const txWithRules = applyCategoryRulesTo(rules, s.cachedTx, applyAlias);
-      setTransactions(txWithRules);
+      const withRules = applyCategoryRulesTo(rules, s.cachedTx, applyAlias);
+      const normalized = withCanonicalCategories(withRules, { isDemo }); // *** CANON ***
+      setTransactions(normalized);
     } else if (s?.pagesRaw?.length) {
       const pagesSanitized = (s.pagesRaw || []).map(normalizePageText);
       const res = rebuildFromPages(pagesSanitized, s.stmtYear, applyAlias);
       const rules = readCatRules();
       const withRules = applyCategoryRulesTo(rules, res.txs, applyAlias);
-      setTransactions(withRules);
+      const normalized = withCanonicalCategories(withRules, { isDemo }); // *** CANON ***
+      setTransactions(normalized);
+      maybeAutoFixInputs(s, normalized, (next) =>
+        setInputs(inputsFromStmt(next))
+      );
       ensureUpToDateParse(s);
     } else {
       setTransactions([]);
@@ -678,8 +857,9 @@ export default function ReconcilerPage() {
 
     if (s?.cachedTx?.length) {
       const rules = readCatRules();
-      const txWithRules = applyCategoryRulesTo(rules, s.cachedTx, applyAlias);
-      setTransactions(txWithRules);
+      const withRules = applyCategoryRulesTo(rules, s.cachedTx, applyAlias);
+      const normalized = withCanonicalCategories(withRules, { isDemo }); // *** CANON ***
+      setTransactions(normalized);
     } else if (s?.pagesRaw?.length) {
       const pagesSanitized = (s.pagesRaw || []).map(normalizePageText);
       const res = rebuildFromPages(
@@ -689,9 +869,14 @@ export default function ReconcilerPage() {
       );
       const rules = readCatRules();
       const withRules = applyCategoryRulesTo(rules, res.txs, applyAlias);
-      setTransactions(withRules);
+      const normalized = withCanonicalCategories(withRules, { isDemo }); // *** CANON ***
+      setTransactions(normalized);
+      maybeAutoFixInputs(s, normalized, (next) =>
+        setInputs(inputsFromStmt(next))
+      );
     } else {
       setTransactions([]);
+      queueSummaryWrite();
       if (!isDemo) setOpenWizard(true);
     }
   }
@@ -861,6 +1046,10 @@ export default function ReconcilerPage() {
                                   transactions,
                                   applyAlias
                                 );
+                                // *** CANON ***
+                                updated = withCanonicalCategories(updated, {
+                                  isDemo,
+                                });
 
                                 // Apply explicit override for this clicked row in the view
                                 updated = updated.map((r) =>
@@ -940,7 +1129,8 @@ export default function ReconcilerPage() {
                                 // Also stamp overrides across ALL statements for this merchant
                                 bulkApplyOverrideAcrossAllStatements(
                                   t.description || "",
-                                  label
+                                  label,
+                                  isDemo
                                 );
 
                                 if (changedIds.size) {

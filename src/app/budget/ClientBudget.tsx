@@ -16,6 +16,10 @@ import { useCategories } from "@/app/providers/CategoriesProvider";
 import { usePathname } from "next/navigation";
 import DemoBudgetTips from "@/components/DemoBudgetTips";
 import CategorySelect from "@/components/CategorySelect";
+import { useAuthUID } from "@/lib/fx";
+import { useSelectedStatementId } from "@/lib/useClientSearchParams";
+import { useSummaryForMonth } from "@/lib/hooks/useSummaryForMonth";
+// top imports
 
 /* ------------------------------------------------------------------ */
 /* Types & utils                                                      */
@@ -343,16 +347,36 @@ function looksLikeGroceries(desc?: string) {
 /* ------------------------------------------------------------------ */
 
 export default function ClientBudgetPage() {
-  const { label: stmtLabel, rows } = useLatestIssuedWithData();
-
+  const {
+    label: stmtLabel,
+    rows,
+    month: stmtMonth,
+    year: stmtYear,
+  } = useLatestIssuedWithData();
+  const uid = useAuthUID();
+  const pad2 = (n: number) => String(n).padStart(2, "0");
   // Which month are we showing? 0 = this month, 1 = next month
   const [viewOffset, setViewOffset] = React.useState<0 | 1>(0);
+  // If we know the statement month, use that. Otherwise, fall back to the visible month (This/Next month).
+  const explicitMonthId = React.useMemo(
+    () => (stmtYear && stmtMonth ? `${stmtYear}-${pad2(stmtMonth)}` : null),
+    [stmtYear, stmtMonth]
+  );
 
-  // Utility: get first day of the "view" month
   const viewFirst = React.useMemo(() => {
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth() + viewOffset, 1);
   }, [viewOffset]);
+
+  const fallbackMonthId = React.useMemo(
+    () => `${viewFirst.getFullYear()}-${pad2(viewFirst.getMonth() + 1)}`,
+    [viewFirst]
+  );
+
+  const monthId = explicitMonthId ?? fallbackMonthId;
+
+  const { summary, loading: summaryLoading } = useSummaryForMonth(uid, monthId);
+  const isSnapshot = !!summary;
 
   // Convenience flags
   const isForecast = viewOffset === 1;
@@ -405,8 +429,10 @@ export default function ClientBudgetPage() {
   );
 
   const totalIncome = React.useMemo(
-    () => +deposits.reduce((s, r) => s + (r.amount ?? 0), 0).toFixed(2),
-    [deposits]
+    () =>
+      summary?.totals?.deposits ??
+      +deposits.reduce((s, r) => s + (r.amount ?? 0), 0).toFixed(2),
+    [summary, deposits]
   );
 
   /* ---------- Local include/exclude overrides for bill calendar ---------- */
@@ -429,6 +455,27 @@ export default function ClientBudgetPage() {
 
   /* -------------------- Bills (from withdrawals) -------------------- */
   const bills = React.useMemo(() => {
+    // Prefer Firestore snapshot (already sanitized/aggregated)
+    if (summary?.billCalendar?.length) {
+      const list = summary.billCalendar
+        .filter((b) => typeof b?.day === "number" && b.day >= 1 && b.day <= 31)
+        .map((b) => ({
+          id: `snap-${monthId}-${b.day}-${(b.name || "")
+            .toLowerCase()
+            .replace(/\s+/g, "-")
+            .slice(0, 40)}`,
+          dateStr: undefined,
+          day: b.day,
+          description: b.name || "Bill",
+          category: "Bill",
+          amountAbs: Math.abs(Number(b.amount ?? 0)),
+        }))
+        .sort((a, b) => (a.day ?? 99) - (b.day ?? 99));
+
+      return list;
+    }
+
+    // Fallback: your original inference from local withdrawals
     const list = withdrawals
       .map((w) => {
         const cat = (
@@ -477,7 +524,7 @@ export default function ClientBudgetPage() {
       }
     }
     return Array.from(m.values()).sort((a, b) => (a.day ?? 99) - (b.day ?? 99));
-  }, [withdrawals, billOverrides]);
+  }, [summary, monthId, withdrawals, billOverrides]);
 
   const totalBills = React.useMemo(
     () => +bills.reduce((s, b) => s + b.amountAbs, 0).toFixed(2),
@@ -848,7 +895,11 @@ export default function ClientBudgetPage() {
             </button>
           </div>
 
-          {rows.length > 0 ? (
+          {isSnapshot ? (
+            <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
+              Snapshot (from Firestore): {summary?.monthId}
+            </span>
+          ) : rows.length > 0 ? (
             <span className="text-xs px-2 py-1 rounded-full border border-slate-700 bg-slate-900 text-slate-300">
               Based on statement: {stmtLabel}
             </span>
@@ -857,6 +908,7 @@ export default function ClientBudgetPage() {
               No statement data found yet
             </span>
           )}
+
           <div className="ml-auto text-sm text-slate-300">
             Savings & investing are monthly targets; allocation across pay
             periods is weighted by leftover cash after bills.
