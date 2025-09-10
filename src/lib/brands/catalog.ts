@@ -229,9 +229,10 @@ export const BRAND_MAP: Record<string, string[]> = {
   ],
 
   "Transfer: Savings": [
-    "online scheduled transfer",
-    "auto transfer",
-    "transfer to savings",
+    "online transfer",
+    "online xfer",
+    "internal transfer",
+    "xfer to savings",
   ],
 
   "Transfer: Investing": [
@@ -342,8 +343,7 @@ export const BRAND_MAP: Record<string, string[]> = {
     // rideshare / travel services
     "uber",
     "lyft",
-    "tsaprecheck",
-    "clear",
+    "tsa precheck",
   ],
 };
 

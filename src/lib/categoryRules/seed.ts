@@ -2,7 +2,7 @@ import { upsertCategoryRules, readCatRules } from "@/lib/categoryRules";
 import { BRAND_MAP } from "@/lib/brands/catalog";
 import { CANON_NAMES } from "@/lib/categories/canon";
 
-const SEED_VERSION = "catrules-seed-v9-2025-09-10";
+const SEED_VERSION = "catrules-seed-v10-2025-09-10";
 
 export function ensureCategoryRulesSeededOnce() {
   if (typeof window === "undefined") return;

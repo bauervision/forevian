@@ -299,28 +299,35 @@ function nearlyEqual(a: number, b: number, cents = 0.01) {
 function autoInferCategory(desc: string, amount: number): string | undefined {
   const d = (desc || "").toLowerCase();
 
-  // cash back on deposits is fine (withdrawals are handled via embedded-amount logic)
   if (/\bcash\s*back\b/.test(d) && amount >= 0) return "Cash Back";
 
-  // First pass: explicit servicers/brands
+  // Pass 1: all non-Debt vendor buckets via BRAND_MAP
   for (const [cat, terms] of Object.entries(BRAND_MAP)) {
-    if (cat === "Cash Back" || cat === "Uncategorized") continue;
-    // Guard Debt: don’t match on generic bank names alone
-    if (cat === "Debt") continue; // handle below with stronger gating
+    if (cat === "Cash Back" || cat === "Uncategorized" || cat === "Debt")
+      continue;
     if (terms.some((t) => d.includes(t))) return canonicalizeCategoryName(cat);
   }
 
-  // Debt (gated): require BOTH a known bank/servicer AND loan/payment context
-  const hasDebtServicer =
-    /\b(navient|nelnet|aidvantage|mohela|great lakes|sallie mae|sofi|lendingclub|upstart|marcus|prosper|best egg|one\s*main|cardmember services|auto finance)\b/.test(
-      d
-    ) ||
-    /\b(chase|capital one|truist)\b.*\b(auto finance|loan|card payment|payment|pmt|installment)\b/.test(
+  // Debt (gated): require servicer OR bank+loan context
+  const hasServicer =
+    /\b(navient|nelnet|aidvantage|mohela|great lakes|sallie mae|cardmember services|auto finance|lendingclub|upstart|marcus|prosper|best egg|one\s*main)\b/.test(
       d
     );
-  if (hasDebtServicer) return "Debt";
+  const bankWithLoan =
+    /\b(chase|capital one|truist)\b/.test(d) &&
+    /\b(loan|auto finance|card payment|installment|instalment|student loan|personal loan)\b/.test(
+      d
+    );
+  if (hasServicer || bankWithLoan) return "Debt";
 
-  // Generic helpers (kept conservative)
+  // Transfers -> Savings
+  if (
+    /\bonline\s+(?:transfer|xfer)\b/.test(d) ||
+    /\binternal\s+transfer\b/.test(d)
+  )
+    return "Transfer: Savings";
+
+  // Generic P2P → leave neutral
   if (/\b(zelle|venmo|paypal)\b/.test(d)) return "Uncategorized";
 
   return undefined;
@@ -334,18 +341,18 @@ export function applyCategoryRulesTo<T extends TxLike>(
 ): T[] {
   if (!rules.length) return rows;
 
-  // 1) Build quick lookups
+  // 1) Phrase rules (str:) — highest priority vendor/brand hits
+  const phraseRules = rules
+    .filter((r) => r.key.startsWith("str:"))
+    .map((r) => ({ term: r.key.slice(4).toLowerCase(), category: r.category }))
+    .filter((pr) => pr.term.length >= 2);
+
+  // 2) alias/tok map follow after phrases
   const map = new Map(
     rules
       .filter((r) => r.key.startsWith("alias:") || r.key.startsWith("tok:"))
       .map((r) => [r.key, r.category])
   );
-
-  // 2) Phrase rules (str:) – small list, so linear scan is fine
-  const phraseRules = rules
-    .filter((r) => r.key.startsWith("str:"))
-    .map((r) => ({ term: r.key.slice(4).toLowerCase(), category: r.category }))
-    .filter((pr) => pr.term.length >= 2);
 
   // helpers
   const normDesc = (s: string) =>
@@ -371,8 +378,15 @@ export function applyCategoryRulesTo<T extends TxLike>(
 
     let cat: string | undefined;
 
-    // 3) alias/tok map match using candidateKeys
-    {
+    // A) phrase rules first
+    if (!cat && phraseRules.length) {
+      const nd = normDesc(desc);
+      const hit = phraseRules.find((pr) => nd.includes(pr.term));
+      if (hit) cat = hit.category;
+    }
+
+    // B) alias/tok rules next
+    if (!cat) {
       const alias = aliasFn ? aliasFn(stripAuthAndCard(desc)) : null;
       const keys = candidateKeys(desc, alias);
       for (const k of keys) {
@@ -386,14 +400,7 @@ export function applyCategoryRulesTo<T extends TxLike>(
       }
     }
 
-    // 4) phrase rules (str:) – includes() on normalized desc
-    if (!cat && phraseRules.length) {
-      const nd = normDesc(desc);
-      const hit = phraseRules.find((pr) => nd.includes(pr.term));
-      if (hit) cat = hit.category;
-    }
-
-    // 5) auto-infer fallback (catalog + safeguards)
+    // C) auto-infer last
     if (!cat && amt !== 0) {
       const auto = autoInferCategory(desc, amt);
       if (auto) cat = auto;
