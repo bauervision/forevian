@@ -1,5 +1,11 @@
 // /lib/categoryRules.ts
+import { BRAND_MAP } from "./brands/catalog";
+import { inferCategoryFromBrands } from "./brands/matcher";
+import { canonicalizeCategoryName } from "./categories/canon";
 import { stripAuthAndCard } from "./txEnrich";
+
+if (typeof window !== "undefined")
+  (window as any).__FOREVIAN_RULES_VER__ = "rules-2025-09-10i";
 
 const LS = "reconciler.catRules.v1";
 
@@ -142,7 +148,7 @@ const STOP = new Set([
 ]);
 
 // Reward-like categories we should NEVER apply to expenses (negatives)
-const REWARD_CATS = new Set(["cash back", "cashback", "rewards", "points"]);
+const REWARD_CATS = new Set(["cashback", "rewards", "points"]);
 
 // Generic, too-broad unigrams we won't keep as rules
 const BAD_UNIGRAMS = new Set([
@@ -276,6 +282,50 @@ export type TxLike = {
   categoryOverride?: string;
 };
 
+function cashBackEmbeddedAmount(desc: string): number | null {
+  // e.g. "with Cash Back $ 20.00 ...", "cash back $20"
+  const m = String(desc || "")
+    .toLowerCase()
+    .match(/\bcash\s*back\b.*?\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})?)/i);
+  if (!m) return null;
+  const n = Number((m[1] || "").replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+function nearlyEqual(a: number, b: number, cents = 0.01) {
+  return Math.abs(a - b) <= cents;
+}
+
+// ---------- Minimal auto-categorizer (only used if no rule matches) ----------
+function autoInferCategory(desc: string, amount: number): string | undefined {
+  const d = (desc || "").toLowerCase();
+
+  // cash back on deposits is fine (withdrawals are handled via embedded-amount logic)
+  if (/\bcash\s*back\b/.test(d) && amount >= 0) return "Cash Back";
+
+  // First pass: explicit servicers/brands
+  for (const [cat, terms] of Object.entries(BRAND_MAP)) {
+    if (cat === "Cash Back" || cat === "Uncategorized") continue;
+    // Guard Debt: don’t match on generic bank names alone
+    if (cat === "Debt") continue; // handle below with stronger gating
+    if (terms.some((t) => d.includes(t))) return canonicalizeCategoryName(cat);
+  }
+
+  // Debt (gated): require BOTH a known bank/servicer AND loan/payment context
+  const hasDebtServicer =
+    /\b(navient|nelnet|aidvantage|mohela|great lakes|sallie mae|sofi|lendingclub|upstart|marcus|prosper|best egg|one\s*main|cardmember services|auto finance)\b/.test(
+      d
+    ) ||
+    /\b(chase|capital one|truist)\b.*\b(auto finance|loan|card payment|payment|pmt|installment)\b/.test(
+      d
+    );
+  if (hasDebtServicer) return "Debt";
+
+  // Generic helpers (kept conservative)
+  if (/\b(zelle|venmo|paypal)\b/.test(d)) return "Uncategorized";
+
+  return undefined;
+}
+
 // Preserve row shape (e.g., Transaction) using a generic:
 export function applyCategoryRulesTo<T extends TxLike>(
   rules: CategoryRule[],
@@ -283,75 +333,80 @@ export function applyCategoryRulesTo<T extends TxLike>(
   aliasFn?: (s: string) => string | null
 ): T[] {
   if (!rules.length) return rows;
-  const map = new Map(rules.map((r) => [r.key, r.category]));
+
+  // 1) Build quick lookups
+  const map = new Map(
+    rules
+      .filter((r) => r.key.startsWith("alias:") || r.key.startsWith("tok:"))
+      .map((r) => [r.key, r.category])
+  );
+
+  // 2) Phrase rules (str:) – small list, so linear scan is fine
+  const phraseRules = rules
+    .filter((r) => r.key.startsWith("str:"))
+    .map((r) => ({ term: r.key.slice(4).toLowerCase(), category: r.category }))
+    .filter((pr) => pr.term.length >= 2);
+
+  // helpers
+  const normDesc = (s: string) =>
+    stripAuthAndCard(String(s || "")).toLowerCase();
 
   return rows.map((r) => {
-    const alias = aliasFn ? aliasFn(stripAuthAndCard(r.description)) : null;
-    const keys = candidateKeys(r.description, alias);
+    const amt = r.amount ?? 0;
+    const desc = r.description || "";
+
+    // --- Cash Back precedence (keep your working logic here) ---
+    const embedded = cashBackEmbeddedAmount(desc);
+    if (embedded != null && Math.abs(amt) - embedded <= 0.01) {
+      // force this row to Cash Back regardless of other rules
+      return {
+        ...r,
+        category: "Cash Back",
+        categoryOverride: r.categoryOverride ?? "Cash Back",
+      } as T;
+    }
+
+    // --- Respect explicit override if present ---
+    if (r.categoryOverride && r.categoryOverride.trim()) return r;
 
     let cat: string | undefined;
-    for (const k of keys) {
-      const hit = map.get(k);
-      if (!hit) continue;
 
-      // ⛔ Don't assign reward-like categories to withdrawals
-      if ((r.amount ?? 0) < 0 && REWARD_CATS.has(hit.trim().toLowerCase())) {
-        continue; // try next key
+    // 3) alias/tok map match using candidateKeys
+    {
+      const alias = aliasFn ? aliasFn(stripAuthAndCard(desc)) : null;
+      const keys = candidateKeys(desc, alias);
+      for (const k of keys) {
+        const hit = map.get(k);
+        if (!hit) continue;
+        // block points-ish on negatives, but allow Cash Back
+        if (amt < 0 && /^(cashback|rewards|points)$/i.test(hit.trim()))
+          continue;
+        cat = hit;
+        break;
       }
-
-      cat = hit;
-      break;
     }
 
-    if (cat && r.amount !== 0) {
-      if (r.categoryOverride && r.categoryOverride.trim()) return r;
-      return { ...r, category: cat } as T;
+    // 4) phrase rules (str:) – includes() on normalized desc
+    if (!cat && phraseRules.length) {
+      const nd = normDesc(desc);
+      const hit = phraseRules.find((pr) => nd.includes(pr.term));
+      if (hit) cat = hit.category;
     }
-    return r;
+
+    // 5) auto-infer fallback (catalog + safeguards)
+    if (!cat && amt !== 0) {
+      const auto = autoInferCategory(desc, amt);
+      if (auto) cat = auto;
+    }
+
+    return cat ? ({ ...r, category: cat } as T) : r;
   });
 }
 
+// /lib/categoryRules.ts
+
 function normalizeCategoryTarget(name: string): string {
-  const s = (name || "").trim();
-
-  // direct canonical names pass through
-  const canon = new Set([
-    "Fast Food",
-    "Dining",
-    "Groceries",
-    "Fuel",
-    "Home/Utilities",
-    "Insurance",
-    "Entertainment",
-    "Shopping",
-    "Amazon",
-    "Income/Payroll",
-    "Transfer: Savings",
-    "Transfer: Investing",
-    "Rent/Mortgage",
-    "Debt",
-    "Impulse/Misc",
-    "Doctors",
-    "Memberships",
-    "Subscriptions",
-    "Cash Back",
-    "Uncategorized",
-  ]);
-  if (canon.has(s)) return s;
-
-  // common drift → canonical
-  const low = s.toLowerCase();
-  if (low === "utilities" || low === "home utilities" || low === "utility")
-    return "Home/Utilities";
-  if (low === "gas") return "Fuel";
-  if (low === "housing" || low === "mortgage" || low === "rent")
-    return "Rent/Mortgage";
-  if (low === "amazon marketplace" || low === "amazon.com") return "Amazon";
-  if (low === "income" || low === "payroll") return "Income/Payroll";
-  if (low === "transfers" || low === "transfer") return "Uncategorized"; // users will mark Savings/Investing explicitly
-
-  // vendor-y or off-list labels fall back to Uncategorized instead of polluting the category set
-  return "Uncategorized";
+  return canonicalizeCategoryName(name);
 }
 
 export function upsertCategoryRules(

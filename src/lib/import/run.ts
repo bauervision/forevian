@@ -12,7 +12,7 @@ export type ParsedTx = {
 
 /* ---------------- helpers ---------------- */
 
-const IMPORT_DEBUG = false; // set true to stream debug events to the browser
+const IMPORT_DEBUG = true; // set true to stream debug events to the browser
 
 // Emit browser CustomEvents for debug (wizard listens to "forevian-import-debug")
 function emitDebug(type: string, data: any) {

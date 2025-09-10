@@ -50,8 +50,14 @@ import { writeSummary, type Summary } from "@/lib/summaries";
 // *** CANON ***
 import { normalizeToCanonical } from "@/lib/categories/normalization";
 import { ensureCategoryRulesSeededOnce } from "@/lib/categoryRules/seed";
+import {
+  CANON_BY_NAME,
+  canonicalizeCategoryName,
+} from "@/lib/categories/canon";
 
 /* --- tiny UI bits --- */
+if (typeof window !== "undefined")
+  (window as any).__FOREVIAN_RECON_VER__ = "recon-2025-09-10a";
 
 // NEW: Build a compact monthly Summary from current tx + inputs
 function summarizeMonth(
@@ -443,23 +449,56 @@ export function useEnsureCategoryExists() {
 
   return React.useCallback(
     (label: string) => {
-      const existing = resolveAliasNameToCategory(label, categories);
-      if (existing) return;
+      const chosen = canonicalizeCategoryName(label);
+      const canon = CANON_BY_NAME[chosen];
 
+      // If it's one of our canonical categories, ensure that exact one exists
+      if (canon) {
+        const exists =
+          categories.some((c) => c.name === canon.name) ||
+          categories.some((c) => c.slug === canon.slug);
+        if (!exists) {
+          setAll([
+            ...categories,
+            {
+              id:
+                crypto.randomUUID?.() ??
+                `cat-${Math.random().toString(36).slice(2)}`,
+              name: canon.name,
+              icon: canon.icon,
+              color: canon.color,
+              hint: canon.hint,
+              slug: canon.slug,
+            },
+          ]);
+        }
+        return;
+      }
+
+      // Otherwise this is a truly custom category — add once
       const name = (label || "").trim();
       if (!name) return;
 
-      const newCat = {
-        id:
-          crypto.randomUUID?.() ?? `cat-${Math.random().toString(36).slice(2)}`,
-        name,
-        icon: "🗂️",
-        color: "#475569",
-        hint: "",
-        slug: catToSlug(name),
-      };
+      const slug = catToSlug(name);
+      const existsCustom =
+        categories.some((c) => c.name.toLowerCase() === name.toLowerCase()) ||
+        categories.some((c) => c.slug === slug);
 
-      setAll([...categories, newCat]);
+      if (!existsCustom) {
+        setAll([
+          ...categories,
+          {
+            id:
+              crypto.randomUUID?.() ??
+              `cat-${Math.random().toString(36).slice(2)}`,
+            name,
+            icon: "🗂️",
+            color: "#475569",
+            hint: "",
+            slug,
+          },
+        ]);
+      }
     },
     [categories, setAll]
   );

@@ -1,6 +1,9 @@
 // /lib/aliases.ts
 import { stripAuthAndCard } from "./txEnrich";
 
+if (typeof window !== "undefined")
+  (window as any).__FOREVIAN_ALIASES_VER__ = "aliases-2025-09-10a";
+
 export type AliasRule = {
   id: string; // stable id
   pattern: string; // what to match (lowercased)
