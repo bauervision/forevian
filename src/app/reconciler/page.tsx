@@ -1,6 +1,5 @@
-// app/reconciler/page.tsx
 import { Suspense } from "react";
-import ClientReconcilerPage from "./ClientReconciler";
+import ClientShell from "./ClientShell";
 
 export default function Page() {
   return (
@@ -11,7 +10,7 @@ export default function Page() {
         </div>
       }
     >
-      <ClientReconcilerPage />
+      <ClientShell />
     </Suspense>
   );
 }

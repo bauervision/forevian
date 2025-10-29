@@ -13,29 +13,36 @@ import {
 import { useAuth } from "@/app/providers/AuthProvider";
 import { NAV_LINKS } from "@/lib/nav";
 
+const isDemoNav = (l: { href: string }) => l.href === "/demo";
+
 /* Helper: active link style */
 function NavLink({
   href,
   children,
   onClick,
   active,
+  subdued,
   className = "",
 }: {
   href: string;
   children: React.ReactNode;
   onClick?: () => void;
   active?: boolean;
+  subdued?: boolean;
   className?: string;
 }) {
+  const base = "px-3 py-1.5 rounded-md transition-colors";
+  const activeCls = "bg-cyan-500 text-gray-900"; // Forevian cyan instead of white
+  const normalCls = "text-white/90 hover:bg-white/10";
+  const subduedCls = "text-white/60 hover:bg-white/5 border border-white/10";
+
   return (
     <Link
       href={href}
       onClick={onClick}
       className={[
-        "px-3 py-1.5 rounded-md transition-colors",
-        active
-          ? "bg-cyan-500/20 text-cyan-200 border border-cyan-500/30 shadow-[0_0_12px_rgba(34,211,238,0.25)]"
-          : "text-white/90 hover:bg-white/10",
+        base,
+        active ? activeCls : subdued ? subduedCls : normalCls,
         className,
       ].join(" ")}
     >
@@ -80,27 +87,25 @@ export default function Navbar() {
 
   // Resolve which links to show based on auth (non-demo)
   const visibleLinks = React.useMemo(() => {
-    if (isDemo) return [];
-    const base = NAV_LINKS.filter((l) => (l.requiresAuth ? !!user : true));
-    const pinOrder = ["/dashboard", "/dashboard/category"];
-    return [...base].sort((a, b) => {
-      const ai = pinOrder.indexOf(a.href);
-      const bi = pinOrder.indexOf(b.href);
-      const av = ai === -1 ? 999 : ai;
-      const bv = bi === -1 ? 999 : bi;
-      return av - bv || a.href.localeCompare(b.href);
-    });
+    if (isDemo) return []; // demo page uses DEMO_LINKS block
+    // keep order from NAV_LINKS; filter by requiresAuth if you use that flag
+    return NAV_LINKS.filter((l: any) => (l.requiresAuth ? !!user : true));
   }, [isDemo, user]);
 
-  const isActive = (href: string) => {
-    if (!pathname) return false;
-    const exacts = ["/dashboard", "/demo/dashboard"];
-    if (exacts.includes(href)) {
-      return pathname === href || pathname === href + "/";
+  // Reorder Demo dynamically: first if logged out, last if logged in (and subdued)
+  const orderedLinks = React.useMemo(() => {
+    const next = [...visibleLinks];
+    const i = next.findIndex(isDemoNav);
+    if (i >= 0) {
+      const [demo] = next.splice(i, 1);
+      if (user) next.push(demo);
+      else next.unshift(demo);
     }
-    // for deeper pages, allow child routes to highlight their own link
-    return pathname === href || pathname.startsWith(href + "/");
-  };
+    return next;
+  }, [visibleLinks, user]);
+
+  const isActive = (href: string) =>
+    href === "/" ? pathname === "/" : pathname?.startsWith(href);
 
   return (
     <>
@@ -132,8 +137,13 @@ export default function Navbar() {
             {/* Desktop nav */}
             <div className="hidden md:flex items-center gap-1">
               {!isDemo &&
-                visibleLinks.map(({ href, label }) => (
-                  <NavLink key={href} href={href} active={isActive(href)}>
+                orderedLinks.map(({ href, label }) => (
+                  <NavLink
+                    key={href}
+                    href={href}
+                    active={isActive(href)}
+                    subdued={!!user && isDemoNav({ href })} // make Demo subdued when authed
+                  >
                     {label}
                   </NavLink>
                 ))}
@@ -265,7 +275,7 @@ export default function Navbar() {
                 </>
               ) : (
                 <>
-                  {visibleLinks.map(({ href, label }) => (
+                  {orderedLinks.map(({ href, label }) => (
                     <NavLink
                       key={href}
                       href={href}
