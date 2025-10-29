@@ -29,6 +29,17 @@ import { catToSlug } from "@/lib/slug";
 import { iconForCategory } from "@/lib/icons";
 import { User, User2, HelpCircle } from "lucide-react";
 
+import {
+  isBurnEligibleBase,
+  computePeriodDays,
+  readBurnExclusions,
+  txKey,
+  readBurnExcludedCats,
+  isBurnEligibleWithCats,
+  readBurnTargetDaily,
+  classifyBurn,
+} from "@/lib/burn-utils"; // adjust path if inlined
+
 /* ---------------------------- helpers & hooks ---------------------------- */
 
 function useIsDemo() {
@@ -158,8 +169,6 @@ function buildRowsForYTD(id: string) {
   }
   return applyCategoryRulesTo(rules, rows, applyAlias);
 }
-
-/* --------------------------------- page ---------------------------------- */
 
 export default function ClientDashboard() {
   useSyncSelectedStatement();
@@ -293,6 +302,60 @@ export default function ClientDashboard() {
     [viewRows, inputs, period]
   );
 
+  // find current statement meta for days calc
+  const viewMeta = React.useMemo(() => {
+    if (!effectiveId) return undefined;
+    return readIndex()[effectiveId];
+  }, [effectiveId]);
+
+  const periodDays = React.useMemo(() => {
+    if (!viewMeta) return 30;
+    return computePeriodDays(viewMeta.stmtYear, viewMeta.stmtMonth, period);
+  }, [viewMeta, period]);
+
+  const incomePerDay = React.useMemo(() => {
+    // Household income/day from computeTotals (already respects CURRENT/YTD scope)
+    return periodDays ? (totals.income ?? 0) / periodDays : 0;
+  }, [totals.income, periodDays]);
+
+  // Helper used below
+  const whoForRow = React.useCallback(
+    (r: any): string => {
+      const explicit = (r.user || "").trim();
+      if (explicit) return explicit;
+      const last4 = typeof r.cardLast4 === "string" ? r.cardLast4 : undefined;
+      if (last4 && CARD_TO_SPENDER[last4]) return CARD_TO_SPENDER[last4];
+      return "Unknown"; // keep aligned with spender pages
+    },
+    [CARD_TO_SPENDER]
+  );
+
+  // Burn totals per spender, honoring local exclusions
+  const burnBySpender = React.useMemo(() => {
+    const map: Record<string, number> = {};
+    const catCache = new Map<string, Set<string>>();
+    const txCache = new Map<string, Set<string>>();
+
+    for (const r of viewRows) {
+      if (r.amount >= 0) continue;
+      const who = whoForRow(r);
+
+      if (!catCache.has(who))
+        catCache.set(who, readBurnExcludedCats(who, effectiveId || "", period));
+      if (!txCache.has(who))
+        txCache.set(who, readBurnExclusions(who, effectiveId || "", period));
+
+      const cats = catCache.get(who)!;
+      const txs = txCache.get(who)!;
+
+      if (!isBurnEligibleWithCats(r, cats)) continue;
+      if (txs.has(txKey(r))) continue;
+
+      map[who] = (map[who] ?? 0) + Math.abs(r.amount);
+    }
+    return map;
+  }, [viewRows, whoForRow, effectiveId, period]);
+
   return (
     <ProtectedRoute>
       <div className="mx-auto max-w-6xl p-4 sm:p-6 space-y-6">
@@ -401,6 +464,17 @@ export default function ClientDashboard() {
                               <div className="text-lg sm:text-xl font-semibold">
                                 {money(amt)}
                               </div>
+
+                              {/* Daily burn */}
+                              {periodDays > 0 && (
+                                <BurnBadge
+                                  who={who}
+                                  burnPerDay={
+                                    (burnBySpender[who] ?? 0) / periodDays
+                                  }
+                                  incomePerDay={incomePerDay}
+                                />
+                              )}
                             </div>
                           </div>
                         </div>
@@ -484,6 +558,62 @@ function KpiCard({
       <div className="text-sm text-slate-300">{label}</div>
       <div className="text-xl sm:text-2xl font-semibold mt-0.5">{value}</div>
       {hint && <div className="text-xs text-slate-300/80 mt-1">{hint}</div>}
+    </div>
+  );
+}
+
+function burnGlowClass(band: "ok" | "warn" | "hot") {
+  if (band === "ok")
+    return "bg-emerald-900/30 border-emerald-500 ring-1 ring-emerald-400/40 shadow-[0_0_32px_rgba(16,185,129,0.25)]";
+  if (band === "warn")
+    return "bg-amber-900/30 border-amber-500 ring-1 ring-amber-400/40 shadow-[0_0_40px_rgba(245,158,11,0.28)]";
+  return "bg-rose-900/30 border-rose-500 ring-1 ring-rose-400/50 shadow-[0_0_52px_rgba(244,63,94,0.35)]";
+}
+
+function BurnBadge({
+  who,
+  burnPerDay,
+  incomePerDay,
+}: {
+  who: string;
+  burnPerDay: number;
+  incomePerDay: number;
+}) {
+  const customTarget = readBurnTargetDaily(who);
+  const band = classifyBurn(burnPerDay, incomePerDay, customTarget);
+  const money = (n: number) =>
+    new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+    }).format(n);
+
+  return (
+    <div
+      className={[
+        "mt-2 rounded-xl border px-3 py-2",
+        "inline-flex items-center gap-2",
+        "transition-shadow duration-200",
+        burnGlowClass(band),
+      ].join(" ")}
+      title={
+        customTarget
+          ? `Daily Burn vs your target (${money(customTarget)}/day)`
+          : `Daily Burn vs 30% of income/day`
+      }
+    >
+      <span className="text-xs uppercase tracking-wide opacity-80">Burn</span>
+      <span className="font-semibold">{money(burnPerDay)}/day</span>
+      <span
+        className={
+          band === "ok"
+            ? "text-emerald-300 text-xs"
+            : band === "warn"
+            ? "text-amber-300 text-xs"
+            : "text-rose-300 text-xs"
+        }
+      >
+        {band === "ok" ? "OK" : band === "warn" ? "Medium" : "High"}
+      </span>
     </div>
   );
 }

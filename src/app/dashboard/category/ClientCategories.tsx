@@ -41,6 +41,40 @@ import {
   Pencil,
 } from "lucide-react";
 
+import { prettyDesc } from "@/lib/txEnrich";
+
+/* ---------- export helpers (category grouping + loose date parse) ---------- */
+
+type Tx = {
+  id?: string;
+  date?: string;
+  description?: string;
+  amount: number;
+  category?: string;
+  categoryOverride?: string;
+  user?: string;
+  cardLast4?: string;
+};
+
+function parseDateLoose(s?: string): Date | null {
+  if (!s) return null;
+  const p = Date.parse(s);
+  if (!Number.isNaN(p)) return new Date(p);
+  const mdy = s.match(/(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?/);
+  if (mdy) {
+    const mm = +mdy[1],
+      dd = +mdy[2];
+    const yy = mdy[3] ? +mdy[3] : new Date().getFullYear();
+    const yyyy = yy < 100 ? 2000 + yy : yy;
+    return new Date(yyyy, mm - 1, dd, 12);
+  }
+  return null;
+}
+
+function catNameOf(r: Tx) {
+  return (r.categoryOverride ?? r.category ?? "Uncategorized").trim();
+}
+
 /* ---------------------------- helpers & hooks ---------------------------- */
 
 function useIsDemo() {
@@ -227,6 +261,12 @@ export default function ClientCategories() {
 
   // inputs for compute/consistency (some cards may use balances later)
   const { setInputs } = useReconcilerSelectors();
+
+  const [exportOpen, setExportOpen] = React.useState(false);
+
+  function doPrintSoon() {
+    requestAnimationFrame(() => setTimeout(() => window.print(), 50));
+  }
 
   // choose a valid id (most-recent WITH DATA)
   React.useEffect(() => {
@@ -437,6 +477,32 @@ export default function ClientCategories() {
                 YTD
               </button>
             </div>
+
+            <div className="relative">
+              <button
+                className="h-9 px-3 rounded-xl border border-slate-700 bg-slate-900 hover:bg-slate-800 text-sm"
+                onClick={() => {
+                  setExportOpen((v) => !v);
+                }}
+                aria-expanded={exportOpen}
+              >
+                Export as PDF
+              </button>
+
+              {exportOpen && (
+                <div className="absolute right-0 mt-2 w-56 rounded-xl border border-slate-700 bg-slate-900 shadow-lg z-10">
+                  <button
+                    className="w-full text-left px-3 py-2 hover:bg-slate-800 text-sm"
+                    onClick={() => {
+                      setExportOpen(false);
+                      doPrintSoon();
+                    }}
+                  >
+                    Export current view (statement/period)
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -513,6 +579,172 @@ export default function ClientCategories() {
       )}
 
       <DemoCategoriesTips />
+
+      {/* -------- Print Layout (only visible during print) -------- */}
+      <style jsx global>{`
+        @media print {
+          body {
+            background: #fff !important;
+          }
+          nav,
+          header,
+          footer,
+          .no-print,
+          .router-progress {
+            display: none !important;
+          }
+          .print-container {
+            display: block !important;
+            color: #000;
+          }
+          .print-page {
+            page-break-after: always;
+          }
+          a::after {
+            content: "" !important;
+          }
+          table {
+            border-collapse: collapse;
+            width: 100%;
+          }
+          th,
+          td {
+            border: 1px solid #999;
+            padding: 6px 8px;
+            font-size: 12px;
+          }
+          th {
+            background: #eee;
+          }
+          h1,
+          h2,
+          h3 {
+            margin: 0 0 8px;
+          }
+          .muted {
+            color: #444;
+          }
+          .tot {
+            font-weight: 600;
+          }
+        }
+        @media screen {
+          .print-container {
+            display: none;
+          }
+        }
+      `}</style>
+
+      {(() => {
+        // rows already reflect CURRENT or YTD for the selected statement
+        const allRows = viewRows as Tx[];
+
+        // expenses only
+        const expRows = allRows.filter((r) => r.amount < 0);
+
+        // bucket by category name (string)
+        const byCat = new Map<string, { total: number; items: Tx[] }>();
+        for (const r of expRows) {
+          const cat = catNameOf(r);
+          const g = byCat.get(cat) ?? { total: 0, items: [] };
+          const amt = Math.abs(r.amount);
+          g.total += amt;
+          g.items.push(r);
+          byCat.set(cat, g);
+        }
+
+        // sorted list of categories by total desc
+        const catList = Array.from(byCat.entries())
+          .map(([name, v]) => ({ name, total: v.total, items: v.items }))
+          .sort((a, b) => b.total - a.total);
+
+        // header text
+        const scope = viewMeta
+          ? period === "CURRENT"
+            ? viewMeta.label
+            : `YTD ${viewMeta.stmtYear}`
+          : period === "CURRENT"
+          ? "Current Statement"
+          : "YTD";
+
+        return (
+          <div className="print-container">
+            {/* Cover / summary page */}
+            <section className="print-page">
+              <h1>Expenses Report</h1>
+              <div className="muted" style={{ marginBottom: 12 }}>
+                Forevian Finance • {new Date().toLocaleDateString()}
+              </div>
+              <h2>{scope} • All Categories</h2>
+              <p className="tot" style={{ marginTop: 12 }}>
+                Grand Total: {money(grandTotal)}
+              </p>
+
+              <h3 style={{ marginTop: 16 }}>Category Totals</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th style={{ width: "60%" }}>Category</th>
+                    <th>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {catList.map((c) => (
+                    <tr key={c.name}>
+                      <td>{c.name}</td>
+                      <td style={{ textAlign: "right" }}>{money(c.total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+
+            {/* Per-category detail pages */}
+            {catList.map((c) => (
+              <section key={c.name} className="print-page">
+                <h2>{c.name}</h2>
+                <p className="tot" style={{ marginBottom: 8 }}>
+                  Total: {money(c.total)}
+                </p>
+                <table>
+                  <thead>
+                    <tr>
+                      <th style={{ width: 110 }}>Date</th>
+                      <th>Description</th>
+                      <th style={{ width: 110, textAlign: "right" }}>Amount</th>
+                      <th style={{ width: 90 }}>User</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {c.items
+                      .slice()
+                      .sort(
+                        (a, b) =>
+                          (parseDateLoose(a.date)?.getTime() ?? 0) -
+                          (parseDateLoose(b.date)?.getTime() ?? 0)
+                      )
+                      .map((r, i) => (
+                        <tr key={`${r.id || "row"}-${i}`}>
+                          <td>{r.date || ""}</td>
+                          <td>{prettyDesc(r.description || "")}</td>
+                          <td style={{ textAlign: "right" }}>
+                            {money(Math.abs(r.amount))}
+                          </td>
+                          <td>
+                            {(r.user || "").trim() ||
+                              (typeof r.cardLast4 === "string"
+                                ? r.cardLast4
+                                : "")}
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </section>
+            ))}
+          </div>
+        );
+      })()}
     </ProtectedRoute>
   );
 }

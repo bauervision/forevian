@@ -29,6 +29,76 @@ import DemoCategorySlugTips from "@/components/DemoCategorySlugTips";
 import { useSyncSelectedStatement } from "@/lib/useSyncSelectedStatement";
 import { normalizePageText } from "@/lib/textNormalizer";
 import { rebuildFromPages } from "@/lib/import/reconcile";
+import {
+  buildRowsForStatement,
+  buildRowsYTD,
+  prevStatementId,
+} from "@/lib/tx/normalizedRows";
+
+/* ---------- export helpers (grouping + loose date parse) ---------- */
+
+type Tx = {
+  id?: string;
+  date?: string;
+  description?: string;
+  amount: number;
+  category?: string;
+  categoryOverride?: string;
+  cardLast4?: string;
+  user?: string;
+};
+
+function parseDateLoose(s?: string): Date | null {
+  if (!s) return null;
+  const p = Date.parse(s);
+  if (!Number.isNaN(p)) return new Date(p);
+  const mdy = s.match(/(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?/);
+  if (mdy) {
+    const mm = +mdy[1],
+      dd = +mdy[2];
+    const yy = mdy[3] ? +mdy[3] : new Date().getFullYear();
+    const yyyy = yy < 100 ? 2000 + yy : yy;
+    return new Date(yyyy, mm - 1, dd, 12);
+  }
+  return null;
+}
+
+function categoryOf(r: Tx) {
+  return (r.categoryOverride ?? r.category ?? "Uncategorized").trim();
+}
+
+function groupByCategoryAndMerchant(
+  rows: Tx[],
+  resolveMerchant: (desc: string) => { label: string }
+) {
+  const byCat = new Map<
+    string,
+    { total: number; merchants: Map<string, { total: number; items: Tx[] }> }
+  >();
+  for (const r of rows) {
+    if (!(r.amount < 0)) continue; // expenses only
+    const cat = categoryOf(r);
+    const merch = resolveMerchant(r.description || "").label;
+    const g = byCat.get(cat) ?? { total: 0, merchants: new Map() };
+    const m = g.merchants.get(merch) ?? { total: 0, items: [] };
+    const amt = Math.abs(r.amount);
+    g.total += amt;
+    m.total += amt;
+    m.items.push(r);
+    g.merchants.set(merch, m);
+    byCat.set(cat, g);
+  }
+  // deterministic sort
+  return Array.from(byCat.entries())
+    .map(([cat, g]) => ({
+      cat,
+      total: g.total,
+      merchants: Array.from(g.merchants.entries())
+        .map(([label, v]) => ({ label, total: v.total, items: v.items }))
+        .sort((a, b) => b.total - a.total),
+    }))
+    .sort((a, b) => b.total - a.total);
+}
 
 /* ----------------------------- trends helpers ---------------------------- */
 
@@ -60,60 +130,6 @@ function pickBestStatementId(
   );
   const withData = sorted.filter(hasData);
   return withData[0]?.id || sorted[0]?.id || "";
-}
-
-/** Build rows for a specific statement id (uses cachedTx or rebuilds from pages). */
-function buildRowsForCurrent(id: string) {
-  const idx = readIndex();
-  const cur = idx[id];
-  if (!cur) return [] as any[];
-
-  let base: any[] = [];
-  if (Array.isArray(cur.cachedTx) && cur.cachedTx.length) {
-    base = cur.cachedTx;
-  } else if (Array.isArray(cur.pagesRaw) && cur.pagesRaw.length) {
-    const sanitized = cur.pagesRaw.map(normalizePageText);
-    const res = rebuildFromPages(sanitized, cur.stmtYear, applyAlias);
-    base = res.txs;
-  }
-
-  const rules = readCatRules();
-  return applyCategoryRulesTo(rules, base, applyAlias);
-}
-
-/** Build YTD rows up to the month of `id`. */
-function buildRowsForYTD(id: string) {
-  const idx = readIndex();
-  const cur = idx[id];
-  if (!cur) return [] as any[];
-  const rules = readCatRules();
-
-  const rows: any[] = [];
-  const sameYear = Object.values(idx).filter(
-    (s) => s && s.stmtYear === cur.stmtYear && s.stmtMonth <= cur.stmtMonth
-  );
-  for (const s of sameYear) {
-    let base: any[] = [];
-    if (Array.isArray(s.cachedTx) && s.cachedTx.length) base = s.cachedTx;
-    else if (Array.isArray(s.pagesRaw) && s.pagesRaw.length) {
-      const sanitized = s.pagesRaw.map(normalizePageText);
-      const res = rebuildFromPages(sanitized, s.stmtYear, applyAlias);
-      base = res.txs;
-    }
-    if (base.length) rows.push(...base);
-  }
-  return applyCategoryRulesTo(rules, rows, applyAlias);
-}
-
-function prevStatementId(currentId?: string | null) {
-  if (!currentId) return null;
-  const [y, m] = currentId.split("-").map(Number);
-  if (!y || !m) return null;
-  const pm = m === 1 ? 12 : m - 1;
-  const py = m === 1 ? y - 1 : y;
-  const cand = `${String(py).padStart(4, "0")}-${String(pm).padStart(2, "0")}`;
-  const idx = readIndex();
-  return idx[cand] ? cand : null;
 }
 
 function computeTrend(curr: number, prev: number) {
@@ -468,8 +484,8 @@ function CategoryInner({
   const scopedAllRows = React.useMemo(() => {
     if (!effectiveId) return [] as any[];
     return period === "YTD"
-      ? buildRowsForYTD(effectiveId)
-      : buildRowsForCurrent(effectiveId);
+      ? buildRowsYTD(effectiveId)
+      : buildRowsForStatement(effectiveId);
   }, [effectiveId, period]);
 
   // previous rows for MoM (same category scope)
@@ -477,7 +493,7 @@ function CategoryInner({
     if (period !== "CURRENT" || !effectiveId) return [] as any[];
     const prevId = prevStatementId(effectiveId);
     if (!prevId) return [] as any[];
-    return buildRowsForCurrent(prevId);
+    return buildRowsForStatement(prevId);
   }, [period, effectiveId]);
 
   // Pull meta for the header chip
@@ -579,7 +595,7 @@ function CategoryInner({
     if (hit?.name) return hit.name;
 
     const any = scopedAllRows.find(
-      (r) =>
+      (r: { categoryOverride: any; category: any }) =>
         catToSlug(
           (r.categoryOverride ?? r.category ?? "Uncategorized").trim()
         ) === slug
@@ -592,7 +608,12 @@ function CategoryInner({
 
   const catAccent = accentForCategory(catDisplay);
   const total = React.useMemo(
-    () => rows.reduce((s, r) => s + Math.abs(r.amount < 0 ? r.amount : 0), 0),
+    () =>
+      rows.reduce(
+        (s: number, r: { amount: number }) =>
+          s + Math.abs(r.amount < 0 ? r.amount : 0),
+        0
+      ),
     [rows]
   );
 
@@ -798,29 +819,43 @@ function CategoryInner({
             {rows.length === 0 && (
               <li className="py-3 text-sm text-slate-400">No transactions.</li>
             )}
-            {rows.map((r, i) => {
-              const explicit = (r.user || "").trim();
-              const last4 =
-                typeof r.cardLast4 === "string" ? r.cardLast4 : undefined;
-              const who =
-                explicit ||
-                (last4 ? CARD_TO_SPENDER[last4] : undefined) ||
-                "Joint";
-              return (
-                <li key={`${r.id || "row"}-${i}`} className="py-3">
-                  <div className="flex items-center justify-between">
-                    <div className="text-sm font-medium">
-                      {money(Math.abs(r.amount))}
+            {rows.map(
+              (
+                r: {
+                  user: any;
+                  cardLast4: any;
+                  id: any;
+                  amount: number;
+                  date: any;
+                  description: string;
+                },
+                i: any
+              ) => {
+                const explicit = (r.user || "").trim();
+                const last4 =
+                  typeof r.cardLast4 === "string" ? r.cardLast4 : undefined;
+                const who =
+                  explicit ||
+                  (last4 ? CARD_TO_SPENDER[last4] : undefined) ||
+                  "Joint";
+                return (
+                  <li key={`${r.id || "row"}-${i}`} className="py-3">
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm font-medium">
+                        {money(Math.abs(r.amount))}
+                      </div>
+                      <div className="text-xs text-slate-400">
+                        {r.date || ""}
+                      </div>
                     </div>
-                    <div className="text-xs text-slate-400">{r.date || ""}</div>
-                  </div>
-                  <div className="text-sm mt-0.5">
-                    {prettyDesc(r.description)}
-                  </div>
-                  <div className="text-xs text-slate-400 mt-0.5">{who}</div>
-                </li>
-              );
-            })}
+                    <div className="text-sm mt-0.5">
+                      {prettyDesc(r.description)}
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">{who}</div>
+                  </li>
+                );
+              }
+            )}
           </ul>
 
           {/* Desktop table */}
@@ -836,28 +871,42 @@ function CategoryInner({
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((r, i) => {
-                    const explicit = (r.user || "").trim();
-                    const last4 =
-                      typeof r.cardLast4 === "string" ? r.cardLast4 : undefined;
-                    const who =
-                      explicit ||
-                      (last4 ? CARD_TO_SPENDER[last4] : undefined) ||
-                      "Joint";
-                    return (
-                      <tr
-                        key={`${r.id || "row"}-${i}`}
-                        className="border-t border-slate-800"
-                      >
-                        <td className="p-2">{r.date || ""}</td>
-                        <td className="p-2">{prettyDesc(r.description)}</td>
-                        <td className="p-2">{who}</td>
-                        <td className="p-2 text-right">
-                          {money(Math.abs(r.amount))}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {rows.map(
+                    (
+                      r: {
+                        user: any;
+                        cardLast4: any;
+                        id: any;
+                        date: any;
+                        description: string;
+                        amount: number;
+                      },
+                      i: any
+                    ) => {
+                      const explicit = (r.user || "").trim();
+                      const last4 =
+                        typeof r.cardLast4 === "string"
+                          ? r.cardLast4
+                          : undefined;
+                      const who =
+                        explicit ||
+                        (last4 ? CARD_TO_SPENDER[last4] : undefined) ||
+                        "Joint";
+                      return (
+                        <tr
+                          key={`${r.id || "row"}-${i}`}
+                          className="border-t border-slate-800"
+                        >
+                          <td className="p-2">{r.date || ""}</td>
+                          <td className="p-2">{prettyDesc(r.description)}</td>
+                          <td className="p-2">{who}</td>
+                          <td className="p-2 text-right">
+                            {money(Math.abs(r.amount))}
+                          </td>
+                        </tr>
+                      );
+                    }
+                  )}
                 </tbody>
               </table>
             </div>

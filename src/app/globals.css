@@ -59,3 +59,53 @@ html {
     0.35
   ); /* slate/cyan tint that fades with the class removal */
 }
+
+/* Expenses PDF Skin */
+.expenses-pdf-skin {
+  --border: 1px solid rgba(17, 24, 39, 0.08);
+  background: #fff;
+  color: #0f172a;
+  font: 400 12px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+    Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+.expenses-pdf-skin .report-card {
+  border: var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.expenses-pdf-skin h1 {
+  font-size: 20px;
+  margin: 0 0 8px;
+}
+.expenses-pdf-skin h2 {
+  font-size: 14px;
+  margin: 16px 0 8px;
+  color: #334155;
+}
+
+.expenses-pdf-skin table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.expenses-pdf-skin th,
+.expenses-pdf-skin td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(17, 24, 39, 0.06);
+  vertical-align: top;
+  word-wrap: break-word;
+}
+.expenses-pdf-skin tfoot td {
+  border-top: 2px solid rgba(17, 24, 39, 0.25);
+  font-weight: 600;
+}
+
+/* Hide interactive bits on print (filters/buttons) */
+@media print {
+  .hide-on-print {
+    display: none !important;
+  }
+}

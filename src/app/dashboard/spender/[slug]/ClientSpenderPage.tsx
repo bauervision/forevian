@@ -35,6 +35,20 @@ import StatementSwitcher from "@/components/StatementSwitcher";
 import { normalizePageText } from "@/lib/textNormalizer";
 import { rebuildFromPages } from "@/lib/import/reconcile";
 
+import {
+  isBurnEligibleBase,
+  computePeriodDays,
+  readBurnExclusions,
+  writeBurnExclusions,
+  txKey,
+  catOf,
+  readBurnTargetDaily,
+  classifyBurn,
+  isBurnEligibleWithCats,
+} from "@/lib/burn-utils";
+import BurnRateDialog from "@/components/dashboard/BurnRateDialog";
+import { useBurnPrefs } from "@/lib/hooks/useBurnPrefs";
+
 /* ----------------------------- helpers ---------------------------------- */
 
 function useIsDemo() {
@@ -55,6 +69,7 @@ const normalizeSlugToSpender = (slug: string) => {
   if (v === "spouse") return "Spouse";
   if (v === "primary") return "Primary";
   if (v === "secondary") return "Secondary";
+  if (v === "unknown") return "Unknown";
   return "Joint";
 };
 
@@ -272,6 +287,8 @@ function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
   const [editOpen, setEditOpen] = React.useState(false);
   const [editSeed, setEditSeed] = React.useState<string>("");
 
+  const [burnOpen, setBurnOpen] = React.useState(false);
+
   const {
     version: brandVersion,
     detect,
@@ -327,10 +344,13 @@ function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
   const whoForRow = React.useCallback(
     (r: any): string => {
       const explicit = (r.user || "").trim();
-      if (explicit) return explicit;
+      if (explicit) return explicit; // honors "Mike", "Beth", "Joint", "Unknown", etc.
+
       const last4 = typeof r.cardLast4 === "string" ? r.cardLast4 : undefined;
       if (last4 && CARD_TO_SPENDER[last4]) return CARD_TO_SPENDER[last4];
-      return "Joint";
+
+      // If we still can't tell, treat as Unknown (matches Dashboard bucket)
+      return "Unknown";
     },
     [CARD_TO_SPENDER]
   );
@@ -433,16 +453,89 @@ function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
       .sort((a, b) => b.amt - a.amt);
   }, [rows, prevScopedRows, detect, logoFor, rules, brandVersion]);
 
-  const viewMeta = React.useMemo(() => {
-    if (!effectiveId) return undefined;
-    const idx = readIndex();
-    return idx[effectiveId];
-  }, [effectiveId]);
-
   const total = React.useMemo(
     () => rows.reduce((s, r) => s + Math.abs(r.amount < 0 ? r.amount : 0), 0),
     [rows]
   );
+
+  // for period days
+  const viewMeta = React.useMemo(
+    () => (effectiveId ? readIndex()[effectiveId] : undefined),
+    [effectiveId]
+  );
+
+  const periodDays = React.useMemo(
+    () =>
+      viewMeta
+        ? computePeriodDays(viewMeta.stmtYear, viewMeta.stmtMonth, period)
+        : 30,
+    [viewMeta, period]
+  );
+
+  // Exclusions persisted per (spender, statement, period)
+  const [excluded, setExcluded] = React.useState<Set<string>>(new Set());
+  React.useEffect(() => {
+    if (!effectiveId) return;
+    setExcluded(readBurnExclusions(spender, effectiveId, period));
+  }, [spender, effectiveId, period]);
+
+  const toggleExcluded = React.useCallback(
+    (k: string) => {
+      setExcluded((prev) => {
+        const next = new Set(prev);
+        if (next.has(k)) next.delete(k);
+        else next.add(k);
+        // persist
+        if (effectiveId)
+          writeBurnExclusions(spender, effectiveId, period, next);
+        return next;
+      });
+    },
+    [spender, effectiveId, period]
+  );
+
+  // prefs (category + tx)
+  const {
+    txSet: burnTxEx,
+    catSet: burnCatEx,
+    refresh,
+  } = useBurnPrefs(spender, effectiveId, period);
+
+  // candidate rows for this spender (we’ll filter with both cat + tx sets)
+  const burnCandidates = React.useMemo(() => rows, [rows]);
+
+  // final burn total honoring BOTH category and tx exclusions
+  const burnTotal = React.useMemo(() => {
+    let sum = 0;
+    for (const r of burnCandidates) {
+      // include only expenses
+      if (r.amount >= 0) continue;
+      // category eligibility (true-spend-like + user cat excludes)
+      if (!isBurnEligibleWithCats(r, burnCatEx)) continue;
+      // per-tx excludes
+      if (burnTxEx.has(txKey(r))) continue;
+      sum += Math.abs(r.amount);
+    }
+    return sum;
+  }, [burnCandidates, burnCatEx, burnTxEx]);
+
+  const burnRate = React.useMemo(
+    () => (periodDays ? burnTotal / periodDays : 0),
+    [burnTotal, periodDays]
+  );
+
+  const incomePerDay = React.useMemo(() => {
+    // For a user page, use household income/day for the same scope
+    const meta = viewMeta;
+    // You already have totals only on Dashboard; here we can re-sum credits:
+    const incomeTotal = scopedAllRows
+      .filter((r) => r.amount > 0)
+      .reduce((s, r) => s + r.amount, 0);
+    return periodDays ? incomeTotal / periodDays : 0;
+  }, [scopedAllRows, periodDays]);
+
+  const customTarget = readBurnTargetDaily(spender);
+  const band = classifyBurn(burnRate, incomePerDay, customTarget);
 
   const accent = spenderAccent(spender);
 
@@ -539,6 +632,52 @@ function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
               <ArrowLeft className="h-5 w-5 text-slate-300" />
               <span className="text-sm text-slate-300">Back to Dashboard</span>
             </Link>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setBurnOpen(true)}
+                className={[
+                  "inline-flex items-center gap-2 h-9 px-3 rounded-xl border",
+                  "transition-shadow duration-200",
+                  band === "ok"
+                    ? "bg-emerald-900/30 border-emerald-500 ring-1 ring-emerald-400/40 shadow-[0_0_32px_rgba(16,185,129,0.25)]"
+                    : band === "warn"
+                    ? "bg-amber-900/30 border-amber-500 ring-1 ring-amber-400/40 shadow-[0_0_40px_rgba(245,158,11,0.28)]"
+                    : "bg-rose-900/30 border-rose-500 ring-1 ring-rose-400/50 shadow-[0_0_52px_rgba(244,63,94,0.35)]",
+                ].join(" ")}
+                title={
+                  customTarget
+                    ? `Daily Burn vs your target (${new Intl.NumberFormat(
+                        "en-US",
+                        { style: "currency", currency: "USD" }
+                      ).format(customTarget)}/day)`
+                    : "Daily Burn vs 30% of income/day"
+                }
+              >
+                <span className="text-xs uppercase tracking-wide opacity-80">
+                  Daily Burn
+                </span>
+                <span className="font-semibold">
+                  {new Intl.NumberFormat("en-US", {
+                    style: "currency",
+                    currency: "USD",
+                  }).format(burnRate)}
+                  /day
+                </span>
+                <span
+                  className={
+                    band === "ok"
+                      ? "text-emerald-300 text-xs"
+                      : band === "warn"
+                      ? "text-amber-300 text-xs"
+                      : "text-rose-300 text-xs"
+                  }
+                >
+                  {band === "ok" ? "OK" : band === "warn" ? "Medium" : "High"}
+                </span>
+              </button>
+            </div>
 
             <div className="text-right">
               <div className="text-xs uppercase tracking-wide text-slate-400">
@@ -689,6 +828,16 @@ function SpenderInner({ slug, isDemo }: { slug: string; isDemo: boolean }) {
           open={editOpen}
           onClose={() => setEditOpen(false)}
           seedLabel={editSeed}
+        />
+        <BurnRateDialog
+          open={burnOpen}
+          onClose={() => setBurnOpen(false)}
+          spender={spender}
+          statementId={effectiveId}
+          period={period}
+          periodDays={periodDays}
+          candidateRows={burnCandidates}
+          onPrefsChanged={refresh}
         />
       </div>
     </ProtectedRoute>

@@ -31,9 +31,13 @@ function NavLink({
     <Link
       href={href}
       onClick={onClick}
-      className={`px-3 py-1.5 rounded-md transition-colors
-        ${active ? "bg-white text-gray-900" : "text-white/90 hover:bg-white/10"}
-        ${className}`}
+      className={[
+        "px-3 py-1.5 rounded-md transition-colors",
+        active
+          ? "bg-cyan-500/20 text-cyan-200 border border-cyan-500/30 shadow-[0_0_12px_rgba(34,211,238,0.25)]"
+          : "text-white/90 hover:bg-white/10",
+        className,
+      ].join(" ")}
     >
       {children}
     </Link>
@@ -75,20 +79,34 @@ export default function Navbar() {
   }, [pathname]);
 
   // Resolve which links to show based on auth (non-demo)
-  const visibleLinks = React.useMemo(
-    () =>
-      isDemo ? [] : NAV_LINKS.filter((l) => (l.requiresAuth ? !!user : true)),
-    [isDemo, user]
-  );
+  const visibleLinks = React.useMemo(() => {
+    if (isDemo) return [];
+    const base = NAV_LINKS.filter((l) => (l.requiresAuth ? !!user : true));
+    const pinOrder = ["/dashboard", "/dashboard/category"];
+    return [...base].sort((a, b) => {
+      const ai = pinOrder.indexOf(a.href);
+      const bi = pinOrder.indexOf(b.href);
+      const av = ai === -1 ? 999 : ai;
+      const bv = bi === -1 ? 999 : bi;
+      return av - bv || a.href.localeCompare(b.href);
+    });
+  }, [isDemo, user]);
 
-  const isActive = (href: string) =>
-    href === "/" ? pathname === "/" : pathname?.startsWith(href);
+  const isActive = (href: string) => {
+    if (!pathname) return false;
+    const exacts = ["/dashboard", "/demo/dashboard"];
+    if (exacts.includes(href)) {
+      return pathname === href || pathname === href + "/";
+    }
+    // for deeper pages, allow child routes to highlight their own link
+    return pathname === href || pathname.startsWith(href + "/");
+  };
 
   return (
     <>
       {/* Top bar */}
       <nav
-        className={`fixed top-0 left-0 right-0 z-40 transition-transform duration-200 ${
+        className={`fixed  top-0 left-0 right-0 z-40 transition-transform duration-200 ${
           hidden ? "-translate-y-full" : "translate-y-0"
         }`}
       >
@@ -108,7 +126,7 @@ export default function Navbar() {
               <span className="font-semibold tracking-tight text-white">
                 Forevian<span className="text-cyan-400"> Finance </span>
               </span>
-              <span className="text-xs text-cyan-900">v0.0.2</span>
+              <span className="text-xs text-cyan-900">v0.0.3</span>
             </Link>
 
             {/* Desktop nav */}

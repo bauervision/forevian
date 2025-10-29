@@ -17,6 +17,7 @@ export function generateStaticParams() {
     "beth",
     "husband",
     "wife",
+    "unknown",
   ];
   return SPENDERS.map((slug) => ({ slug }));
 }
