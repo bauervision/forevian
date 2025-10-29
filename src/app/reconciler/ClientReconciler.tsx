@@ -2,12 +2,14 @@
 "use client";
 
 import React from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { AnimatePresence, motion } from "framer-motion";
 
 import ProtectedRoute from "@/components/ProtectedRoute";
 import StatementSwitcher from "@/components/StatementSwitcher";
 import ImportStatementWizard from "@/components/ImportPagesDialog";
 import CategorySelect from "@/components/CategorySelect";
+import WipeStatementDialog from "@/components/reconciler/WipeStatementDialog";
 
 import { useReconcilerSelectors } from "@/app/providers/ReconcilerProvider";
 import { useCategories } from "@/app/providers/CategoriesProvider";
@@ -17,11 +19,9 @@ import {
   readIndex,
   readCurrentId,
   writeCurrentId,
-  emptyStatement,
   upsertStatement,
   type StatementSnapshot,
 } from "@/lib/statements";
-
 import { normalizePageText, NORMALIZER_VERSION } from "@/lib/textNormalizer";
 import { rebuildFromPages } from "@/lib/import/reconcile";
 import {
@@ -43,9 +43,8 @@ import { buildDisambiguatorPhrases } from "@/helpers/reconciler/disambiguators";
 import { bulkApplyOverrideAcrossAllStatements } from "@/helpers/reconciler/reconciler-bulk";
 import DemoSeeder from "@/helpers/reconciler/demo-seeder";
 import { ToolbarButton } from "@/helpers/reconciler/ui";
-import WipeStatementDialog from "@/components/reconciler/WipeStatementDialog";
 
-/* ----------------------------- tiny UI helpers ---------------------------- */
+/* ----------------------------- small UI helpers ---------------------------- */
 
 const moneyFmt = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -84,8 +83,6 @@ export default function ReconcilerPage() {
   const isDemo = pathname?.startsWith("/demo") ?? false;
   const router = useRouter();
 
-  const ignoreNextUrl = React.useRef(false);
-
   // show/hide user column if multi-user setup
   const { singleUser, setupComplete } = useSpenders();
   const showUserCol = setupComplete && singleUser === false;
@@ -102,12 +99,14 @@ export default function ReconcilerPage() {
   const [openWizard, setOpenWizard] = React.useState(false);
 
   const [wipeOpen, setWipeOpen] = React.useState(false);
-  const [justCleared, setJustCleared] = React.useState(false); // show re-import banner when true
+  const [justCleared, setJustCleared] = React.useState(false); // banner for re-import
+
+  // Toast + row highlight (restored)
+  const [liveMsg, setLiveMsg] = React.useState<string>("");
+  const [flashIds, setFlashIds] = React.useState<Set<string>>(new Set());
 
   // Mount demo seeder only on /demo
-  const onDemo = isDemo;
-  // eslint-disable-next-line react/jsx-no-useless-fragment
-  const DemoMount = onDemo ? <DemoSeeder /> : <></>;
+  const DemoMount = isDemo ? <DemoSeeder /> : <></>;
 
   // bootstrap once
   const booted = React.useRef(false);
@@ -120,7 +119,6 @@ export default function ReconcilerPage() {
 
     if (!haveAny) {
       if (!isDemo) {
-        // No data → open wizard
         setStatements({});
         setTransactions([]);
         setInputs({
@@ -132,10 +130,10 @@ export default function ReconcilerPage() {
         booted.current = true;
         return;
       }
-      // On /demo, DemoSeeder populates readIndex() and provider state itself.
+      // On /demo, DemoSeeder populates readIndex() + provider state.
     }
 
-    // choose a month
+    // choose month
     const saved = readCurrentId();
     const selected =
       new URLSearchParams(
@@ -164,9 +162,7 @@ export default function ReconcilerPage() {
         totalWithdrawals: s.inputs?.totalWithdrawals ?? 0,
       });
 
-      // Build tx → rules → canon → cashback tag
       const rules = readCatRules();
-
       let base: any[] = [];
       if (Array.isArray(s.cachedTx) && s.cachedTx.length) {
         base = s.cachedTx;
@@ -178,7 +174,7 @@ export default function ReconcilerPage() {
 
       let withRules = applyCategoryRulesTo(rules, base, applyAlias);
       let normalized = withCanonicalCategories(withRules, { isDemo });
-      normalized = tagCashBackLine(normalized); // <-- ensure cash-back tagged exactly once
+      normalized = tagCashBackLine(normalized);
 
       setTransactions(normalized);
       setStatements(readIndex());
@@ -186,31 +182,23 @@ export default function ReconcilerPage() {
       setTransactions([]);
     }
 
-    // mirror URL (non-demo)
     if (!isDemo) {
       const sp = new URLSearchParams(
         typeof window !== "undefined" ? window.location.search : ""
       );
       sp.set("statement", selected);
-      ignoreNextUrl.current = true;
       router.replace(`${pathname}?${sp.toString()}`);
     }
 
     booted.current = true;
   }, [isDemo, pathname, router, setInputs, setTransactions]);
 
-  const searchParams = useSearchParams();
-  const qidFromUrl = searchParams?.get("statement") || "";
-
-  // respond to URL ?statement changes
+  // respond to URL ?statement changes (single source of truth)
   React.useEffect(() => {
-    // If we programmatically changed the URL, skip reacting once
-    if (ignoreNextUrl.current) {
-      ignoreNextUrl.current = false;
-      return;
-    }
-
-    const qid = qidFromUrl;
+    const sp = new URLSearchParams(
+      typeof window !== "undefined" ? window.location.search : ""
+    );
+    const qid = sp.get("statement");
     if (!qid || qid === currentId) return;
 
     const idx = readIndex();
@@ -234,23 +222,23 @@ export default function ReconcilerPage() {
       const res = rebuildFromPages(sanitized, s.stmtYear, applyAlias);
       base = res.txs;
     }
-
     let withRules = applyCategoryRulesTo(rules, base, applyAlias);
     let normalized = withCanonicalCategories(withRules, { isDemo });
     normalized = tagCashBackLine(normalized);
 
     setTransactions(normalized);
     setStatements(readIndex());
-  }, [qidFromUrl, currentId, isDemo, setInputs, setTransactions]);
+  }, [currentId, setInputs, setTransactions, isDemo]);
 
-  // switcher handler
+  // switcher handler (also mirrors URL for non-demo)
   function onSwitchStatement(id: string) {
-    setCurrentId(id);
-    writeCurrentId(id);
-
+    if (!id) return;
     const idx = readIndex();
     const s = idx[id];
     if (!s) return;
+
+    setCurrentId(id);
+    writeCurrentId(id);
 
     setInputs({
       beginningBalance: s.inputs?.beginningBalance ?? 0,
@@ -278,15 +266,14 @@ export default function ReconcilerPage() {
         typeof window !== "undefined" ? window.location.search : ""
       );
       sp.set("statement", id);
-      ignoreNextUrl.current = true;
       router.replace(`${pathname}?${sp.toString()}`);
     }
   }
 
   function afterWizardSaved(newId: string) {
-    // The wizard upserts snapshots; just load the new one
     onSwitchStatement(newId);
     setOpenWizard(false);
+    setJustCleared(false);
   }
 
   /* --------------------------- derived view data -------------------------- */
@@ -365,22 +352,19 @@ export default function ReconcilerPage() {
         return;
       }
 
-      // Build a next selection before mutation (prefer previous month, else next)
-      const keys = Object.keys(idx).sort(); // YYYY-MM strings sort chronologically
+      const keys = Object.keys(idx).sort(); // YYYY-MM
       const i = keys.indexOf(currentId);
       const nextId =
         (i > 0 ? keys[i - 1] : undefined) ??
         (i >= 0 && i < keys.length - 1 ? keys[i + 1] : undefined) ??
         "";
 
-      // Delete the month from the index
       delete idx[currentId];
       localStorage.setItem(
         "reconciler.statements.index.v2",
         JSON.stringify(idx)
       );
 
-      // If we removed the current one, move selection and clear view state
       if (nextId) {
         setCurrentId(nextId);
         writeCurrentId(nextId);
@@ -395,7 +379,7 @@ export default function ReconcilerPage() {
         totalDeposits: 0,
         totalWithdrawals: 0,
       } as any);
-      setJustCleared(false); // no re-import banner on full removal
+      setJustCleared(false);
     } finally {
       setWipeOpen(false);
     }
@@ -422,14 +406,13 @@ export default function ReconcilerPage() {
       };
       upsertStatement(cleared);
 
-      // Reflect in UI
       setTransactions([]);
       setInputs({
         beginningBalance: 0,
         totalDeposits: 0,
         totalWithdrawals: 0,
       } as any);
-      setJustCleared(true); // show the “please import again” banner
+      setJustCleared(true);
     } finally {
       setWipeOpen(false);
     }
@@ -473,7 +456,6 @@ export default function ReconcilerPage() {
               className="w-44 sm:w-56"
             />
 
-            {/* NEW: Reset button */}
             <button
               type="button"
               onClick={() => setWipeOpen(true)}
@@ -483,7 +465,6 @@ export default function ReconcilerPage() {
               Reset…
             </button>
 
-            {/* Existing: + New Statement button */}
             <ToolbarButton onClick={() => setOpenWizard(true)}>
               + New Statement
             </ToolbarButton>
@@ -546,7 +527,12 @@ export default function ReconcilerPage() {
                 </thead>
                 <tbody>
                   {g.rows.map((t) => (
-                    <tr key={t.id} className="border-t border-slate-800">
+                    <tr
+                      key={t.id}
+                      className={`border-t border-slate-800 transition-colors ${
+                        flashIds.has(t.id) ? "bg-emerald-900/30" : ""
+                      }`}
+                    >
                       <td className="p-2">{prettyDesc(t.description)}</td>
                       <td className="p-2">
                         {(() => {
@@ -568,7 +554,7 @@ export default function ReconcilerPage() {
 
                                 ensureCategoryExists(label);
 
-                                // Stable keys from description (tokens + phrases)
+                                // Keys from description (phrases for disambiguation)
                                 const aliasLabel =
                                   applyAlias(
                                     stripAuthAndCard(t.description || "")
@@ -578,6 +564,7 @@ export default function ReconcilerPage() {
                                   aliasLabel
                                 );
 
+                                // Per-tx override (idempotent)
                                 const k = keyForTx(
                                   t.date || "",
                                   t.description || "",
@@ -588,7 +575,12 @@ export default function ReconcilerPage() {
                                 if (phraseKeys.length)
                                   upsertCategoryRules(phraseKeys, label);
 
-                                // Re-run table with current rules; then canonicalize + tag cash-back
+                                // BEFORE map for diff
+                                const before = new Map(
+                                  transactions.map((r: any) => [r.id, catOf(r)])
+                                );
+
+                                // Re-run rules → canon → tag CB
                                 const rules = readCatRules();
                                 let updated = applyCategoryRulesTo(
                                   rules,
@@ -600,14 +592,14 @@ export default function ReconcilerPage() {
                                 });
                                 updated = tagCashBackLine(updated);
 
-                                // Explicitly set this row
+                                // Explicitly set clicked row
                                 updated = updated.map((r) =>
                                   r.id === t.id
                                     ? { ...r, categoryOverride: label }
                                     : r
                                 );
 
-                                // In-view bulk by merchant tokens, but NEVER cross CB ↔ non-CB
+                                // In-view bulk by merchant tokens; never mix CB vs non-CB
                                 const anchorTokens = merchantTokenSet(
                                   t.description || ""
                                 );
@@ -635,7 +627,7 @@ export default function ReconcilerPage() {
                                       r.amount ?? 0,
                                       r.description || ""
                                     );
-                                    return rIsCB === anchorIsCB; // guard: don't mix cash-back line with normal line
+                                    return rIsCB === anchorIsCB;
                                   });
 
                                   const MAX_BULK = 24;
@@ -656,9 +648,17 @@ export default function ReconcilerPage() {
                                   }
                                 }
 
+                                // AFTER diff → changed ids
+                                const changed = updated.filter(
+                                  (r: any) => before.get(r.id) !== catOf(r)
+                                );
+                                const changedIds = new Set(
+                                  changed.map((r: any) => r.id)
+                                );
+
                                 setTransactions(updated);
 
-                                // Persist snapshot (idempotent)
+                                // Persist snapshot
                                 try {
                                   const idx = readIndex();
                                   const snap = idx[currentId];
@@ -676,12 +676,32 @@ export default function ReconcilerPage() {
                                   }
                                 } catch {}
 
-                                // Cross-statement bulk (safe default excludes CB inside helper)
+                                // Cross-statement bulk (helper internally avoids CB mixing)
                                 bulkApplyOverrideAcrossAllStatements(
                                   t.description || "",
                                   label,
                                   isDemo
                                 );
+
+                                // Visual feedback: highlight + toast
+                                if (changedIds.size) {
+                                  setFlashIds(changedIds);
+                                  setLiveMsg(
+                                    `Applied “${label}” to ${
+                                      changedIds.size
+                                    } transaction${
+                                      changedIds.size > 1 ? "s" : ""
+                                    } in this view.`
+                                  );
+                                  window.setTimeout(
+                                    () => setFlashIds(new Set()),
+                                    1200
+                                  );
+                                  window.setTimeout(() => setLiveMsg(""), 2500);
+                                } else {
+                                  setLiveMsg(`Updated to “${label}”.`);
+                                  window.setTimeout(() => setLiveMsg(""), 1500);
+                                }
                               }}
                             />
                           );
@@ -748,6 +768,32 @@ export default function ReconcilerPage() {
           )}
         </Panel>
       </div>
+
+      {/* Toast (restored) */}
+      <AnimatePresence>
+        {liveMsg && (
+          <div className="fixed top-4 right-4 z-50 pointer-events-none">
+            <motion.div
+              key={liveMsg}
+              initial={{ opacity: 0, x: 64 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 64 }}
+              transition={{
+                type: "spring",
+                stiffness: 420,
+                damping: 32,
+                mass: 0.7,
+              }}
+              className="pointer-events-auto px-3 py-1.5 rounded-lg border border-emerald-500/40
+                         bg-emerald-900/40 text-emerald-100 text-sm shadow-lg"
+              role="status"
+              aria-live="polite"
+            >
+              {liveMsg}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       <WipeStatementDialog
         open={wipeOpen}
